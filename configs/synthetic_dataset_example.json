@@ -1,0 +1,15 @@
+{
+  "mesh": "data/gt.obj",
+  "out_dir": "runs/synthetic_gt",
+  "views": 24,
+  "width": 512,
+  "height": 512,
+  "trajectory": "sphere",
+  "radius_scale": 2.5,
+  "elevation": 20.0,
+  "min_elevation": -60.0,
+  "max_elevation": 60.0,
+  "fov": 50.0,
+  "mode": "lit",
+  "normalize_mesh": true
+}

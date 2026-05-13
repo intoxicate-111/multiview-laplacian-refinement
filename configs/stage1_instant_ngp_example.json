@@ -1,0 +1,10 @@
+{
+  "backend": "nvidia_instant_ngp",
+  "scene_dir": "data/ngp_scene",
+  "output_mesh_path": "runs/stage1/instant_ngp_coarse.obj",
+  "transforms_filename": "transforms.json",
+  "aabb_scale": 16,
+  "convert_cv_to_gl": true,
+  "command_template": "instant-ngp --scene \"{scene_dir}\" --save_mesh \"{output_mesh_path}\"",
+  "notes": "Adjust command_template to match your local Instant-NGP build or wrapper. The adapter writes transforms.json before running the command."
+}

@@ -1,0 +1,11 @@
+{
+  "init_mesh": "data/init.obj",
+  "gt_mesh": "data/gt.obj",
+  "out_dir": "runs/stage2_oracle",
+  "operator_type": "uniform",
+  "lambda_lap": 1.0,
+  "lambda_anchor": 0.05,
+  "num_iters": 300,
+  "learning_rate": 0.005,
+  "noisy_laplacian_sigma": 0.01
+}

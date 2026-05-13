@@ -1,0 +1,6 @@
+{
+  "backend": "existing_mesh",
+  "mesh_path": "data/coarse.obj",
+  "output_mesh_path": "runs/stage1/coarse_normalized.obj",
+  "notes": "Replace this with an external backend later, e.g. COLMAP/OpenMVS or NeuS marching cubes."
+}
