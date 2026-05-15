@@ -195,6 +195,27 @@ Run oracle baselines:
 mlr oracle --init-mesh path/to/init.obj --gt-mesh path/to/gt.obj --out-dir runs/oracle
 ```
 
+Refine a generated coarse mesh with GT Laplacian supervision interpolated from the GT surface:
+
+```bash
+mlr gt-laplacian-refine \
+  --coarse-mesh runs/coarse/bunny_coarse.obj \
+  --gt-mesh inputs_sphere/bunny/mesh.obj \
+  --out runs/refined/bunny_gt_laplacian.obj \
+  --history-out runs/refined/bunny_gt_laplacian_history.json \
+  --operator uniform \
+  --iters 300 \
+  --lr 0.005 \
+  --lambda-lap 1.0 \
+  --lambda-anchor 0.05
+```
+
+This computes GT Laplacian coordinates on the GT mesh, projects each coarse
+vertex to the closest GT triangle, barycentrically interpolates the GT
+Laplacian value onto that coarse vertex, then optimizes coarse vertices with
+the existing Laplacian refinement loss. Use `--distance-confidence-scale` to
+down-weight coarse vertices that project far away from the GT surface.
+
 Import a coarse mesh baseline:
 
 ```bash

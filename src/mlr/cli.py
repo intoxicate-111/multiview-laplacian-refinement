@@ -11,10 +11,12 @@ from .coarse import (
     generate_coarse_mesh,
 )
 from .datasets import load_masks, load_reconstruction_input
+from .gt_laplacian import GTLaplacianTargetConfig, refine_coarse_mesh_with_gt_laplacian
 from .io import load_mesh, save_mesh
 from .metrics import correspondence_metrics
 from .nvdiffrec import NvdiffrecRunConfig, prepare_nvdiffrec_run
 from .oracle import OracleBaselineConfig, run_oracle_baselines
+from .refinement import RefinementConfig
 from .synthetic import (
     SyntheticRenderConfig,
     generate_synthetic_dataset_from_mesh,
@@ -71,6 +73,25 @@ def main(argv: list[str] | None = None) -> int:
     oracle.add_argument("--lambda-anchor", default=0.05, type=float)
     oracle.add_argument("--noise-sigma", default=0.01, type=float)
 
+    gt_lap = sub.add_parser(
+        "gt-laplacian-refine",
+        help="Refine a coarse mesh with GT Laplacian values interpolated from a GT surface.",
+    )
+    gt_lap.add_argument("--coarse-mesh", required=True, type=Path)
+    gt_lap.add_argument("--gt-mesh", required=True, type=Path)
+    gt_lap.add_argument("--out", required=True, type=Path)
+    gt_lap.add_argument("--history-out", type=Path)
+    gt_lap.add_argument("--operator", default="uniform", choices=["uniform", "cotangent"])
+    gt_lap.add_argument("--iters", default=300, type=int)
+    gt_lap.add_argument("--lr", default=5e-3, type=float)
+    gt_lap.add_argument("--lambda-lap", default=1.0, type=float)
+    gt_lap.add_argument("--lambda-anchor", default=0.05, type=float)
+    gt_lap.add_argument("--lambda-edge", default=0.0, type=float)
+    gt_lap.add_argument("--robust-loss", default="charbonnier", choices=["charbonnier", "huber", "l2"])
+    gt_lap.add_argument("--distance-confidence-scale", type=float)
+    gt_lap.add_argument("--min-confidence", default=0.0, type=float)
+    gt_lap.add_argument("--log-every", default=25, type=int)
+
     synthetic = sub.add_parser("synthetic", help="Render multi-view synthetic inputs from a mesh.")
     synthetic_input = synthetic.add_mutually_exclusive_group(required=True)
     synthetic_input.add_argument("--mesh", type=Path)
@@ -98,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_coarse_nvdiffrec(args)
     if args.command == "oracle":
         return _run_oracle(args)
+    if args.command == "gt-laplacian-refine":
+        return _run_gt_laplacian_refine(args)
     if args.command == "synthetic":
         return _run_synthetic(args)
     raise ValueError(args.command)
@@ -238,6 +261,61 @@ def _run_oracle(args: argparse.Namespace) -> int:
     with (args.out_dir / "metrics.json").open("w", encoding="utf-8") as handle:
         json.dump(metrics, handle, indent=2)
     print(json.dumps(metrics, indent=2))
+    return 0
+
+
+def _run_gt_laplacian_refine(args: argparse.Namespace) -> int:
+    coarse_mesh = load_mesh(args.coarse_mesh)
+    gt_mesh = load_mesh(args.gt_mesh)
+    target_config = GTLaplacianTargetConfig(
+        operator_type=args.operator,
+        distance_confidence_scale=args.distance_confidence_scale,
+        min_confidence=args.min_confidence,
+    )
+    refinement_config = RefinementConfig(
+        operator_type=args.operator,
+        lambda_lap=args.lambda_lap,
+        lambda_anchor=args.lambda_anchor,
+        lambda_edge=args.lambda_edge,
+        num_iters=args.iters,
+        learning_rate=args.lr,
+        robust_loss=args.robust_loss,
+        log_every=args.log_every,
+    )
+    result = refine_coarse_mesh_with_gt_laplacian(
+        coarse_mesh,
+        gt_mesh,
+        target_config=target_config,
+        refinement_config=refinement_config,
+        anchors=coarse_mesh.vertices,
+    )
+    save_mesh(result.mesh, args.out)
+
+    summary = {
+        "refined_mesh": str(args.out),
+        "coarse_vertices": coarse_mesh.num_vertices,
+        "coarse_faces": coarse_mesh.num_faces,
+        "gt_vertices": gt_mesh.num_vertices,
+        "gt_faces": gt_mesh.num_faces,
+        "operator": args.operator,
+        "mean_gt_projection_distance": float(result.target.distances.mean()),
+        "max_gt_projection_distance": float(result.target.distances.max(initial=0.0)),
+        "mean_confidence": float(result.target.confidence.mean()),
+        "initial_loss": result.history[0]["loss"] if result.history else None,
+        "final_loss": result.history[-1]["loss"] if result.history else None,
+    }
+    if args.history_out is not None:
+        args.history_out.parent.mkdir(parents=True, exist_ok=True)
+        with args.history_out.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "summary": summary,
+                    "history": result.history,
+                },
+                handle,
+                indent=2,
+            )
+    print(json.dumps(summary, indent=2))
     return 0
 
 
