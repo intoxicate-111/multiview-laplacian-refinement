@@ -80,6 +80,24 @@ class SyntheticDatasetTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 render_mesh_view(mesh, dataset.cameras[0], SyntheticRenderConfig(backend="bogus"))
 
+    def test_cuda_backend_renders_or_fails_clearly(self):
+        mesh = Mesh(
+            vertices=np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]),
+            faces=np.array([[0, 1, 2]]),
+        )
+        config = SyntheticRenderConfig(num_views=1, width=16, height=16)
+        with tempfile.TemporaryDirectory() as tmp:
+            dataset = generate_synthetic_dataset(mesh, tmp, config)
+            cuda_config = SyntheticRenderConfig(backend="cuda", width=16, height=16)
+            try:
+                rgb, mask, depth = render_mesh_view(mesh, dataset.cameras[0], cuda_config)
+            except RuntimeError as exc:
+                self.assertIn("CUDA backend requires", str(exc))
+            else:
+                self.assertEqual(rgb.shape, (16, 16, 3))
+                self.assertEqual(mask.shape, (16, 16))
+                self.assertEqual(depth.shape, (16, 16))
+
     def test_sphere_trajectory_uses_multiple_elevations(self):
         mesh = Mesh(
             vertices=np.array(

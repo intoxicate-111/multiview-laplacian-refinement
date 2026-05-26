@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,7 @@ def load_mesh(path: str | Path) -> Mesh:
     if suffix == ".obj":
         return load_obj(path)
     if suffix == ".ply":
-        return load_ascii_ply(path)
+        return load_ply(path)
     raise ValueError(f"Unsupported mesh format: {path.suffix}")
 
 
@@ -45,7 +46,7 @@ def load_obj(path: Path) -> Mesh:
                     vertex_token = item.split("/")[0]
                     face.append(int(vertex_token) - 1)
                 faces.append(face)
-    mesh = Mesh(np.asarray(vertices), np.asarray(faces, dtype=np.int64))
+    mesh = Mesh(np.asarray(vertices), np.asarray(faces, dtype=np.int64).reshape((-1, 3)))
     if len(normals) == mesh.num_vertices:
         mesh.normals = np.asarray(normals, dtype=np.float64)
     else:
@@ -71,36 +72,168 @@ def save_obj(mesh: Mesh, path: Path) -> None:
                 handle.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
 
 
-def load_ascii_ply(path: Path) -> Mesh:
-    with path.open("r", encoding="utf-8") as handle:
-        if handle.readline().strip() != "ply":
-            raise ValueError("Only ASCII PLY files are supported.")
-        vertex_count = None
-        face_count = None
-        while True:
-            line = handle.readline()
-            if not line:
-                raise ValueError("Unexpected end of PLY header.")
-            line = line.strip()
-            if line.startswith("format") and "ascii" not in line:
-                raise ValueError("Only ASCII PLY files are supported.")
-            if line.startswith("element vertex"):
-                vertex_count = int(line.split()[-1])
-            elif line.startswith("element face"):
-                face_count = int(line.split()[-1])
-            elif line == "end_header":
-                break
-        if vertex_count is None or face_count is None:
+_PLY_STRUCT_FORMATS = {
+    "char": "b",
+    "int8": "b",
+    "uchar": "B",
+    "uint8": "B",
+    "short": "h",
+    "int16": "h",
+    "ushort": "H",
+    "uint16": "H",
+    "int": "i",
+    "int32": "i",
+    "uint": "I",
+    "uint32": "I",
+    "float": "f",
+    "float32": "f",
+    "double": "d",
+    "float64": "d",
+}
+
+
+def load_ply(path: Path) -> Mesh:
+    with path.open("rb") as handle:
+        if handle.readline().decode("ascii").strip() != "ply":
+            raise ValueError("Invalid PLY header.")
+        header = _read_ply_header(handle)
+        if header["vertex_count"] is None or header["face_count"] is None:
             raise ValueError("PLY header must declare vertex and face counts.")
-        vertices = []
-        for _ in range(vertex_count):
-            parts = handle.readline().split()
-            vertices.append([float(parts[0]), float(parts[1]), float(parts[2])])
-        faces = []
-        for _ in range(face_count):
-            parts = handle.readline().split()
-            count = int(parts[0])
-            if count != 3:
-                continue
-            faces.append([int(parts[1]), int(parts[2]), int(parts[3])])
-    return Mesh(np.asarray(vertices), np.asarray(faces, dtype=np.int64)).ensure_normals()
+        fmt = header["format"]
+        if fmt == "ascii":
+            vertices, faces = _read_ascii_ply_body(handle, header)
+        elif fmt == "binary_little_endian":
+            vertices, faces = _read_binary_ply_body(handle, header, "<")
+        elif fmt == "binary_big_endian":
+            vertices, faces = _read_binary_ply_body(handle, header, ">")
+        else:
+            raise ValueError(f"Unsupported PLY format: {fmt}")
+    return Mesh(np.asarray(vertices), np.asarray(faces, dtype=np.int64).reshape((-1, 3))).ensure_normals()
+
+
+def load_ascii_ply(path: Path) -> Mesh:
+    return load_ply(path)
+
+
+def _read_ply_header(handle) -> dict:
+    fmt = None
+    vertex_count = None
+    face_count = None
+    vertex_properties: list[tuple[str, str]] = []
+    face_properties: list[tuple] = []
+    element = None
+    while True:
+        raw = handle.readline()
+        if not raw:
+            raise ValueError("Unexpected end of PLY header.")
+        line = raw.decode("ascii").strip()
+        if not line or line.startswith("comment"):
+            continue
+        parts = line.split()
+        if parts[0] == "format":
+            fmt = parts[1]
+        elif parts[0] == "element":
+            element = parts[1]
+            if element == "vertex":
+                vertex_count = int(parts[2])
+            elif element == "face":
+                face_count = int(parts[2])
+        elif parts[0] == "property":
+            if element == "vertex" and parts[1] != "list":
+                vertex_properties.append((parts[1], parts[2]))
+            elif element == "face":
+                if parts[1] == "list":
+                    face_properties.append(("list", parts[2], parts[3], parts[4]))
+                else:
+                    face_properties.append(("scalar", parts[1], parts[2]))
+        elif parts[0] == "end_header":
+            break
+    if fmt is None:
+        raise ValueError("PLY header must declare a format.")
+    return {
+        "format": fmt,
+        "vertex_count": vertex_count,
+        "face_count": face_count,
+        "vertex_properties": vertex_properties,
+        "face_properties": face_properties,
+    }
+
+
+def _read_ascii_ply_body(handle, header: dict) -> tuple[list[list[float]], list[list[int]]]:
+    vertex_properties = header["vertex_properties"]
+    xyz = _ply_xyz_indices(vertex_properties)
+    vertices = []
+    for _ in range(header["vertex_count"]):
+        parts = handle.readline().decode("ascii").split()
+        vertices.append([float(parts[xyz[0]]), float(parts[xyz[1]]), float(parts[xyz[2]])])
+
+    faces = []
+    for _ in range(header["face_count"]):
+        parts = handle.readline().decode("ascii").split()
+        cursor = 0
+        vertex_indices = None
+        for prop in header["face_properties"]:
+            if prop[0] == "list":
+                count = int(parts[cursor])
+                cursor += 1
+                values = [int(value) for value in parts[cursor : cursor + count]]
+                cursor += count
+                if vertex_indices is None:
+                    vertex_indices = values
+            else:
+                cursor += 1
+        if vertex_indices:
+            faces.extend(_triangulate_face(vertex_indices))
+    return vertices, faces
+
+
+def _read_binary_ply_body(handle, header: dict, endian: str) -> tuple[list[list[float]], list[list[int]]]:
+    vertex_properties = header["vertex_properties"]
+    xyz = _ply_xyz_indices(vertex_properties)
+    vertex_struct = struct.Struct(endian + "".join(_ply_struct_code(prop_type) for prop_type, _ in vertex_properties))
+    vertices = []
+    for _ in range(header["vertex_count"]):
+        values = vertex_struct.unpack(handle.read(vertex_struct.size))
+        vertices.append([float(values[xyz[0]]), float(values[xyz[1]]), float(values[xyz[2]])])
+
+    faces = []
+    for _ in range(header["face_count"]):
+        vertex_indices = None
+        for prop in header["face_properties"]:
+            if prop[0] == "list":
+                count = _read_ply_scalar(handle, prop[1], endian)
+                values = [_read_ply_scalar(handle, prop[2], endian) for _ in range(count)]
+                if vertex_indices is None:
+                    vertex_indices = values
+            else:
+                _read_ply_scalar(handle, prop[1], endian)
+        if vertex_indices:
+            faces.extend(_triangulate_face(vertex_indices))
+    return vertices, faces
+
+
+def _ply_xyz_indices(vertex_properties: list[tuple[str, str]]) -> tuple[int, int, int]:
+    names = [name for _, name in vertex_properties]
+    try:
+        return names.index("x"), names.index("y"), names.index("z")
+    except ValueError as exc:
+        raise ValueError("PLY vertex properties must include x, y and z.") from exc
+
+
+def _ply_struct_code(ply_type: str) -> str:
+    try:
+        return _PLY_STRUCT_FORMATS[ply_type]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported PLY property type: {ply_type}") from exc
+
+
+def _read_ply_scalar(handle, ply_type: str, endian: str) -> int | float:
+    fmt = endian + _ply_struct_code(ply_type)
+    size = struct.calcsize(fmt)
+    return struct.unpack(fmt, handle.read(size))[0]
+
+
+def _triangulate_face(indices: list[int]) -> list[list[int]]:
+    if len(indices) < 3:
+        return []
+    return [[indices[0], indices[i], indices[i + 1]] for i in range(1, len(indices) - 1)]

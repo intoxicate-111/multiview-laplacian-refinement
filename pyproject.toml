@@ -20,6 +20,9 @@ dev = [
 gpu = [
   "moderngl>=5.8",
 ]
+cuda = [
+  "torch>=2.1",
+]
 
 [project.scripts]
 mlr = "mlr.cli:main"

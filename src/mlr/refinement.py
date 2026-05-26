@@ -22,6 +22,7 @@ class RefinementConfig:
     huber_delta: float = 1e-2
     freeze_pseudo_target: bool = True
     log_every: int = 25
+    print_every: int = 0
 
 
 @dataclass
@@ -93,6 +94,16 @@ def refine_mesh_with_laplacian(
 
         if step == 1 or step == config.num_iters or step % config.log_every == 0:
             history.append({"iter": float(step), "loss": float(loss), **parts})
+        if config.print_every > 0 and (step == 1 or step == config.num_iters or step % config.print_every == 0):
+            extras = ", ".join(f"{name}={value:.6f}" for name, value in parts.items())
+            suffix = f", {extras}" if extras else ""
+            if step == 1:
+                tag = "start"
+            elif step == config.num_iters:
+                tag = "final"
+            else:
+                tag = "iter"
+            print(f"{tag} step={step} loss={loss:.6f}{suffix}")
 
     refined = mesh.with_vertices(vertices)
     return RefinementResult(mesh=refined, vertices=vertices, history=history, operator=operator)
@@ -131,6 +142,14 @@ def refine_mesh_position_only(
         vertices -= config.learning_rate * m_hat / (np.sqrt(v_hat) + 1e-8)
         if step == 1 or step == config.num_iters or step % config.log_every == 0:
             history.append({"iter": float(step), "loss": float(loss), "position": float(loss)})
+        if config.print_every > 0 and (step == 1 or step == config.num_iters or step % config.print_every == 0):
+            if step == 1:
+                tag = "start"
+            elif step == config.num_iters:
+                tag = "final"
+            else:
+                tag = "iter"
+            print(f"{tag} step={step} loss={loss:.6f} position={loss:.6f}")
     return RefinementResult(mesh=mesh.with_vertices(vertices), vertices=vertices, history=history)
 
 

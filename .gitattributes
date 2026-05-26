@@ -1,0 +1,5 @@
+*.obj -text
+*.ply -text
+*.npy -text
+*.dmap -text
+*.mvs -text

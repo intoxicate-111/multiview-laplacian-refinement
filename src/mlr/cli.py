@@ -8,8 +8,12 @@ from .coarse import (
     ExistingMeshGenerator,
     NvidiaInstantNGPMeshGenerator,
     NvidiaNvdiffrecMeshGenerator,
+    OpenMVSCommandMeshGenerator,
     generate_coarse_mesh,
+    write_colmap_text_model,
+    write_openmvg_sfm_data,
 )
+from .coarse_lap_oracle import CoarseGraphOracleConfig, run_coarse_graph_laplacian_oracles
 from .datasets import load_masks, load_reconstruction_input
 from .gt_laplacian import GTLaplacianTargetConfig, refine_coarse_mesh_with_gt_laplacian
 from .io import load_mesh, save_mesh
@@ -62,6 +66,18 @@ def main(argv: list[str] | None = None) -> int:
     coarse_nvdiffrec.add_argument("--no-visibility", action="store_true")
     coarse_nvdiffrec.add_argument("--prepare-only", action="store_true")
 
+    coarse_openmvs = sub.add_parser("coarse-openmvs", help="Generate a coarse mesh with OpenMVS.")
+    coarse_openmvs.add_argument("--dataset", required=True, type=Path)
+    coarse_openmvs.add_argument("--scene-dir", required=True, type=Path)
+    coarse_openmvs.add_argument("--out", required=True, type=Path)
+    coarse_openmvs.add_argument("--command-template", default="")
+    coarse_openmvs.add_argument("--interface", default="colmap", choices=["colmap", "openmvg"])
+    coarse_openmvs.add_argument("--colmap-dir", default="colmap")
+    coarse_openmvs.add_argument("--sfm-data", default="sfm_data.json")
+    coarse_openmvs.add_argument("--no-copy-images", action="store_true")
+    coarse_openmvs.add_argument("--no-visibility", action="store_true")
+    coarse_openmvs.add_argument("--prepare-only", action="store_true")
+
     oracle = sub.add_parser("oracle", help="Run known-topology Laplacian oracle baselines.")
     oracle.add_argument("--init-mesh", required=True, type=Path)
     oracle.add_argument("--gt-mesh", required=True, type=Path)
@@ -92,6 +108,29 @@ def main(argv: list[str] | None = None) -> int:
     gt_lap.add_argument("--min-confidence", default=0.0, type=float)
     gt_lap.add_argument("--log-every", default=25, type=int)
 
+    coarse_lap = sub.add_parser(
+        "coarse-lap-oracle",
+        help="Run coarse-graph-compatible GT Laplacian oracle experiments.",
+    )
+    coarse_lap.add_argument("--coarse-mesh", required=True, type=Path)
+    coarse_lap.add_argument("--gt-mesh", required=True, type=Path)
+    coarse_lap.add_argument("--output-dir", required=True, type=Path)
+    coarse_lap.add_argument("--operator", default="uniform", choices=["uniform"])
+    coarse_lap.add_argument("--iters", default=3000, type=int)
+    coarse_lap.add_argument("--lr", default=5e-3, type=float)
+    coarse_lap.add_argument("--lambda-lap", default=1.0, type=float)
+    coarse_lap.add_argument("--lambda-anchor", default=0.01, type=float)
+    coarse_lap.add_argument("--lambda-pos", default=0.1, type=float)
+    coarse_lap.add_argument("--lambda-edge", default=0.0, type=float)
+    coarse_lap.add_argument("--normalized-eps", default=1e-8, type=float)
+    coarse_lap.add_argument("--log-every", default=25, type=int)
+    coarse_lap.add_argument("--print-every", default=0, type=int)
+    coarse_lap.add_argument("--chamfer-samples", default=5000, type=int)
+    coarse_lap.add_argument("--seed", default=7, type=int)
+    coarse_lap.add_argument("--previous-refined-mesh", type=Path)
+    coarse_lap.add_argument("--previous-history", type=Path)
+    gt_lap.add_argument("--print-every", default=0, type=int)
+
     synthetic = sub.add_parser("synthetic", help="Render multi-view synthetic inputs from a mesh.")
     synthetic_input = synthetic.add_mutually_exclusive_group(required=True)
     synthetic_input.add_argument("--mesh", type=Path)
@@ -107,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     synthetic.add_argument("--max-elevation", default=60.0, type=float)
     synthetic.add_argument("--fov", default=50.0, type=float)
     synthetic.add_argument("--mode", default="lit", choices=["lit", "normal", "depth"])
-    synthetic.add_argument("--backend", default="cpu", choices=["cpu", "opengl"])
+    synthetic.add_argument("--backend", default="cpu", choices=["cpu", "opengl", "cuda"])
     synthetic.add_argument("--no-normalize", action="store_true")
 
     args = parser.parse_args(argv)
@@ -121,8 +160,12 @@ def main(argv: list[str] | None = None) -> int:
         return _run_oracle(args)
     if args.command == "gt-laplacian-refine":
         return _run_gt_laplacian_refine(args)
+    if args.command == "coarse-lap-oracle":
+        return _run_coarse_lap_oracle(args)
     if args.command == "synthetic":
         return _run_synthetic(args)
+    if args.command == "coarse-openmvs":
+        return _run_coarse_openmvs(args)
     raise ValueError(args.command)
 
 
@@ -236,6 +279,102 @@ def _run_coarse_nvdiffrec(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_coarse_openmvs(args: argparse.Namespace) -> int:
+    data = load_reconstruction_input(args.dataset)
+    masks = load_masks(data.mask_paths)
+    scene_dir = Path(args.scene_dir)
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    sfm_data_path = scene_dir / args.sfm_data
+    colmap_path = scene_dir / args.colmap_dir
+    output_mesh_path = Path(args.out)
+    output_mesh_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.interface == "openmvg":
+        write_openmvg_sfm_data(sfm_data_path, data.image_paths, data.cameras, scene_dir=scene_dir)
+    else:
+        write_colmap_text_model(
+            colmap_path,
+            data.image_paths,
+            data.cameras,
+            copy_images=not args.no_copy_images,
+        )
+
+    command_template = args.command_template or _default_openmvs_command_template(args.interface)
+    if args.prepare_only:
+        payload = {
+            "mode": "prepare_only",
+            "interface": args.interface,
+            "sfm_data_path": str(sfm_data_path.resolve()),
+            "colmap_path": str(colmap_path.resolve()),
+            "colmap_sparse_path": str((colmap_path / "sparse").resolve()),
+            "colmap_images_path": str((colmap_path / "images").resolve()),
+            "scene_dir": str(scene_dir.resolve()),
+            "next_command": command_template.format(
+                scene_dir=str(scene_dir.resolve()),
+                sfm_data_path=str(sfm_data_path.resolve()),
+                colmap_path=str(colmap_path.resolve()),
+                colmap_sparse_path=str((colmap_path / "sparse").resolve()),
+                colmap_images_path=str((colmap_path / "images").resolve()),
+                output_mesh_path=str(output_mesh_path.resolve()),
+            ),
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    backend = OpenMVSCommandMeshGenerator(
+        scene_dir=scene_dir,
+        output_mesh_path=args.out,
+        command_template=command_template,
+        sfm_data_filename=args.sfm_data,
+        interface_format=args.interface,
+        colmap_dirname=args.colmap_dir,
+        copy_images=not args.no_copy_images,
+        compute_visibility=not args.no_visibility,
+    )
+    print(f"Loaded dataset with {len(data.image_paths)} images from {args.dataset}", flush=True)
+    if args.interface == "openmvg":
+        print(f"Writing OpenMVG sfm_data to {sfm_data_path}", flush=True)
+    else:
+        print(f"Writing COLMAP text model to {colmap_path}", flush=True)
+    print(f"Expected coarse mesh output: {args.out}", flush=True)
+    mesh = generate_coarse_mesh(data.image_paths, data.cameras, masks=masks, method=backend)
+    print(
+        json.dumps(
+            {
+                "coarse_mesh": str(args.out),
+                "vertices": mesh.num_vertices,
+                "faces": mesh.num_faces,
+                "backend": mesh.attributes.get("coarse_backend", "openmvs"),
+                "interface": mesh.attributes.get("openmvs_interface_format", args.interface),
+                "openmvg_sfm_data": mesh.attributes.get("openmvg_sfm_data"),
+                "colmap_path": mesh.attributes.get("colmap_path"),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _default_openmvs_command_template(interface: str) -> str:
+    if interface == "colmap":
+        return (
+            'InterfaceCOLMAP -w "{scene_dir}" -i "{colmap_path}" -o "{scene_dir}/scene.mvs" '
+            '--image-folder "{colmap_images_path}" && '
+            'DensifyPointCloud -w "{scene_dir}" -i "{scene_dir}/scene.mvs" -o "{scene_dir}/scene_dense.mvs" '
+            '--resolution-level 2 && '
+            'ReconstructMesh -w "{scene_dir}" -i "{scene_dir}/scene_dense.mvs" '
+            '-o "{output_mesh_path}" --export-type ply'
+        )
+    if interface == "openmvg":
+        return (
+            'InterfaceOpenMVG -w "{scene_dir}" -i "{sfm_data_path}" -o "{scene_dir}/scene.mvs" && '
+            'DensifyPointCloud -w "{scene_dir}" -i "{scene_dir}/scene.mvs" -o "{scene_dir}/scene_dense.mvs" '
+            '--resolution-level 2 && '
+            'ReconstructMesh -w "{scene_dir}" -i "{scene_dir}/scene_dense.mvs" '
+            '-o "{output_mesh_path}" --export-type ply'
+        )
+    raise ValueError(f"Unsupported OpenMVS interface: {interface}")
+
+
 def _run_oracle(args: argparse.Namespace) -> int:
     init_mesh = load_mesh(args.init_mesh)
     gt_mesh = load_mesh(args.gt_mesh)
@@ -281,6 +420,7 @@ def _run_gt_laplacian_refine(args: argparse.Namespace) -> int:
         learning_rate=args.lr,
         robust_loss=args.robust_loss,
         log_every=args.log_every,
+        print_every=args.print_every,
     )
     result = refine_coarse_mesh_with_gt_laplacian(
         coarse_mesh,
@@ -316,6 +456,46 @@ def _run_gt_laplacian_refine(args: argparse.Namespace) -> int:
                 indent=2,
             )
     print(json.dumps(summary, indent=2))
+    return 0
+
+
+def _run_coarse_lap_oracle(args: argparse.Namespace) -> int:
+    coarse_mesh = load_mesh(args.coarse_mesh)
+    gt_mesh = load_mesh(args.gt_mesh)
+    previous_mesh = load_mesh(args.previous_refined_mesh) if args.previous_refined_mesh else None
+    previous_history = None
+    if args.previous_history and args.previous_history.exists():
+        with args.previous_history.open("r", encoding="utf-8") as handle:
+            previous_history = json.load(handle)
+    config = CoarseGraphOracleConfig(
+        operator_type=args.operator,
+        num_iters=args.iters,
+        learning_rate=args.lr,
+        lambda_lap=args.lambda_lap,
+        lambda_anchor=args.lambda_anchor,
+        lambda_pos=args.lambda_pos,
+        lambda_edge=args.lambda_edge,
+        normalized_eps=args.normalized_eps,
+        log_every=args.log_every,
+        print_every=args.print_every,
+        chamfer_samples=args.chamfer_samples,
+        seed=args.seed,
+    )
+    print(
+        f"Loaded coarse mesh {args.coarse_mesh} ({coarse_mesh.num_vertices}v/{coarse_mesh.num_faces}f)",
+        flush=True,
+    )
+    print(f"Loaded GT mesh {args.gt_mesh} ({gt_mesh.num_vertices}v/{gt_mesh.num_faces}f)", flush=True)
+    print(f"Running coarse-graph Laplacian oracle experiments in {args.output_dir}", flush=True)
+    comparison = run_coarse_graph_laplacian_oracles(
+        coarse_mesh=coarse_mesh,
+        gt_mesh=gt_mesh,
+        output_dir=args.output_dir,
+        config=config,
+        previous_refined_mesh=previous_mesh,
+        previous_history=previous_history,
+    )
+    print(json.dumps(comparison, indent=2))
     return 0
 
 

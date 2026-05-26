@@ -344,6 +344,8 @@ def render_mesh_view(
     config: SyntheticRenderConfig | None = None,
 ) -> tuple[Array, Array, Array]:
     config = config or SyntheticRenderConfig()
+    if config.backend == "cuda":
+        return render_mesh_view_cuda(mesh, camera, config)
     if config.backend == "opengl":
         return render_mesh_view_opengl(mesh, camera, config)
     if config.backend != "cpu":
@@ -395,6 +397,185 @@ def render_mesh_view(
     if config.render_mode == "depth":
         rgb = _depth_to_rgb(depth, mask)
     return rgb, mask, depth
+
+
+def render_mesh_view_cuda(
+    mesh: Mesh,
+    camera: Camera,
+    config: SyntheticRenderConfig | None = None,
+) -> tuple[Array, Array, Array]:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError(
+            "CUDA backend requires PyTorch. Install a CUDA-enabled PyTorch build, "
+            "then install this package with: python -m pip install -e .[cuda]"
+        ) from exc
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA backend requires a CUDA-enabled PyTorch install and NVIDIA GPU.")
+    if not hasattr(torch.Tensor, "scatter_reduce_"):
+        raise RuntimeError("CUDA backend requires PyTorch with Tensor.scatter_reduce_ support.")
+
+    config = config or SyntheticRenderConfig(backend="cuda")
+    width, height = camera.image_size or (config.width, config.height)
+    mesh.ensure_normals()
+
+    device = torch.device("cuda")
+    vertices = torch.as_tensor(mesh.vertices, dtype=torch.float32, device=device)
+    faces = torch.as_tensor(mesh.faces, dtype=torch.long, device=device)
+    rotation = torch.as_tensor(camera.rotation, dtype=torch.float32, device=device)
+    translation = torch.as_tensor(camera.translation, dtype=torch.float32, device=device)
+    intrinsics = torch.as_tensor(camera.intrinsics, dtype=torch.float32, device=device)
+
+    cam_vertices = vertices @ rotation.T + translation.unsqueeze(0)
+    z = cam_vertices[:, 2]
+    safe_z = torch.where(torch.abs(z) < 1e-12, torch.full_like(z, 1e-12), z)
+    pixels_h = cam_vertices @ intrinsics.T
+    pixels = pixels_h[:, :2] / safe_z.unsqueeze(1)
+
+    tris_3d = vertices[faces]
+    face_normals = torch.cross(tris_3d[:, 1] - tris_3d[:, 0], tris_3d[:, 2] - tris_3d[:, 0], dim=1)
+    face_normals = face_normals / torch.linalg.norm(face_normals, dim=1, keepdim=True).clamp_min(1e-12)
+    face_colors = _cuda_face_colors(face_normals, config, device)
+
+    tri_pixels = pixels[faces]
+    tri_z = z[faces]
+    valid_faces = torch.all(tri_z > 1e-8, dim=1)
+    valid_faces &= _cuda_triangle_area2(tri_pixels).abs() > 1e-12
+
+    num_pixels = int(width * height)
+    depth_flat = torch.full((num_pixels,), float("inf"), dtype=torch.float32, device=device)
+    face_flat = torch.full((num_pixels,), -1, dtype=torch.long, device=device)
+    pixel_indices = torch.arange(num_pixels, device=device, dtype=torch.long)
+    ys = (pixel_indices // width).to(torch.float32) + 0.5
+    xs = (pixel_indices % width).to(torch.float32) + 0.5
+
+    max_face_pixel_pairs = 8_000_000
+    chunk_size = max(1, min(int(faces.shape[0]), max_face_pixel_pairs // max(num_pixels, 1)))
+    for start in range(0, int(faces.shape[0]), chunk_size):
+        end = min(start + chunk_size, int(faces.shape[0]))
+        chunk_valid = valid_faces[start:end]
+        if not bool(torch.any(chunk_valid)):
+            continue
+
+        chunk_pixels = tri_pixels[start:end][chunk_valid]
+        chunk_z = tri_z[start:end][chunk_valid]
+        chunk_face_ids = torch.arange(start, end, device=device, dtype=torch.long)[chunk_valid]
+        _cuda_rasterize_face_chunk(
+            chunk_pixels=chunk_pixels,
+            chunk_z=chunk_z,
+            chunk_face_ids=chunk_face_ids,
+            xs=xs,
+            ys=ys,
+            pixel_indices=pixel_indices,
+            depth_flat=depth_flat,
+            face_flat=face_flat,
+        )
+
+    mask_flat = face_flat >= 0
+    rgb_flat = torch.empty((num_pixels, 3), dtype=torch.uint8, device=device)
+    background = torch.as_tensor(config.background_color, dtype=torch.uint8, device=device)
+    rgb_flat[:] = background
+    if bool(torch.any(mask_flat)) and config.render_mode != "depth":
+        rgb_flat[mask_flat] = face_colors[face_flat[mask_flat]]
+
+    depth = depth_flat.reshape(height, width).detach().cpu().numpy().astype(np.float64)
+    mask = mask_flat.reshape(height, width).detach().cpu().numpy().astype(bool)
+    if config.render_mode == "depth":
+        rgb = _depth_to_rgb(depth, mask)
+    else:
+        rgb = rgb_flat.reshape(height, width, 3).detach().cpu().numpy()
+    return rgb, mask, depth
+
+
+def _cuda_triangle_area2(tri_pixels):
+    ab = tri_pixels[:, 1] - tri_pixels[:, 0]
+    ac = tri_pixels[:, 2] - tri_pixels[:, 0]
+    return ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0]
+
+
+def _cuda_face_colors(face_normals, config: SyntheticRenderConfig, device):
+    import torch
+
+    if config.render_mode == "normal":
+        return torch.clamp((face_normals * 0.5 + 0.5) * 255.0, 0.0, 255.0).to(torch.uint8)
+
+    object_color = torch.as_tensor(config.object_color, dtype=torch.float32, device=device)
+    light = torch.as_tensor(config.light_direction, dtype=torch.float32, device=device)
+    light = light / torch.linalg.norm(light).clamp_min(1e-12)
+    diffuse = torch.clamp(torch.sum(face_normals * light.unsqueeze(0), dim=1), min=0.0)
+    intensity = 0.25 + 0.75 * diffuse
+    colors = object_color.unsqueeze(0) * intensity.unsqueeze(1)
+    return torch.clamp(colors, 0.0, 255.0).to(torch.uint8)
+
+
+def _cuda_rasterize_face_chunk(
+    chunk_pixels,
+    chunk_z,
+    chunk_face_ids,
+    xs,
+    ys,
+    pixel_indices,
+    depth_flat,
+    face_flat,
+) -> None:
+    import torch
+
+    a = chunk_pixels[:, 0]
+    b = chunk_pixels[:, 1]
+    c = chunk_pixels[:, 2]
+    v0 = b - a
+    v1 = c - a
+
+    d00 = torch.sum(v0 * v0, dim=1)
+    d01 = torch.sum(v0 * v1, dim=1)
+    d11 = torch.sum(v1 * v1, dim=1)
+    denom = d00 * d11 - d01 * d01
+    valid = torch.abs(denom) > 1e-12
+    if not bool(torch.any(valid)):
+        return
+
+    a = a[valid]
+    v0 = v0[valid]
+    v1 = v1[valid]
+    d00 = d00[valid]
+    d01 = d01[valid]
+    d11 = d11[valid]
+    denom = denom[valid]
+    chunk_z = chunk_z[valid]
+    chunk_face_ids = chunk_face_ids[valid]
+
+    v2x = xs.unsqueeze(0) - a[:, 0].unsqueeze(1)
+    v2y = ys.unsqueeze(0) - a[:, 1].unsqueeze(1)
+    d20 = v2x * v0[:, 0].unsqueeze(1) + v2y * v0[:, 1].unsqueeze(1)
+    d21 = v2x * v1[:, 0].unsqueeze(1) + v2y * v1[:, 1].unsqueeze(1)
+
+    denom = denom.unsqueeze(1)
+    v = (d11.unsqueeze(1) * d20 - d01.unsqueeze(1) * d21) / denom
+    w = (d00.unsqueeze(1) * d21 - d01.unsqueeze(1) * d20) / denom
+    u = 1.0 - v - w
+    inside = (u >= -1e-8) & (v >= -1e-8) & (w >= -1e-8)
+    if not bool(torch.any(inside)):
+        return
+
+    point_depth = (
+        u * chunk_z[:, 0].unsqueeze(1)
+        + v * chunk_z[:, 1].unsqueeze(1)
+        + w * chunk_z[:, 2].unsqueeze(1)
+    )
+    inside &= point_depth > 1e-8
+    if not bool(torch.any(inside)):
+        return
+
+    candidate_pixels = pixel_indices.unsqueeze(0).expand(point_depth.shape)[inside]
+    candidate_depths = point_depth[inside]
+    candidate_faces = chunk_face_ids.unsqueeze(1).expand(point_depth.shape)[inside]
+
+    depth_flat.scatter_reduce_(0, candidate_pixels, candidate_depths, reduce="amin", include_self=True)
+    winners = candidate_depths <= (depth_flat[candidate_pixels] + 1e-6)
+    if bool(torch.any(winners)):
+        face_flat[candidate_pixels[winners]] = candidate_faces[winners]
 
 
 def render_mesh_view_opengl(

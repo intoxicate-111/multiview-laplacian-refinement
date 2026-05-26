@@ -2,7 +2,19 @@
 inputs/
 inputs_sphere/
 inputs_sphere_smoke/
-meshes/
+
+# Generated experiment outputs. Mesh OBJ artifacts are intentionally allowed
+# so coarse/refined surfaces can be versioned without logs, images, depth maps,
+# dense point clouds, or optimizer traces.
+runs/**
+!runs/**/
+!runs/**/*.obj
+*.log
+*.dmap
+*.mvs
+*.npy
+*.csv
+*.mtl
 
 # Python
 __pycache__/

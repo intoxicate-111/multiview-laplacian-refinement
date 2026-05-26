@@ -51,6 +51,7 @@ Backends included now:
 - `ExistingMeshGenerator`: import a precomputed mesh from OBJ/PLY-style text formats;
 - `ExternalCommandMeshGenerator`: run an external reconstruction command that writes a mesh.
 - `NvidiaInstantNGPMeshGenerator`: write an Instant-NGP/NeRF-style `transforms.json`, call a local NVIDIA Instant-NGP command or wrapper, then import the generated mesh.
+- `OpenMVSCommandMeshGenerator`: write an OpenMVG-style `sfm_data.json` or COLMAP text model, call a local OpenMVS command pipeline, then import the generated mesh.
 
 That makes it easy to later plug in COLMAP/OpenMVS, NeuS, VolSDF, Instant-NGP marching cubes, or any other existing method without changing refinement code.
 
@@ -69,6 +70,25 @@ mesh = generate_coarse_mesh(image_paths, cameras, masks=masks, method=backend)
 ```
 
 `command_template` should match your local Instant-NGP build or wrapper. The adapter provides `{scene_dir}`, `{transforms_path}`, and `{output_mesh_path}` placeholders. Cameras are assumed to be CV-style world-to-camera internally; by default the adapter converts them to NeRF/OpenGL camera-to-world matrices.
+
+Example OpenMVS adapter:
+
+```python
+from mlr.coarse import OpenMVSCommandMeshGenerator, generate_coarse_mesh
+
+backend = OpenMVSCommandMeshGenerator(
+  scene_dir="runs/openmvs",
+  output_mesh_path="runs/openmvs/coarse.obj",
+  interface_format="colmap",
+  command_template='InterfaceCOLMAP -i "{colmap_path}" -o "{scene_dir}/scene.mvs" --image-folder "{colmap_images_path}" && DensifyPointCloud -i "{scene_dir}/scene.mvs" -o "{scene_dir}/scene_dense.mvs" --resolution-level 2 && ReconstructMesh -i "{scene_dir}/scene_dense.mvs" -o "{output_mesh_path}"',
+)
+
+mesh = generate_coarse_mesh(image_paths, cameras, masks=masks, method=backend)
+```
+
+The OpenMVS adapter defaults to COLMAP text-model export because vcpkg's OpenMVS
+tools provide `InterfaceCOLMAP`. If you only want to prepare inputs, use the CLI
+`--prepare-only` mode below.
 
 ## Stage 2: Oracle Laplacian Refinement
 
@@ -156,6 +176,29 @@ The OpenGL backend is the recommended fast path for AMD GPUs such as the Radeon 
 
 ```bash
 mlr synthetic --mesh-dir meshes --out-dir inputs --backend cpu
+```
+
+For NVIDIA CUDA rasterization, install a CUDA-enabled PyTorch build that
+matches your local driver, then enable the CUDA backend:
+
+```bash
+pip install -e ".[cuda]"
+mlr synthetic --mesh-dir meshes --out-dir inputs_cuda --views 48 --width 512 --height 512 --mode lit --trajectory sphere --backend cuda
+```
+
+The CUDA backend uses PyTorch tensors on `cuda` for z-buffer rasterization and
+falls back with a clear error if PyTorch is not installed with CUDA support.
+
+Generate a COLMAP text model and preview the OpenMVS command (prepare-only):
+
+```bash
+mlr coarse-openmvs --dataset runs/synthetic_gt/dataset.json --scene-dir runs/openmvs --out runs/openmvs/coarse.obj --prepare-only
+```
+
+Run OpenMVS via the default `InterfaceCOLMAP -> DensifyPointCloud -> ReconstructMesh` template:
+
+```bash
+mlr coarse-openmvs --dataset runs/synthetic_gt/dataset.json --scene-dir runs/openmvs --out runs/openmvs/coarse.obj --interface colmap
 ```
 
 For `meshes/bunny.obj` and `meshes/armadillo.obj`, this creates:
