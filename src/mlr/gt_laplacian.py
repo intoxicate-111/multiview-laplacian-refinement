@@ -6,6 +6,7 @@ import numpy as np
 
 from .data import Array, Mesh
 from .laplacian import compute_laplacian_coordinates
+from .io import save_mesh
 from .refinement import RefinementConfig, RefinementResult, refine_mesh_with_laplacian
 
 
@@ -35,39 +36,29 @@ class GTLaplacianRefinementResult:
     refinement: RefinementResult
 
 
-def interpolate_gt_laplacian_to_coarse(
+def compute_coarse_graph_gt_laplacian_target(
     coarse_mesh: Mesh,
     gt_mesh: Mesh,
     config: GTLaplacianTargetConfig | None = None,
     gt_laplacian_values: Array | None = None,
 ) -> InterpolatedLaplacianTarget:
-    """Interpolate GT per-vertex Laplacian values onto coarse mesh vertices.
-
-    Each coarse vertex is projected to its closest point on the GT surface. The
-    GT Laplacian value is then barycentrically interpolated from that GT face.
-    """
+    """Compute coarse-graph Laplacian targets from GT-projected coarse vertices."""
 
     config = config or GTLaplacianTargetConfig()
-    if gt_laplacian_values is None:
-        gt_delta = compute_laplacian_coordinates(
-            gt_mesh.vertices,
-            gt_mesh.faces,
-            config.operator_type,
-        )
-    else:
-        gt_delta = np.asarray(gt_laplacian_values, dtype=np.float64)
-        if gt_delta.shape[0] != gt_mesh.num_vertices:
-            raise ValueError("gt_laplacian_values must have one value per GT vertex.")
+    if gt_laplacian_values is not None:
+        raise ValueError("gt_laplacian_values is no longer supported for this target.")
 
     closest = closest_points_on_mesh(coarse_mesh.vertices, gt_mesh.vertices, gt_mesh.faces)
-    face_vertex_ids = gt_mesh.faces[closest.face_indices]
-    gt_values_on_faces = gt_delta[face_vertex_ids]
-    if gt_delta.ndim == 1:
-        delta_target = np.einsum("ni,ni->n", closest.barycentric, gt_values_on_faces)
-    elif gt_delta.ndim == 2:
-        delta_target = np.einsum("ni,nid->nd", closest.barycentric, gt_values_on_faces)
-    else:
-        raise ValueError("gt_laplacian_values must have shape (N,) or (N, D).")
+    projected = closest.points
+    delta_target = compute_laplacian_coordinates(
+        projected,
+        coarse_mesh.faces,
+        config.operator_type,
+    )
+    assert projected.shape == coarse_mesh.vertices.shape
+    assert delta_target.shape == coarse_mesh.vertices.shape
+    assert len(closest.face_indices) == coarse_mesh.num_vertices
+    assert len(closest.distances) == coarse_mesh.num_vertices
     confidence = _distance_confidence(
         closest.distances,
         distance_confidence_scale=config.distance_confidence_scale,
@@ -76,10 +67,24 @@ def interpolate_gt_laplacian_to_coarse(
     return InterpolatedLaplacianTarget(
         delta_target=delta_target,
         confidence=confidence,
-        closest_points=closest.points,
+        closest_points=projected,
         face_indices=closest.face_indices,
         barycentric=closest.barycentric,
         distances=closest.distances,
+    )
+
+
+def interpolate_gt_laplacian_to_coarse(
+    coarse_mesh: Mesh,
+    gt_mesh: Mesh,
+    config: GTLaplacianTargetConfig | None = None,
+    gt_laplacian_values: Array | None = None,
+) -> InterpolatedLaplacianTarget:
+    return compute_coarse_graph_gt_laplacian_target(
+        coarse_mesh=coarse_mesh,
+        gt_mesh=gt_mesh,
+        config=config,
+        gt_laplacian_values=gt_laplacian_values,
     )
 
 
@@ -100,6 +105,24 @@ def refine_coarse_mesh_with_gt_laplacian(
         config=target_config,
         gt_laplacian_values=gt_laplacian_values,
     )
+    projected_gt_on_coarse_path = "projected_gt_on_coarse.obj"
+    projected_points = target.closest_points
+    disp = np.linalg.norm(projected_points - coarse_mesh.vertices, axis=1)
+    print("P shape:", projected_points.shape)
+    print("V shape:", coarse_mesh.vertices.shape)
+    print("mean |P - V|:", float(disp.mean()))
+    print("median |P - V|:", float(np.median(disp)))
+    print("max |P - V|:", float(disp.max(initial=0.0)))
+    print("num unchanged:", int(np.sum(disp < 1e-12)), "/", len(disp))
+    print("mean projection distance:", float(target.distances.mean()))
+    print("max projection distance:", float(target.distances.max(initial=0.0)))
+    assert projected_points.shape == coarse_mesh.vertices.shape
+    if not np.allclose(disp, target.distances, atol=1e-8):
+        print("disp:", disp)
+        print("target.distances:", target.distances)
+    assert np.allclose(disp, target.distances, atol=1e-8)
+    projected_mesh = Mesh(vertices=projected_points.copy(), faces=coarse_mesh.faces.copy())
+    save_mesh(projected_mesh, projected_gt_on_coarse_path)
     if target.delta_target.shape != coarse_mesh.vertices.shape:
         raise ValueError("Interpolated GT Laplacian target must have shape (N_coarse, 3).")
 

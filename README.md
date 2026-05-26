@@ -259,6 +259,28 @@ Laplacian value onto that coarse vertex, then optimizes coarse vertices with
 the existing Laplacian refinement loss. Use `--distance-confidence-scale` to
 down-weight coarse vertices that project far away from the GT surface.
 
+Run the coarse-graph GT Laplacian oracle instead, where the GT surface is first
+sampled at the coarse vertex set and the Laplacian target is recomputed with the
+coarse mesh connectivity:
+
+```bash
+mlr coarse-lap-oracle \
+  --coarse-mesh runs/openmvs/normalized_full/coarse.obj \
+  --gt-mesh meshes/normalized.obj \
+  --output-dir runs/oracle_coarse_lap \
+  --operator uniform \
+  --device cuda \
+  --iters 100000 \
+  --lr 0.001 \
+  --lambda-lap 1.0 \
+  --lambda-anchor 0.01 \
+  --lambda-pos 0.01 \
+  --lambda-edge 0.01
+```
+
+Use `--device cuda` to move the optimization loop to PyTorch CUDA. Projection
+and final metrics still run on CPU.
+
 Import a coarse mesh baseline:
 
 ```bash

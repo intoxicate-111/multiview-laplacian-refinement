@@ -116,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     coarse_lap.add_argument("--gt-mesh", required=True, type=Path)
     coarse_lap.add_argument("--output-dir", required=True, type=Path)
     coarse_lap.add_argument("--operator", default="uniform", choices=["uniform"])
+    coarse_lap.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     coarse_lap.add_argument("--iters", default=3000, type=int)
     coarse_lap.add_argument("--lr", default=5e-3, type=float)
     coarse_lap.add_argument("--lambda-lap", default=1.0, type=float)
@@ -127,6 +128,13 @@ def main(argv: list[str] | None = None) -> int:
     coarse_lap.add_argument("--print-every", default=0, type=int)
     coarse_lap.add_argument("--chamfer-samples", default=5000, type=int)
     coarse_lap.add_argument("--seed", default=7, type=int)
+    coarse_lap.add_argument("--reg-surface-loss", default="point_to_plane", choices=["point_to_plane", "point_to_point"])
+    coarse_lap.add_argument("--reg-lambda-surface", default=1.0, type=float)
+    coarse_lap.add_argument("--reg-lambda-lap-smooth", default=0.1, type=float)
+    coarse_lap.add_argument("--reg-lambda-edge", default=0.01, type=float)
+    coarse_lap.add_argument("--reg-lambda-anchor", default=0.01, type=float)
+    coarse_lap.add_argument("--reg-iters", default=10000, type=int)
+    coarse_lap.add_argument("--reg-lr", default=1e-3, type=float)
     coarse_lap.add_argument("--previous-refined-mesh", type=Path)
     coarse_lap.add_argument("--previous-history", type=Path)
     gt_lap.add_argument("--print-every", default=0, type=int)
@@ -469,6 +477,7 @@ def _run_coarse_lap_oracle(args: argparse.Namespace) -> int:
             previous_history = json.load(handle)
     config = CoarseGraphOracleConfig(
         operator_type=args.operator,
+        device=args.device,
         num_iters=args.iters,
         learning_rate=args.lr,
         lambda_lap=args.lambda_lap,
@@ -480,6 +489,13 @@ def _run_coarse_lap_oracle(args: argparse.Namespace) -> int:
         print_every=args.print_every,
         chamfer_samples=args.chamfer_samples,
         seed=args.seed,
+        reg_surface_loss=args.reg_surface_loss,
+        reg_lambda_surface=args.reg_lambda_surface,
+        reg_lambda_lap_smooth=args.reg_lambda_lap_smooth,
+        reg_lambda_edge=args.reg_lambda_edge,
+        reg_lambda_anchor=args.reg_lambda_anchor,
+        reg_iters=args.reg_iters,
+        reg_lr=args.reg_lr,
     )
     print(
         f"Loaded coarse mesh {args.coarse_mesh} ({coarse_mesh.num_vertices}v/{coarse_mesh.num_faces}f)",

@@ -8,15 +8,16 @@ from typing import Any
 
 import numpy as np
 
-from .data import Array, Mesh
+from .data import Array, Mesh, normalize_rows
 from .gt_laplacian import closest_points_on_mesh
 from .io import save_mesh
-from .laplacian import build_laplacian, unique_edges, vertex_neighbors
+from .laplacian import build_laplacian, compute_laplacian_coordinates, unique_edges, vertex_neighbors
 
 
 @dataclass(frozen=True)
 class CoarseGraphOracleConfig:
     operator_type: str = "uniform"
+    device: str = "cpu"
     num_iters: int = 3000
     learning_rate: float = 5e-3
     lambda_lap: float = 1.0
@@ -28,10 +29,18 @@ class CoarseGraphOracleConfig:
     print_every: int = 0
     chamfer_samples: int = 5000
     seed: int = 7
+    reg_surface_loss: str = "point_to_plane"
+    reg_lambda_surface: float = 1.0
+    reg_lambda_lap_smooth: float = 0.1
+    reg_lambda_edge: float = 0.01
+    reg_lambda_anchor: float = 0.01
+    reg_iters: int = 10000
+    reg_lr: float = 1e-3
 
 
 @dataclass
 class CoarseGraphTargets:
+    nearest_projected_vertices: Array
     projected_vertices: Array
     delta_target: Array
     h: Array
@@ -74,8 +83,16 @@ def run_coarse_graph_laplacian_oracles(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     targets = prepare_coarse_graph_targets(coarse_mesh, gt_mesh, config)
-    projected_mesh = Mesh(targets.projected_vertices, coarse_mesh.faces).ensure_normals()
-    save_mesh(projected_mesh, output_dir / "projected_gt_on_coarse.obj")
+    nearest_mesh = Mesh(
+        vertices=targets.nearest_projected_vertices.copy(),
+        faces=coarse_mesh.faces.copy(),
+    ).ensure_normals()
+    save_mesh(nearest_mesh, output_dir / "projected_gt_on_coarse.obj")
+    registered_mesh = Mesh(
+        vertices=targets.projected_vertices.copy(),
+        faces=coarse_mesh.faces.copy(),
+    ).ensure_normals()
+    save_mesh(registered_mesh, output_dir / "registered_gt_on_coarse.obj")
     np.save(output_dir / "delta_target.npy", targets.delta_target)
     np.save(output_dir / "h.npy", targets.h)
     np.save(output_dir / "delta_hat_target.npy", targets.delta_hat_target)
@@ -214,28 +231,260 @@ def prepare_coarse_graph_targets(
     config: CoarseGraphOracleConfig | None = None,
 ) -> CoarseGraphTargets:
     config = config or CoarseGraphOracleConfig()
-    closest = closest_points_on_mesh(coarse_mesh.vertices, gt_mesh.vertices, gt_mesh.faces)
-    projected = closest.points
-    laplacian = build_laplacian(coarse_mesh.vertices, coarse_mesh.faces, config.operator_type)
+    nearest = closest_points_on_mesh(coarse_mesh.vertices, gt_mesh.vertices, gt_mesh.faces)
+    nearest_projected = nearest.points
+    _print_projection_stats("P_nearest", nearest_projected, coarse_mesh.vertices, nearest.distances)
+    assert nearest_projected.shape == coarse_mesh.vertices.shape
+    if not np.allclose(
+        np.linalg.norm(nearest_projected - coarse_mesh.vertices, axis=1),
+        nearest.distances,
+        atol=1e-8,
+    ):
+        print("disp:", np.linalg.norm(nearest_projected - coarse_mesh.vertices, axis=1))
+        print("nearest.distances:", nearest.distances)
+    assert np.allclose(
+        np.linalg.norm(nearest_projected - coarse_mesh.vertices, axis=1),
+        nearest.distances,
+        atol=1e-8,
+    )
+
     laplacian_data = build_uniform_laplacian_data(coarse_mesh.faces, coarse_mesh.num_vertices)
-    delta_target = laplacian.matrix @ projected
+    registered = register_coarse_vertices(
+        coarse_mesh=coarse_mesh,
+        gt_mesh=gt_mesh,
+        laplacian_data=laplacian_data,
+        config=config,
+    )
+    registered_closest = closest_points_on_mesh(registered, gt_mesh.vertices, gt_mesh.faces)
+    _print_projection_stats("P_reg", registered, coarse_mesh.vertices, registered_closest.distances)
+    diff_reg_nearest = np.linalg.norm(registered - nearest_projected, axis=1)
+    print("mean |P_reg - P_nearest|:", float(diff_reg_nearest.mean()))
+    print("median |P_reg - P_nearest|:", float(np.median(diff_reg_nearest)))
+    print("max |P_reg - P_nearest|:", float(diff_reg_nearest.max(initial=0.0)))
+    assert registered.shape == coarse_mesh.vertices.shape
+    laplacian = build_laplacian(coarse_mesh.vertices, coarse_mesh.faces, config.operator_type)
+    delta_target = compute_laplacian_coordinates(
+        registered,
+        coarse_mesh.faces,
+        config.operator_type,
+    )
     h = local_vertex_scales(coarse_mesh.vertices, laplacian_data)
     delta_hat = delta_target / (h[:, None] ** 2 + float(config.normalized_eps))
 
-    assert projected.shape == coarse_mesh.vertices.shape
+    assert registered.shape == coarse_mesh.vertices.shape
     assert delta_target.shape == coarse_mesh.vertices.shape
     assert h.shape[0] == coarse_mesh.vertices.shape[0]
     assert laplacian.matrix.shape == (coarse_mesh.num_vertices, coarse_mesh.num_vertices)
 
     return CoarseGraphTargets(
-        projected_vertices=projected,
+        nearest_projected_vertices=nearest_projected,
+        projected_vertices=registered,
         delta_target=delta_target,
         h=h,
         delta_hat_target=delta_hat,
-        projection_distances=closest.distances,
+        projection_distances=registered_closest.distances,
         laplacian_matrix=laplacian.matrix,
         laplacian_data=laplacian_data,
     )
+
+
+def _print_projection_stats(label: str, projected: Array, vertices: Array, distances: Array) -> None:
+    disp = np.linalg.norm(projected - vertices, axis=1)
+    print(f"{label} shape:", projected.shape)
+    print("V shape:", vertices.shape)
+    print(f"{label} mean |P - V|:", float(disp.mean()))
+    print(f"{label} median |P - V|:", float(np.median(disp)))
+    print(f"{label} max |P - V|:", float(disp.max(initial=0.0)))
+    print(f"{label} num unchanged:", int(np.sum(disp < 1e-12)), "/", len(disp))
+    print(f"{label} mean projection distance:", float(distances.mean()))
+    print(f"{label} max projection distance:", float(distances.max(initial=0.0)))
+
+
+def register_coarse_vertices(
+    coarse_mesh: Mesh,
+    gt_mesh: Mesh,
+    laplacian_data: UniformLaplacianData,
+    config: CoarseGraphOracleConfig,
+) -> Array:
+    if config.device == "cuda":
+        return register_coarse_vertices_torch(
+            coarse_mesh=coarse_mesh,
+            gt_mesh=gt_mesh,
+            laplacian_data=laplacian_data,
+            config=config,
+        )
+    if config.reg_surface_loss not in {"point_to_plane", "point_to_point"}:
+        raise ValueError("reg_surface_loss must be 'point_to_plane' or 'point_to_point'.")
+
+    vertices = np.array(coarse_mesh.vertices, dtype=np.float64, copy=True)
+    anchors = np.asarray(coarse_mesh.vertices, dtype=np.float64)
+    edge_pairs = unique_edges(coarse_mesh.faces)
+    target_edge_lengths = edge_lengths(anchors, edge_pairs)
+    lap_ref = apply_uniform_laplacian(anchors, laplacian_data)
+    m = np.zeros_like(vertices)
+    v = np.zeros_like(vertices)
+    beta1 = 0.9
+    beta2 = 0.999
+    eps = 1e-8
+
+    for step in range(1, config.reg_iters + 1):
+        closest = closest_points_on_mesh(vertices, gt_mesh.vertices, gt_mesh.faces)
+        normals = _interpolate_normals(closest, gt_mesh)
+        if config.reg_surface_loss == "point_to_plane":
+            residual = np.sum((vertices - closest.points) * normals, axis=1)
+            surface_loss = float(np.mean(residual * residual))
+            grad_surface = (2.0 / vertices.shape[0]) * residual[:, None] * normals
+        else:
+            residual_vec = vertices - closest.points
+            surface_loss = float(np.mean(np.sum(residual_vec * residual_vec, axis=1)))
+            grad_surface = (2.0 / vertices.shape[0]) * residual_vec
+
+        lap_residual = apply_uniform_laplacian(vertices, laplacian_data) - lap_ref
+        lap_loss = float(np.mean(np.sum(lap_residual * lap_residual, axis=1)))
+        grad_lap = (2.0 / vertices.shape[0]) * apply_uniform_laplacian_transpose(
+            lap_residual,
+            laplacian_data,
+        )
+
+        anchor_residual = vertices - anchors
+        anchor_loss = float(np.mean(np.sum(anchor_residual * anchor_residual, axis=1)))
+        grad_anchor = (2.0 / vertices.shape[0]) * anchor_residual
+
+        edge_loss = 0.0
+        edge_grad = np.zeros_like(vertices)
+        if config.reg_lambda_edge > 0 and len(edge_pairs) > 0:
+            edge_loss, edge_grad = edge_loss_and_grad(vertices, edge_pairs, target_edge_lengths)
+
+        total_grad = (
+            config.reg_lambda_surface * grad_surface
+            + config.reg_lambda_lap_smooth * grad_lap
+            + config.reg_lambda_edge * edge_grad
+            + config.reg_lambda_anchor * grad_anchor
+        )
+        m = beta1 * m + (1.0 - beta1) * total_grad
+        v = beta2 * v + (1.0 - beta2) * (total_grad * total_grad)
+        m_hat = m / (1.0 - beta1**step)
+        v_hat = v / (1.0 - beta2**step)
+        vertices -= config.reg_lr * m_hat / (np.sqrt(v_hat) + eps)
+
+        if config.print_every > 0 and (
+            step == 1 or step == config.reg_iters or step % config.print_every == 0
+        ):
+            print(
+                "reg step={step} surface={surface:.8f} lap={lap:.8f} anchor={anchor:.8f} edge={edge:.8f}".format(
+                    step=step,
+                    surface=surface_loss,
+                    lap=lap_loss,
+                    anchor=anchor_loss,
+                    edge=float(edge_loss),
+                ),
+                flush=True,
+            )
+
+    return vertices
+
+
+def register_coarse_vertices_torch(
+    coarse_mesh: Mesh,
+    gt_mesh: Mesh,
+    laplacian_data: UniformLaplacianData,
+    config: CoarseGraphOracleConfig,
+) -> Array:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("PyTorch is required for CUDA registration.") from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested for registration, but torch.cuda.is_available() is false.")
+    if config.reg_surface_loss not in {"point_to_plane", "point_to_point"}:
+        raise ValueError("reg_surface_loss must be 'point_to_plane' or 'point_to_point'.")
+
+    device = torch.device("cuda")
+    dtype = torch.float32
+    vertices = torch.as_tensor(coarse_mesh.vertices, dtype=dtype, device=device).clone()
+    anchors = torch.as_tensor(coarse_mesh.vertices, dtype=dtype, device=device)
+    rows = torch.as_tensor(laplacian_data.rows, dtype=torch.long, device=device)
+    cols = torch.as_tensor(laplacian_data.cols, dtype=torch.long, device=device)
+    weights = torch.as_tensor(laplacian_data.weights, dtype=dtype, device=device).unsqueeze(1)
+    edge_pairs_np = unique_edges(coarse_mesh.faces)
+    edge_pairs = torch.as_tensor(edge_pairs_np, dtype=torch.long, device=device)
+    target_edge_lengths = torch_edge_lengths(anchors, edge_pairs)
+    lap_ref = torch_apply_uniform_laplacian(anchors, rows, cols, weights)
+    m = torch.zeros_like(vertices)
+    v = torch.zeros_like(vertices)
+    beta1 = 0.9
+    beta2 = 0.999
+    eps = 1e-8
+
+    for step in range(1, config.reg_iters + 1):
+        vertices_np = vertices.detach().cpu().numpy().astype(np.float64)
+        closest = closest_points_on_mesh(vertices_np, gt_mesh.vertices, gt_mesh.faces)
+        normals_np = _interpolate_normals(closest, gt_mesh)
+        closest_points_t = torch.as_tensor(closest.points, dtype=dtype, device=device)
+        normals_t = torch.as_tensor(normals_np, dtype=dtype, device=device)
+
+        if config.reg_surface_loss == "point_to_plane":
+            residual = ((vertices - closest_points_t) * normals_t).sum(dim=1)
+            surface_loss = (residual * residual).mean()
+            grad_surface = (2.0 / vertices.shape[0]) * residual.unsqueeze(1) * normals_t
+        else:
+            residual_vec = vertices - closest_points_t
+            surface_loss = (residual_vec * residual_vec).sum(dim=1).mean()
+            grad_surface = (2.0 / vertices.shape[0]) * residual_vec
+
+        lap_residual = torch_apply_uniform_laplacian(vertices, rows, cols, weights) - lap_ref
+        lap_loss = (lap_residual * lap_residual).sum(dim=1).mean()
+        grad_lap = (2.0 / vertices.shape[0]) * torch_apply_uniform_laplacian_transpose(
+            lap_residual,
+            rows,
+            cols,
+            weights,
+        )
+
+        anchor_residual = vertices - anchors
+        anchor_loss = (anchor_residual * anchor_residual).sum(dim=1).mean()
+        grad_anchor = (2.0 / vertices.shape[0]) * anchor_residual
+
+        edge_loss = vertices.new_tensor(0.0)
+        edge_grad = vertices.new_zeros(vertices.shape)
+        if config.reg_lambda_edge > 0 and edge_pairs.numel() > 0:
+            edge_loss, edge_grad = torch_edge_loss_and_grad(vertices, edge_pairs, target_edge_lengths)
+
+        total_grad = (
+            float(config.reg_lambda_surface) * grad_surface
+            + float(config.reg_lambda_lap_smooth) * grad_lap
+            + float(config.reg_lambda_edge) * edge_grad
+            + float(config.reg_lambda_anchor) * grad_anchor
+        )
+        m.mul_(beta1).add_(total_grad, alpha=1.0 - beta1)
+        v.mul_(beta2).addcmul_(total_grad, total_grad, value=1.0 - beta2)
+        m_hat = m / (1.0 - beta1**step)
+        v_hat = v / (1.0 - beta2**step)
+        vertices.addcdiv_(m_hat, torch.sqrt(v_hat).add_(eps), value=-float(config.reg_lr))
+
+        if config.print_every > 0 and (
+            step == 1 or step == config.reg_iters or step % config.print_every == 0
+        ):
+            print(
+                "reg step={step} surface={surface:.8f} lap={lap:.8f} anchor={anchor:.8f} edge={edge:.8f}".format(
+                    step=step,
+                    surface=_torch_float(surface_loss),
+                    lap=_torch_float(lap_loss),
+                    anchor=_torch_float(anchor_loss),
+                    edge=_torch_float(edge_loss),
+                ),
+                flush=True,
+            )
+
+    return vertices.detach().cpu().numpy().astype(np.float64)
+
+
+def _interpolate_normals(closest: ClosestMeshPoints, gt_mesh: Mesh) -> Array:
+    gt_mesh.ensure_normals()
+    face_vertex_ids = gt_mesh.faces[closest.face_indices]
+    face_normals = gt_mesh.normals[face_vertex_ids]
+    normals = np.einsum("ni,nid->nd", closest.barycentric, face_normals)
+    return normalize_rows(normals)
 
 
 def build_uniform_laplacian_data(faces: Array, num_vertices: int) -> UniformLaplacianData:
@@ -291,6 +540,24 @@ def optimize_uniform_laplacian_oracle(
     lambda_pos: float,
     lambda_edge: float,
 ) -> OptimizationResult:
+    if config.device == "cuda":
+        return optimize_uniform_laplacian_oracle_torch(
+            coarse_mesh=coarse_mesh,
+            gt_mesh=gt_mesh,
+            laplacian_data=laplacian_data,
+            delta_target=delta_target,
+            position_target=position_target,
+            before_surface=before_surface,
+            before_chamfer=before_chamfer,
+            config=config,
+            name=name,
+            lambda_anchor=lambda_anchor,
+            lambda_pos=lambda_pos,
+            lambda_edge=lambda_edge,
+        )
+    if config.device != "cpu":
+        raise ValueError("coarse graph oracle device must be 'cpu' or 'cuda'.")
+
     vertices = np.array(coarse_mesh.vertices, dtype=np.float64, copy=True)
     anchors = np.asarray(coarse_mesh.vertices, dtype=np.float64)
     position_target = np.asarray(position_target, dtype=np.float64)
@@ -366,6 +633,7 @@ def optimize_uniform_laplacian_oracle(
     displacement = np.linalg.norm(vertices - coarse_mesh.vertices, axis=1)
     metrics = {
         "name": name,
+        "device": "cpu",
         "lambda_lap": float(config.lambda_lap),
         "lambda_anchor": float(lambda_anchor),
         "lambda_pos": float(lambda_pos),
@@ -384,6 +652,137 @@ def optimize_uniform_laplacian_oracle(
         "max_refined_displacement": float(np.max(displacement)),
     }
     return OptimizationResult(name=name, mesh=mesh, vertices=vertices, history=history, metrics=metrics)
+
+
+def optimize_uniform_laplacian_oracle_torch(
+    coarse_mesh: Mesh,
+    gt_mesh: Mesh,
+    laplacian_data: UniformLaplacianData,
+    delta_target: Array,
+    position_target: Array,
+    before_surface: dict[str, float],
+    before_chamfer: float,
+    config: CoarseGraphOracleConfig,
+    name: str,
+    lambda_anchor: float,
+    lambda_pos: float,
+    lambda_edge: float,
+) -> OptimizationResult:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("PyTorch is required for --device cuda. Install the cuda extra or torch manually.") from exc
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested with --device cuda, but torch.cuda.is_available() is false.")
+
+    device = torch.device("cuda")
+    dtype = torch.float32
+    vertices = torch.as_tensor(coarse_mesh.vertices, dtype=dtype, device=device).clone()
+    anchors = torch.as_tensor(coarse_mesh.vertices, dtype=dtype, device=device)
+    position_target_t = torch.as_tensor(position_target, dtype=dtype, device=device)
+    delta_target_t = torch.as_tensor(delta_target, dtype=dtype, device=device)
+    rows = torch.as_tensor(laplacian_data.rows, dtype=torch.long, device=device)
+    cols = torch.as_tensor(laplacian_data.cols, dtype=torch.long, device=device)
+    weights = torch.as_tensor(laplacian_data.weights, dtype=dtype, device=device).unsqueeze(1)
+    edge_pairs_np = unique_edges(coarse_mesh.faces)
+    edge_pairs = torch.as_tensor(edge_pairs_np, dtype=torch.long, device=device)
+    target_edge_lengths = torch_edge_lengths(vertices, edge_pairs)
+    history: list[dict[str, float]] = []
+    m = torch.zeros_like(vertices)
+    v = torch.zeros_like(vertices)
+    beta1 = 0.9
+    beta2 = 0.999
+    eps = 1e-8
+
+    def record(step: int, total_t, parts_t: dict[str, Any]) -> None:
+        history.append({"iter": float(step), "total_loss": _torch_float(total_t), **_torch_parts_to_float(parts_t)})
+
+    with torch.no_grad():
+        total, grad, parts = torch_oracle_loss_and_grad(
+            vertices,
+            rows,
+            cols,
+            weights,
+            delta_target_t,
+            anchors,
+            position_target_t,
+            edge_pairs,
+            target_edge_lengths,
+            config.lambda_lap,
+            lambda_anchor,
+            lambda_pos,
+            lambda_edge,
+        )
+        record(0, total, parts)
+
+        for step in range(1, config.num_iters + 1):
+            total, grad, parts = torch_oracle_loss_and_grad(
+                vertices,
+                rows,
+                cols,
+                weights,
+                delta_target_t,
+                anchors,
+                position_target_t,
+                edge_pairs,
+                target_edge_lengths,
+                config.lambda_lap,
+                lambda_anchor,
+                lambda_pos,
+                lambda_edge,
+            )
+            m.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+            v.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+            m_hat = m / (1.0 - beta1**step)
+            v_hat = v / (1.0 - beta2**step)
+            vertices.addcdiv_(m_hat, torch.sqrt(v_hat).add_(eps), value=-config.learning_rate)
+
+            if step == config.num_iters or step % config.log_every == 0:
+                total_after, _, parts_after = torch_oracle_loss_and_grad(
+                    vertices,
+                    rows,
+                    cols,
+                    weights,
+                    delta_target_t,
+                    anchors,
+                    position_target_t,
+                    edge_pairs,
+                    target_edge_lengths,
+                    config.lambda_lap,
+                    lambda_anchor,
+                    lambda_pos,
+                    lambda_edge,
+                )
+                record(step, total_after, parts_after)
+            if config.print_every > 0 and (step == 1 or step == config.num_iters or step % config.print_every == 0):
+                print(f"{name} step={step} total={_torch_float(total):.8f} lap={_torch_float(parts['lap_loss']):.8f}", flush=True)
+
+    vertices_np = vertices.detach().cpu().numpy().astype(np.float64)
+    mesh = coarse_mesh.with_vertices(vertices_np)
+    after_surface = point_to_surface_stats(vertices_np, gt_mesh)
+    after_chamfer = chamfer_distance(mesh, gt_mesh, samples=config.chamfer_samples, seed=config.seed + 17)
+    displacement = np.linalg.norm(vertices_np - coarse_mesh.vertices, axis=1)
+    metrics = {
+        "name": name,
+        "device": "cuda",
+        "lambda_lap": float(config.lambda_lap),
+        "lambda_anchor": float(lambda_anchor),
+        "lambda_pos": float(lambda_pos),
+        "lambda_edge": float(lambda_edge),
+        "initial_lap_loss": float(history[0]["lap_loss"]),
+        "final_lap_loss": float(history[-1]["lap_loss"]),
+        "initial_total_loss": float(history[0]["total_loss"]),
+        "final_total_loss": float(history[-1]["total_loss"]),
+        "point_to_surface_distance_before": float(before_surface["mean"]),
+        "point_to_surface_distance_after": float(after_surface["mean"]),
+        "point_to_surface_distance_before_max": float(before_surface["max"]),
+        "point_to_surface_distance_after_max": float(after_surface["max"]),
+        "chamfer_before": float(before_chamfer),
+        "chamfer_after": float(after_chamfer),
+        "mean_refined_displacement": float(np.mean(displacement)),
+        "max_refined_displacement": float(np.max(displacement)),
+    }
+    return OptimizationResult(name=name, mesh=mesh, vertices=vertices_np, history=history, metrics=metrics)
 
 
 def oracle_loss_and_grad(
@@ -476,6 +875,112 @@ def edge_loss_and_grad(vertices: Array, edge_pairs: Array, target_lengths: Array
     np.add.at(grad, edge_pairs[:, 0], edge_grad_per_edge)
     np.add.at(grad, edge_pairs[:, 1], -edge_grad_per_edge)
     return loss, grad
+
+
+def torch_oracle_loss_and_grad(
+    vertices,
+    rows,
+    cols,
+    weights,
+    delta_target,
+    anchors,
+    position_target,
+    edge_pairs,
+    target_edge_lengths,
+    lambda_lap: float,
+    lambda_anchor: float,
+    lambda_pos: float,
+    lambda_edge: float,
+):
+    num_vertices = vertices.shape[0]
+    grad = vertices.new_zeros(vertices.shape)
+    total = vertices.new_tensor(0.0)
+
+    lap_residual = torch_apply_uniform_laplacian(vertices, rows, cols, weights) - delta_target
+    lap_loss = (lap_residual * lap_residual).sum(dim=1).mean()
+    grad = grad + float(lambda_lap) * (2.0 / num_vertices) * torch_apply_uniform_laplacian_transpose(
+        lap_residual,
+        rows,
+        cols,
+        weights,
+    )
+    total = total + float(lambda_lap) * lap_loss
+
+    anchor_residual = vertices - anchors
+    anchor_loss = (anchor_residual * anchor_residual).sum(dim=1).mean()
+    if lambda_anchor > 0:
+        grad = grad + float(lambda_anchor) * (2.0 / num_vertices) * anchor_residual
+        total = total + float(lambda_anchor) * anchor_loss
+
+    pos_residual = vertices - position_target
+    pos_loss = (pos_residual * pos_residual).sum(dim=1).mean()
+    if lambda_pos > 0:
+        grad = grad + float(lambda_pos) * (2.0 / num_vertices) * pos_residual
+        total = total + float(lambda_pos) * pos_loss
+
+    edge_loss = vertices.new_tensor(0.0)
+    if lambda_edge > 0 and edge_pairs.numel() > 0:
+        edge_loss, edge_grad = torch_edge_loss_and_grad(vertices, edge_pairs, target_edge_lengths)
+        grad = grad + float(lambda_edge) * edge_grad
+        total = total + float(lambda_edge) * edge_loss
+
+    return total, grad, {
+        "lap_loss": lap_loss,
+        "weighted_lap_loss": float(lambda_lap) * lap_loss,
+        "anchor_loss": anchor_loss,
+        "weighted_anchor_loss": float(lambda_anchor) * anchor_loss,
+        "pos_loss": pos_loss,
+        "weighted_pos_loss": float(lambda_pos) * pos_loss,
+        "edge_loss": edge_loss,
+        "weighted_edge_loss": float(lambda_edge) * edge_loss,
+    }
+
+
+def torch_apply_uniform_laplacian(vertices, rows, cols, weights):
+    neighbor_mean = vertices.new_zeros(vertices.shape)
+    if rows.numel() > 0:
+        neighbor_mean.index_add_(0, rows, weights * vertices[cols])
+    return vertices - neighbor_mean
+
+
+def torch_apply_uniform_laplacian_transpose(residual, rows, cols, weights):
+    grad = residual.clone()
+    if rows.numel() > 0:
+        grad.index_add_(0, cols, -weights * residual[rows])
+    return grad
+
+
+def torch_edge_lengths(vertices, edge_pairs):
+    if edge_pairs.numel() == 0:
+        return vertices.new_zeros((0,))
+    return torch_norm(vertices[edge_pairs[:, 0]] - vertices[edge_pairs[:, 1]])
+
+
+def torch_edge_loss_and_grad(vertices, edge_pairs, target_lengths):
+    if edge_pairs.numel() == 0:
+        return vertices.new_tensor(0.0), vertices.new_zeros(vertices.shape)
+    diff = vertices[edge_pairs[:, 0]] - vertices[edge_pairs[:, 1]]
+    lengths = torch_norm(diff)
+    residual = lengths - target_lengths
+    loss = (residual * residual).mean()
+    direction = diff / lengths.clamp_min(1e-12).unsqueeze(1)
+    edge_grad_per_edge = (2.0 / edge_pairs.shape[0]) * residual.unsqueeze(1) * direction
+    grad = vertices.new_zeros(vertices.shape)
+    grad.index_add_(0, edge_pairs[:, 0], edge_grad_per_edge)
+    grad.index_add_(0, edge_pairs[:, 1], -edge_grad_per_edge)
+    return loss, grad
+
+
+def torch_norm(values):
+    return (values * values).sum(dim=1).clamp_min(0.0).sqrt()
+
+
+def _torch_float(value) -> float:
+    return float(value.detach().cpu().item())
+
+
+def _torch_parts_to_float(parts: dict[str, Any]) -> dict[str, float]:
+    return {name: _torch_float(value) for name, value in parts.items()}
 
 
 def point_to_surface_stats(points: Array, surface_mesh: Mesh) -> dict[str, float]:
