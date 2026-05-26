@@ -36,6 +36,8 @@ class CoarseGraphOracleConfig:
     reg_lambda_anchor: float = 0.01
     reg_iters: int = 10000
     reg_lr: float = 1e-3
+    reg_point_chunk: int = 256
+    reg_tri_chunk: int = 2048
 
 
 @dataclass
@@ -394,6 +396,7 @@ def register_coarse_vertices_torch(
         import torch
     except ImportError as exc:
         raise RuntimeError("PyTorch is required for CUDA registration.") from exc
+    globals()["torch"] = torch
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested for registration, but torch.cuda.is_available() is false.")
     if config.reg_surface_loss not in {"point_to_plane", "point_to_point"}:
@@ -403,6 +406,10 @@ def register_coarse_vertices_torch(
     dtype = torch.float32
     vertices = torch.as_tensor(coarse_mesh.vertices, dtype=dtype, device=device).clone()
     anchors = torch.as_tensor(coarse_mesh.vertices, dtype=dtype, device=device)
+    gt_vertices = torch.as_tensor(gt_mesh.vertices, dtype=dtype, device=device)
+    gt_faces = torch.as_tensor(gt_mesh.faces, dtype=torch.long, device=device)
+    gt_mesh.ensure_normals()
+    gt_normals = torch.as_tensor(gt_mesh.normals, dtype=dtype, device=device)
     rows = torch.as_tensor(laplacian_data.rows, dtype=torch.long, device=device)
     cols = torch.as_tensor(laplacian_data.cols, dtype=torch.long, device=device)
     weights = torch.as_tensor(laplacian_data.weights, dtype=dtype, device=device).unsqueeze(1)
@@ -417,11 +424,14 @@ def register_coarse_vertices_torch(
     eps = 1e-8
 
     for step in range(1, config.reg_iters + 1):
-        vertices_np = vertices.detach().cpu().numpy().astype(np.float64)
-        closest = closest_points_on_mesh(vertices_np, gt_mesh.vertices, gt_mesh.faces)
-        normals_np = _interpolate_normals(closest, gt_mesh)
-        closest_points_t = torch.as_tensor(closest.points, dtype=dtype, device=device)
-        normals_t = torch.as_tensor(normals_np, dtype=dtype, device=device)
+        closest_points_t, bary_t, face_indices_t, distances_t = torch_closest_points_on_mesh(
+            vertices,
+            gt_vertices,
+            gt_faces,
+            point_chunk=config.reg_point_chunk,
+            tri_chunk=config.reg_tri_chunk,
+        )
+        normals_t = torch_interpolate_normals(bary_t, face_indices_t, gt_faces, gt_normals)
 
         if config.reg_surface_loss == "point_to_plane":
             residual = ((vertices - closest_points_t) * normals_t).sum(dim=1)
@@ -477,6 +487,172 @@ def register_coarse_vertices_torch(
             )
 
     return vertices.detach().cpu().numpy().astype(np.float64)
+
+
+def torch_closest_points_on_mesh(
+    points,
+    vertices,
+    faces,
+    *,
+    point_chunk: int,
+    tri_chunk: int,
+):
+    device = points.device
+    dtype = points.dtype
+    faces = faces.to(device=device)
+    vertices = vertices.to(device=device)
+    tris = vertices[faces]
+    num_points = points.shape[0]
+    num_tris = tris.shape[0]
+
+    best_dist2 = torch.full((num_points,), float("inf"), device=device, dtype=dtype)
+    best_points = torch.zeros((num_points, 3), device=device, dtype=dtype)
+    best_bary = torch.zeros((num_points, 3), device=device, dtype=dtype)
+    best_faces = torch.zeros((num_points,), device=device, dtype=torch.long)
+
+    for p_start in range(0, num_points, point_chunk):
+        p_end = min(p_start + point_chunk, num_points)
+        p_chunk = points[p_start:p_end]
+        best_dist2_chunk = best_dist2[p_start:p_end]
+        best_points_chunk = best_points[p_start:p_end]
+        best_bary_chunk = best_bary[p_start:p_end]
+        best_faces_chunk = best_faces[p_start:p_end]
+
+        for t_start in range(0, num_tris, tri_chunk):
+            t_end = min(t_start + tri_chunk, num_tris)
+            tri_chunk_t = tris[t_start:t_end]
+            closest, bary = torch_closest_points_on_triangles(p_chunk, tri_chunk_t)
+            diff = closest - p_chunk[:, None, :]
+            dist2 = (diff * diff).sum(dim=2)
+            min_dist2, min_idx = dist2.min(dim=1)
+
+            better = min_dist2 < best_dist2_chunk
+            if better.any():
+                gather_idx = min_idx[better]
+                best_dist2_chunk[better] = min_dist2[better]
+                best_points_chunk[better] = closest[better, gather_idx, :]
+                best_bary_chunk[better] = bary[better, gather_idx, :]
+                best_faces_chunk[better] = gather_idx + t_start
+
+        best_dist2[p_start:p_end] = best_dist2_chunk
+        best_points[p_start:p_end] = best_points_chunk
+        best_bary[p_start:p_end] = best_bary_chunk
+        best_faces[p_start:p_end] = best_faces_chunk
+
+    distances = torch.sqrt(best_dist2.clamp_min(0.0))
+    return best_points, best_bary, best_faces, distances
+
+
+def torch_closest_points_on_triangles(points, triangles):
+    p = points[:, None, :]
+    num_points = points.shape[0]
+    a = triangles[None, :, 0].expand(num_points, -1, -1)
+    b = triangles[None, :, 1].expand(num_points, -1, -1)
+    c = triangles[None, :, 2].expand(num_points, -1, -1)
+    ab = b - a
+    ac = c - a
+    ap = p - a
+
+    d1 = (ab * ap).sum(dim=2)
+    d2 = (ac * ap).sum(dim=2)
+    bp = p - b
+    d3 = (ab * bp).sum(dim=2)
+    d4 = (ac * bp).sum(dim=2)
+    cp = p - c
+    d5 = (ab * cp).sum(dim=2)
+    d6 = (ac * cp).sum(dim=2)
+
+    closest = torch.zeros_like(ap)
+    bary = torch.zeros_like(ap)
+    assigned = torch.zeros(d1.shape, device=d1.device, dtype=torch.bool)
+
+    mask = (d1 <= 0.0) & (d2 <= 0.0)
+    closest, bary, assigned = torch_assign(mask, assigned, closest, bary, a, torch.tensor([1.0, 0.0, 0.0], device=p.device, dtype=p.dtype))
+
+    mask = (d3 >= 0.0) & (d4 <= d3)
+    closest, bary, assigned = torch_assign(mask, assigned, closest, bary, b, torch.tensor([0.0, 1.0, 0.0], device=p.device, dtype=p.dtype))
+
+    vc = d1 * d4 - d3 * d2
+    mask = (vc <= 0.0) & (d1 >= 0.0) & (d3 <= 0.0)
+    edge_mask = mask & ~assigned
+    if edge_mask.any():
+        v = d1[edge_mask] / (d1[edge_mask] - d3[edge_mask]).clamp_min(1e-12)
+        closest[edge_mask] = a[edge_mask] + v.unsqueeze(1) * ab[edge_mask]
+        bary[edge_mask] = torch.stack(
+            [1.0 - v, v, torch.zeros_like(v)],
+            dim=1,
+        )
+        assigned[edge_mask] = True
+
+    mask = (d6 >= 0.0) & (d5 <= d6)
+    closest, bary, assigned = torch_assign(mask, assigned, closest, bary, c, torch.tensor([0.0, 0.0, 1.0], device=p.device, dtype=p.dtype))
+
+    vb = d5 * d2 - d1 * d6
+    mask = (vb <= 0.0) & (d2 >= 0.0) & (d6 <= 0.0)
+    edge_mask = mask & ~assigned
+    if edge_mask.any():
+        w = d2[edge_mask] / (d2[edge_mask] - d6[edge_mask]).clamp_min(1e-12)
+        closest[edge_mask] = a[edge_mask] + w.unsqueeze(1) * ac[edge_mask]
+        bary[edge_mask] = torch.stack(
+            [1.0 - w, torch.zeros_like(w), w],
+            dim=1,
+        )
+        assigned[edge_mask] = True
+
+    va = d3 * d6 - d5 * d4
+    mask = (va <= 0.0) & ((d4 - d3) >= 0.0) & ((d5 - d6) >= 0.0)
+    edge_mask = mask & ~assigned
+    if edge_mask.any():
+        w = (d4[edge_mask] - d3[edge_mask]) / (
+            (d4[edge_mask] - d3[edge_mask]) + (d5[edge_mask] - d6[edge_mask])
+        ).clamp_min(1e-12)
+        closest[edge_mask] = b[edge_mask] + w.unsqueeze(1) * (c[edge_mask] - b[edge_mask])
+        bary[edge_mask] = torch.stack(
+            [torch.zeros_like(w), 1.0 - w, w],
+            dim=1,
+        )
+        assigned[edge_mask] = True
+
+    interior = ~assigned
+    if interior.any():
+        denom = (va + vb + vc).clamp_min(1e-12)
+        v = vb / denom
+        w = vc / denom
+        u = 1.0 - v - w
+        closest[interior] = (
+            u[interior].unsqueeze(1) * a[interior]
+            + v[interior].unsqueeze(1) * b[interior]
+            + w[interior].unsqueeze(1) * c[interior]
+        )
+        bary[interior] = torch.stack(
+            [u[interior], v[interior], w[interior]],
+            dim=1,
+        )
+
+    return closest, bary
+
+
+def torch_assign(mask, assigned, closest, bary, points, bary_value):
+    active = mask & ~assigned
+    if active.any():
+        if points.shape[0] == 1 and points.shape[1] == closest.shape[1]:
+            points = points.expand(closest.shape[0], -1, -1)
+        closest[active] = points[active]
+        bary[active] = bary_value
+        assigned[active] = True
+    return closest, bary, assigned
+
+
+def torch_interpolate_normals(bary, face_indices, faces, normals):
+    face_vertex_ids = faces[face_indices]
+    face_normals = normals[face_vertex_ids]
+    interpolated = (bary.unsqueeze(1) * face_normals).sum(dim=1)
+    return torch_normalize_rows(interpolated)
+
+
+def torch_normalize_rows(values):
+    norms = torch_norm(values).clamp_min(1e-12)
+    return values / norms.unsqueeze(1)
 
 
 def _interpolate_normals(closest: ClosestMeshPoints, gt_mesh: Mesh) -> Array:
