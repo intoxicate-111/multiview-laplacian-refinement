@@ -415,8 +415,88 @@ python -m pytest
 ```
 
 Current limitations: batch size is one, every sample has one fixed topology,
-visibility uses the prepared mask rather than learned occlusion reasoning, the
-existing target/reconstruction path uses dense NumPy Laplacians, and no claim
-is made about unseen objects. The next scaling step should be 10--20 prepared
+visibility uses the prepared mask rather than learned occlusion reasoning,
+non-uniform and general different-topology target paths still use dense NumPy
+Laplacians, and no claim is made about unseen objects. The next scaling step should be 10--20 prepared
 objects with topology-aware batching or per-object gradient accumulation,
 train/validation separation, and sparse Laplacian/reconstruction operators.
+
+## Stanford Bunny Single-Object Overfitting
+
+This experiment scales the preceding sanity test to a realistic Stanford Bunny
+while retaining a controlled same-topology graph. Successful Bunny overfitting
+does not demonstrate cross-object generalisation. It also does not by itself
+prove that the network relies on multi-view evidence, because a fixed-geometry
+network may memorise one object's target.
+
+The local experiment uses the already normalised clean asset at
+`inputs/stanford-bunny/mesh.obj` (35,947 vertices, 69,451 faces, bounding-box
+diagonal approximately 2). This ignored asset was generated from the local
+`meshes/stanford-bunny.obj` source recorded in its dataset metadata; the source
+asset is not added to Git by this experiment. A second identical clean copy and
+64-view sphere render are available under `inputs_sphere/stanford-bunny/`.
+
+Install training and scalable surface-metric dependencies:
+
+```bash
+pip install -e ".[train,bunny]"
+```
+
+Preparation copies the clean topology, applies deterministic uniform
+Laplacian smoothing and normal-direction Gaussian noise, resamples 24 clean
+sphere views, constructs the target with the repository's sparse uniform
+operator, and writes a projection overlay:
+
+```bash
+python scripts/prepare_bunny_overfit_experiment.py \
+  --gt-mesh inputs/stanford-bunny/mesh.obj \
+  --reuse-dataset inputs_sphere/stanford-bunny/dataset.json \
+  --output-root runs/learned_laplacian/bunny_overfit \
+  --views 24 \
+  --image-size 256 \
+  --noise-std 0.015 \
+  --smoothing-iters 2 \
+  --smoothing-strength 0.1 \
+  --seed 7
+```
+
+The documented target is 256x256. On a CPU-only machine, use
+`--image-size 128` for the validated diagnostic run. Without
+`--reuse-dataset`, the wrapper invokes the repository's clean-GT sphere
+renderer directly; select `--backend cpu`, `opengl`, or `cuda` as available.
+
+Run the three matched-budget modes together:
+
+```bash
+python scripts/run_bunny_overfit_ablations.py \
+  --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt \
+  --config configs/learned_laplacian/overfit_bunny.json \
+  --output-root runs/learned_laplacian/bunny_overfit \
+  --device cuda
+```
+
+For the CPU diagnostic reported in this repository, append `--device cpu
+--steps 300`. Equivalent individual commands are:
+
+```bash
+python scripts/overfit_single_object.py --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt --config configs/learned_laplacian/overfit_bunny.json --output-dir runs/learned_laplacian/bunny_overfit/coarse_only --input-mode coarse_only --device cpu --steps 300
+python scripts/overfit_single_object.py --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt --config configs/learned_laplacian/overfit_bunny.json --output-dir runs/learned_laplacian/bunny_overfit/coarse_plus_multiview --input-mode coarse_plus_multiview --device cpu --steps 300
+python scripts/overfit_single_object.py --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt --config configs/learned_laplacian/overfit_bunny.json --output-dir runs/learned_laplacian/bunny_overfit/zero_images --input-mode coarse_plus_multiview --zero-images --device cpu --steps 300
+```
+
+All modes share the same graph, target, seed, capacity, training budget,
+reconstruction parameters, Chamfer sampling indices, and metric seed. The
+large-mesh path caches graph edges, uses the existing sparse coarse-oracle
+Laplacian loss/gradient for reconstruction, and uses `trimesh`/`rtree` for
+exact point-to-surface distances. Outputs include the common GT/coarse/oracle
+OBJ files, per-mode checkpoints and reconstructed meshes, loss and error
+visualisations, `projection_debug.png`, `comparison_render.png`, and
+`comparison.json`.
+
+Point-to-surface and Chamfer measure surface agreement; target-position RMSE
+uses the known same-topology correspondence; normal consistency approaches 1
+as orientations agree; and the bounding-box ratio plus explicit
+collapse/explosion flag checks reconstruction stability. The current
+experiment remains one object with one corruption. If image and geometry-only
+modes are similar, the next experiment should use multiple deterministic
+corruptions of this same Bunny before moving to 10--20 different objects.
