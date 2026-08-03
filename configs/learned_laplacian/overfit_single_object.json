@@ -1,0 +1,35 @@
+{
+  "seed": 7,
+  "device": "cuda",
+  "input_mode": "coarse_plus_multiview",
+  "target_mode": "raw_laplacian",
+  "image_encoder": {
+    "feature_dim": 32
+  },
+  "model": {
+    "hidden_dim": 128,
+    "num_graph_layers": 3,
+    "dropout": 0.0
+  },
+  "training": {
+    "steps": 5000,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0,
+    "loss": "huber",
+    "huber_delta": 0.01,
+    "gradient_clip_norm": 1.0,
+    "log_every": 50,
+    "checkpoint_every": 500
+  },
+  "reconstruction": {
+    "operator_type": "uniform",
+    "lambda_lap": 1.0,
+    "lambda_anchor": 0.01,
+    "lambda_edge": 0.0,
+    "num_iters": 500,
+    "learning_rate": 0.01,
+    "robust_loss": "huber",
+    "huber_delta": 0.01,
+    "chamfer_samples": 1000
+  }
+}
