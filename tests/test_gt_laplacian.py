@@ -12,11 +12,12 @@ from mlr.gt_laplacian import (
     interpolate_gt_laplacian_to_coarse,
     refine_coarse_mesh_with_gt_laplacian,
 )
+from mlr.laplacian import build_laplacian
 from mlr.refinement import RefinementConfig
 
 
 class GTLaplacianTests(unittest.TestCase):
-    def test_interpolates_gt_values_with_barycentric_weights(self):
+    def test_target_uses_projected_positions_on_the_coarse_graph(self):
         gt_mesh = Mesh(
             vertices=np.array(
                 [
@@ -37,22 +38,11 @@ class GTLaplacianTests(unittest.TestCase):
             ),
             faces=np.array([[0, 1, 2]]),
         )
-        gt_values = np.array(
-            [
-                [1.0, 0.0, 0.0],
-                [0.0, 2.0, 0.0],
-                [0.0, 0.0, 3.0],
-            ]
-        )
-
-        target = interpolate_gt_laplacian_to_coarse(
-            coarse_mesh,
-            gt_mesh,
-            gt_laplacian_values=gt_values,
-        )
+        target = interpolate_gt_laplacian_to_coarse(coarse_mesh, gt_mesh)
 
         np.testing.assert_allclose(target.barycentric[0], [0.5, 0.25, 0.25], atol=1e-12)
-        np.testing.assert_allclose(target.delta_target[0], [0.5, 0.5, 0.75], atol=1e-12)
+        operator = build_laplacian(coarse_mesh.vertices, coarse_mesh.faces, "uniform")
+        np.testing.assert_allclose(target.delta_target, operator.matrix @ target.closest_points)
         self.assertEqual(target.delta_target.shape, coarse_mesh.vertices.shape)
 
     def test_refinement_accepts_interpolated_gt_laplacian_target(self):

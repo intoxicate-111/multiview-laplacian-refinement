@@ -23,6 +23,10 @@ gpu = [
 cuda = [
   "torch>=2.1",
 ]
+train = [
+  "torch>=2.1",
+  "tqdm>=4.66",
+]
 
 [project.scripts]
 mlr = "mlr.cli:main"

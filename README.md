@@ -253,11 +253,11 @@ mlr gt-laplacian-refine \
   --lambda-anchor 0.05
 ```
 
-This computes GT Laplacian coordinates on the GT mesh, projects each coarse
-vertex to the closest GT triangle, barycentrically interpolates the GT
-Laplacian value onto that coarse vertex, then optimizes coarse vertices with
-the existing Laplacian refinement loss. Use `--distance-confidence-scale` to
-down-weight coarse vertices that project far away from the GT surface.
+This projects each coarse vertex to the closest GT triangle, then computes the
+target Laplacian from those projected positions using the coarse mesh graph.
+It does not interpolate GT Laplacian vectors across different samplings. Use
+`--distance-confidence-scale` to down-weight coarse vertices that project far
+away from the GT surface.
 
 Run the coarse-graph GT Laplacian oracle instead, where the GT surface is first
 sampled at the coarse vertex set and the Laplacian target is recomputed with the
@@ -326,3 +326,97 @@ python train.py --config "{config_path}"
 ```
 
 from `--nvdiffrec-root`, then imports the resulting OBJ as the framework coarse mesh. Official nvdiffrec depends on CUDA/nvdiffrast and is designed for NVIDIA GPUs; AMD GPUs can accelerate this repository's OpenGL synthetic rendering, but the upstream nvdiffrec training code typically needs a CUDA-capable NVIDIA environment.
+
+## Single-Object Learned Laplacian Overfitting
+
+This isolated subsystem is a single-object sanity test. It verifies that RGB
+features can be projected onto one mesh graph and used to predict one 3D
+Laplacian vector per vertex. It does **not** demonstrate generalisation.
+
+Install the optional training dependencies without changing the geometry-only
+installation:
+
+```bash
+pip install -e ".[train]"
+```
+
+First generate or obtain multi-view inputs, a prediction/coarse mesh, and a GT
+surface in the same world coordinate system. Prepare one validated `.pt`
+sample with:
+
+```bash
+python scripts/prepare_single_object_sample.py \
+  --dataset inputs_sphere/bunny/dataset.json \
+  --coarse-mesh runs/coarse/bunny_coarse.obj \
+  --gt-mesh inputs_sphere/bunny/mesh.obj \
+  --output inputs/learned_laplacian/bunny.pt \
+  --image-size 128
+```
+
+For a controlled synthetic debugging case, `--coarse-noise-std 0.02` adds a
+deterministic normal-direction perturbation to the supplied coarse mesh before
+constructing the target. The sample stores images `[V,3,H,W]`, intrinsics,
+world-to-camera extrinsics, mesh geometry, visibility, the initial Laplacian,
+the target Laplacian, and target confidence. Shape and finite-value checks fail
+early with field-specific errors.
+
+The target is graph-compatible by construction:
+
+```text
+P_target = closest GT-surface positions for the prediction vertices
+delta_target = L_prediction_graph P_target
+```
+
+Laplacian vectors are never transferred directly from a differently sampled
+GT mesh. Sample preparation calls the repository's existing
+`compute_coarse_graph_gt_laplacian_target` implementation.
+
+Train repeatedly on that one object:
+
+```bash
+python scripts/overfit_single_object.py \
+  --sample inputs/learned_laplacian/bunny.pt \
+  --config configs/learned_laplacian/overfit_single_object.json \
+  --output-dir runs/learned_laplacian/overfit_single_object
+```
+
+The model is intentionally small: a randomly initialized CNN produces
+per-view feature maps; mesh vertices are projected and sampled with
+`grid_sample`; a masked mean produces one image descriptor and valid-view ratio
+per vertex; and three dependency-light `index_add_` graph blocks predict
+`[N,3]` Laplacian vectors. Geometry inputs are position, normal, initial
+Laplacian, and degree.
+
+Camera convention: each 4x4 extrinsic transforms world coordinates to a
+right-handed CV camera with `+X` right, `+Y` down, and `+Z` forward. Image
+coordinates have a top-left origin. With `align_corners=True`, pixels `(0,0)`
+and `(W-1,H-1)` map to grid coordinates `(-1,-1)` and `(1,1)`. Vertices behind
+the camera, outside the image, or false in the optional visibility mask are
+excluded. Vertices with zero valid views receive a zero aggregate without NaNs.
+
+Available ablations are `--input-mode coarse_only`, `--input-mode
+multiview_only`, and `--input-mode coarse_plus_multiview`. `--zero-images`
+zeros encoded image features to test whether geometry alone explains the
+result. Graph connectivity is still required in every mode.
+
+The run writes `training_history.json`, `best.pt`, `delta_target.npy`,
+`delta_pred.npy`, `coarse.obj`, `predicted_refined.obj`,
+`oracle_refined.obj`, and `metrics.json`; it also writes `loss_curve.png` when
+matplotlib is already installed. Reconstruction is evaluation-only and calls
+the existing NumPy Laplacian solver without differentiating through it.
+
+Success means a substantial one-object loss reduction, finite `[N,3]` output,
+a non-collapsed reconstruction, improvement over the coarse mesh on at least
+one reported geometry metric, and an oracle reconstruction that remains an
+upper bound. Run all tests with:
+
+```bash
+python -m pytest
+```
+
+Current limitations: batch size is one, every sample has one fixed topology,
+visibility uses the prepared mask rather than learned occlusion reasoning, the
+existing target/reconstruction path uses dense NumPy Laplacians, and no claim
+is made about unseen objects. The next scaling step should be 10--20 prepared
+objects with topology-aware batching or per-object gradient accumulation,
+train/validation separation, and sparse Laplacian/reconstruction operators.
