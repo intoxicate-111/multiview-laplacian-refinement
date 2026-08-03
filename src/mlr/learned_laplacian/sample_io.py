@@ -8,6 +8,7 @@ from PIL import Image
 
 from mlr.data import Camera, Mesh
 from mlr.datasets import load_masks, load_reconstruction_input
+from mlr.coarse_lap_oracle import apply_uniform_laplacian, build_uniform_laplacian_data
 from mlr.gt_laplacian import GTLaplacianTargetConfig, compute_coarse_graph_gt_laplacian_target
 from mlr.io import load_mesh
 from mlr.laplacian import compute_laplacian_coordinates
@@ -105,6 +106,108 @@ def prepare_single_object_sample(
     return sample
 
 
+def corrupt_same_topology_mesh(
+    gt_mesh: Mesh,
+    noise_std: float = 0.015,
+    smoothing_iters: int = 2,
+    smoothing_strength: float = 0.1,
+    seed: int = 7,
+) -> Mesh:
+    """Create a deterministic recognisable corruption without changing topology."""
+
+    if noise_std < 0:
+        raise ValueError("noise_std must be non-negative.")
+    if smoothing_iters < 0:
+        raise ValueError("smoothing_iters must be non-negative.")
+    if not 0.0 <= smoothing_strength <= 1.0:
+        raise ValueError("smoothing_strength must lie in [0, 1].")
+    gt_mesh = Mesh(gt_mesh.vertices.copy(), gt_mesh.faces.copy()).ensure_normals()
+    vertices = gt_mesh.vertices.copy()
+    laplacian_data = build_uniform_laplacian_data(gt_mesh.faces, gt_mesh.num_vertices)
+    for _ in range(smoothing_iters):
+        laplacian = apply_uniform_laplacian(vertices, laplacian_data)
+        vertices -= float(smoothing_strength) * laplacian
+    smoothed = Mesh(vertices, gt_mesh.faces.copy()).ensure_normals()
+    if noise_std > 0:
+        rng = np.random.default_rng(seed)
+        normal_offsets = rng.normal(0.0, noise_std, size=(gt_mesh.num_vertices, 1))
+        vertices = vertices + normal_offsets * smoothed.normals
+    return Mesh(vertices, gt_mesh.faces.copy()).ensure_normals()
+
+
+def prepare_same_topology_sample(
+    dataset_path: str | Path,
+    coarse_mesh_path: str | Path,
+    gt_mesh_path: str | Path,
+    output_path: str | Path | None = None,
+    image_size: int | None = None,
+    seed: int = 7,
+    extra_metadata: dict | None = None,
+) -> dict:
+    """Prepare a scalable uniform-Laplacian sample with exact GT correspondences.
+
+    This path is intended for controlled experiments where coarse and GT meshes
+    have identical vertex/face topology. It avoids dense N-by-N matrices and
+    defines ``delta_target = L_prediction_graph @ GT_vertices`` using the
+    repository's sparse coarse-oracle implementation.
+    """
+
+    reconstruction = load_reconstruction_input(dataset_path)
+    coarse_mesh = load_mesh(coarse_mesh_path).ensure_normals()
+    gt_mesh = load_mesh(gt_mesh_path).ensure_normals()
+    if coarse_mesh.num_vertices != gt_mesh.num_vertices:
+        raise ValueError("Same-topology preparation requires equal coarse and GT vertex counts.")
+    if coarse_mesh.faces.shape != gt_mesh.faces.shape or not np.array_equal(
+        coarse_mesh.faces, gt_mesh.faces
+    ):
+        raise ValueError("Same-topology preparation requires identical coarse and GT faces.")
+
+    images, scale_xy = _load_images(reconstruction.image_paths, image_size)
+    intrinsics, extrinsics = _camera_tensors(reconstruction.cameras, scale_xy)
+    masks = load_masks(reconstruction.mask_paths)
+    visibility = None
+    if masks is not None:
+        resized_masks = [_resize_mask(mask, images.shape[-2:]) for mask in masks]
+        visibility = _mask_visibility(
+            coarse_mesh.vertices, reconstruction.cameras, resized_masks, scale_xy
+        )
+
+    laplacian_data = build_uniform_laplacian_data(coarse_mesh.faces, coarse_mesh.num_vertices)
+    initial_laplacian = apply_uniform_laplacian(coarse_mesh.vertices, laplacian_data)
+    target_laplacian = apply_uniform_laplacian(gt_mesh.vertices, laplacian_data)
+    metadata = {
+        "dataset_path": str(Path(dataset_path)),
+        "coarse_mesh_path": str(Path(coarse_mesh_path)),
+        "gt_mesh_path": str(Path(gt_mesh_path)),
+        "operator_type": "uniform",
+        "target_constructor": "same_topology_correspondence_sparse_uniform",
+        "camera_convention": "right-handed CV world-to-camera, +Z forward, +X right, +Y down",
+        "seed": int(seed),
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    sample = {
+        "sample_id": Path(gt_mesh_path).stem,
+        "images": images,
+        "intrinsics": torch.as_tensor(intrinsics, dtype=torch.float32),
+        "extrinsics": torch.as_tensor(extrinsics, dtype=torch.float32),
+        "vertices": torch.as_tensor(coarse_mesh.vertices, dtype=torch.float32),
+        "faces": torch.as_tensor(coarse_mesh.faces, dtype=torch.long),
+        "vertex_normals": torch.as_tensor(coarse_mesh.normals, dtype=torch.float32),
+        "initial_laplacian": torch.as_tensor(initial_laplacian, dtype=torch.float32),
+        "laplacian_target": torch.as_tensor(target_laplacian, dtype=torch.float32),
+        "target_confidence": torch.ones(coarse_mesh.num_vertices, dtype=torch.float32),
+        "visibility": None if visibility is None else torch.as_tensor(visibility, dtype=torch.bool),
+        "target_positions": torch.as_tensor(gt_mesh.vertices, dtype=torch.float32),
+        "gt_vertices": torch.as_tensor(gt_mesh.vertices, dtype=torch.float32),
+        "gt_faces": torch.as_tensor(gt_mesh.faces, dtype=torch.long),
+        "metadata": metadata,
+    }
+    if output_path is not None:
+        save_prepared_sample(sample, output_path)
+    return sample
+
+
 def _load_images(paths: list[Path], image_size: int | None) -> tuple[torch.Tensor, tuple[float, float]]:
     arrays = []
     original_size = None
@@ -128,6 +231,23 @@ def _load_images(paths: list[Path], image_size: int | None) -> tuple[torch.Tenso
         raise ValueError("Dataset must contain at least one image.")
     scale_xy = (target_size[0] / original_size[0], target_size[1] / original_size[1])
     return torch.from_numpy(np.stack(arrays)), scale_xy
+
+
+def _camera_tensors(
+    cameras: list[Camera], scale_xy: tuple[float, float]
+) -> tuple[np.ndarray, np.ndarray]:
+    intrinsics = []
+    extrinsics = []
+    for camera in cameras:
+        scaled = camera.intrinsics.copy()
+        scaled[0, :] *= scale_xy[0]
+        scaled[1, :] *= scale_xy[1]
+        intrinsics.append(scaled)
+        extrinsic = np.eye(4, dtype=np.float64)
+        extrinsic[:3, :3] = camera.rotation
+        extrinsic[:3, 3] = camera.translation
+        extrinsics.append(extrinsic)
+    return np.stack(intrinsics), np.stack(extrinsics)
 
 
 def _resize_mask(mask: np.ndarray, image_hw: tuple[int, int]) -> np.ndarray:
