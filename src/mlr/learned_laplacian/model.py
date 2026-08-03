@@ -54,9 +54,16 @@ class LearnedLaplacianModel(nn.Module):
 
     def forward(self, sample: Mapping[str, Any]) -> LearnedLaplacianOutput:
         images = sample["images"]
-        feature_maps = self.image_encoder(images)
         if self.zero_images or self.input_mode == "coarse_only":
-            feature_maps = torch.zeros_like(feature_maps)
+            feature_height = (images.shape[-2] + 1) // 2
+            feature_height = (feature_height + 1) // 2
+            feature_width = (images.shape[-1] + 1) // 2
+            feature_width = (feature_width + 1) // 2
+            feature_maps = images.new_zeros(
+                (images.shape[0], self.image_feature_dim, feature_height, feature_width)
+            )
+        else:
+            feature_maps = self.image_encoder(images)
         height, width = images.shape[-2:]
         per_view, valid, _ = sample_vertex_features(
             feature_maps=feature_maps,
@@ -68,14 +75,18 @@ class LearnedLaplacianModel(nn.Module):
         )
         aggregated, valid_ratio = masked_mean_aggregate(per_view, valid)
 
-        edge_index = faces_to_edge_index(sample["faces"], sample["vertices"].shape[0])
-        degree = sample["vertices"].new_zeros((sample["vertices"].shape[0], 1))
-        if edge_index.numel() > 0:
-            degree.index_add_(
-                0,
-                edge_index[1],
-                torch.ones((edge_index.shape[1], 1), dtype=degree.dtype, device=degree.device),
-            )
+        edge_index = sample.get("edge_index")
+        if edge_index is None:
+            edge_index = faces_to_edge_index(sample["faces"], sample["vertices"].shape[0])
+        degree = sample.get("vertex_degree")
+        if degree is None:
+            degree = sample["vertices"].new_zeros((sample["vertices"].shape[0], 1))
+            if edge_index.numel() > 0:
+                degree.index_add_(
+                    0,
+                    edge_index[1],
+                    torch.ones((edge_index.shape[1], 1), dtype=degree.dtype, device=degree.device),
+                )
         geometry = torch.cat(
             (
                 sample["vertices"],

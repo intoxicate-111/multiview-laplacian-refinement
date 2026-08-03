@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import random
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,6 +13,7 @@ import torch
 
 from .dataset import move_sample_to_device, validate_sample
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
+from .graph_layers import faces_to_edge_index
 from .model import LearnedLaplacianModel
 
 
@@ -25,6 +27,8 @@ class TrainingResult:
     best_step: int
     prediction_metrics: dict[str, float]
     device: str
+    runtime_seconds: float
+    peak_gpu_memory_mb: float | None
 
 
 def train_single_object(
@@ -42,6 +46,18 @@ def train_single_object(
     requested_device = device_override or str(config.get("device", "cpu"))
     device = _resolve_device(requested_device)
     device_sample = move_sample_to_device(sample, device)
+    edge_index = faces_to_edge_index(
+        device_sample["faces"], device_sample["vertices"].shape[0]
+    )
+    degree = device_sample["vertices"].new_zeros((device_sample["vertices"].shape[0], 1))
+    if edge_index.numel() > 0:
+        degree.index_add_(
+            0,
+            edge_index[1],
+            torch.ones((edge_index.shape[1], 1), dtype=degree.dtype, device=device),
+        )
+    device_sample["edge_index"] = edge_index
+    device_sample["vertex_degree"] = degree
 
     image_config = config.get("image_encoder", {})
     model_config = config.get("model", {})
@@ -72,6 +88,9 @@ def train_single_object(
     output_path = None if output_dir is None else Path(output_dir)
     if output_path is not None:
         output_path.mkdir(parents=True, exist_ok=True)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    start_time = time.perf_counter()
 
     model.train()
     with torch.no_grad():
@@ -140,6 +159,10 @@ def train_single_object(
         (output_path / "training_history.json").write_text(
             json.dumps(history, indent=2), encoding="utf-8"
         )
+    runtime_seconds = time.perf_counter() - start_time
+    peak_gpu_memory_mb = None
+    if device.type == "cuda":
+        peak_gpu_memory_mb = torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)
     return TrainingResult(
         model=model,
         history=history,
@@ -149,6 +172,8 @@ def train_single_object(
         best_step=best_step,
         prediction_metrics=metrics,
         device=str(device),
+        runtime_seconds=float(runtime_seconds),
+        peak_gpu_memory_mb=peak_gpu_memory_mb,
     )
 
 

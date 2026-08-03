@@ -6,11 +6,15 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
-from mlr.coarse_lap_oracle import chamfer_distance, point_to_surface_stats
+from mlr.coarse_lap_oracle import (
+    build_uniform_laplacian_data,
+    oracle_loss_and_grad,
+    point_to_surface_stats as numpy_point_to_surface_stats,
+)
 from mlr.data import Mesh
 from mlr.io import save_mesh
 from mlr.laplacian import unique_edges
-from mlr.refinement import RefinementConfig, refine_mesh_with_laplacian
+from mlr.refinement import RefinementConfig, RefinementResult, refine_mesh_with_laplacian
 
 from .losses import laplacian_prediction_metrics
 
@@ -46,23 +50,17 @@ def reconstruct_and_evaluate(
         robust_loss=str(reconstruction_config.get("robust_loss", "huber")),
         huber_delta=float(reconstruction_config.get("huber_delta", 0.01)),
     )
-    predicted_result = refine_mesh_with_laplacian(
-        coarse,
-        prediction,
-        confidence=confidence,
-        anchors=vertices,
-        config=refinement,
+    dense_vertex_limit = int(reconstruction_config.get("dense_vertex_limit", 5000))
+    predicted_result, solver_name = _reconstruct(
+        coarse, prediction, confidence, refinement, dense_vertex_limit
     )
-    oracle_result = refine_mesh_with_laplacian(
-        coarse,
-        target,
-        confidence=confidence,
-        anchors=vertices,
-        config=refinement,
+    oracle_result, oracle_solver_name = _reconstruct(
+        coarse, target, confidence, refinement, dense_vertex_limit
     )
 
     np.save(output_dir / "delta_target.npy", target)
     np.save(output_dir / "delta_pred.npy", prediction)
+    np.save(output_dir / "laplacian_error.npy", np.linalg.norm(prediction - target, axis=1))
     save_mesh(coarse, output_dir / "coarse.obj")
     save_mesh(predicted_result.mesh, output_dir / "predicted_refined.obj")
     save_mesh(oracle_result.mesh, output_dir / "oracle_refined.obj")
@@ -86,6 +84,10 @@ def reconstruct_and_evaluate(
             distances = np.linalg.norm(mesh.vertices - target_positions_np, axis=1)
             geometry[name]["target_position_rmse"] = float(np.sqrt(np.mean(distances**2)))
             geometry[name]["target_position_mae"] = float(np.mean(distances))
+        np.save(
+            output_dir / "position_error.npy",
+            np.linalg.norm(predicted_result.vertices - target_positions_np, axis=1),
+        )
 
     if sample.get("gt_vertices") is not None and sample.get("gt_faces") is not None:
         gt_mesh = Mesh(
@@ -93,17 +95,21 @@ def reconstruct_and_evaluate(
             _numpy(sample["gt_faces"]).astype(np.int64),
         ).ensure_normals()
         chamfer_samples = int(reconstruction_config.get("chamfer_samples", 1000))
+        metric_seed = int(reconstruction_config.get("metric_seed", 7))
         for name, mesh in (
             ("coarse", coarse),
             ("predicted", predicted_result.mesh),
             ("oracle", oracle_result.mesh),
         ):
-            surface = point_to_surface_stats(mesh.vertices, gt_mesh)
+            surface = _point_to_surface_stats(mesh.vertices, gt_mesh)
             geometry[name]["point_to_surface_mean"] = float(surface["mean"])
+            geometry[name]["point_to_surface_median"] = float(surface["median"])
             geometry[name]["point_to_surface_max"] = float(surface["max"])
+            geometry[name]["point_to_surface_engine"] = surface["engine"]
             geometry[name]["chamfer"] = float(
-                chamfer_distance(mesh, gt_mesh, samples=chamfer_samples, seed=7)
+                _chamfer_distance(mesh, gt_mesh, samples=chamfer_samples, seed=metric_seed)
             )
+            geometry[name]["normal_consistency"] = _normal_consistency(mesh, gt_mesh)
 
     coarse_metric = geometry["coarse"].get("point_to_surface_mean")
     predicted_metric = geometry["predicted"].get("point_to_surface_mean")
@@ -123,6 +129,8 @@ def reconstruct_and_evaluate(
             "all_finite": bool(
                 np.isfinite(predicted_result.vertices).all() and np.isfinite(oracle_result.vertices).all()
             ),
+            "predicted_solver": solver_name,
+            "oracle_solver": oracle_solver_name,
         },
     }
 
@@ -143,7 +151,128 @@ def _mesh_quality_metrics(mesh: Mesh, reference: Mesh) -> dict[str, float | bool
         "bbox_diagonal": diagonal,
         "bbox_diagonal_ratio_to_coarse": diagonal / max(reference_diagonal, 1e-12),
         "mean_edge_length": mean_edge,
+        "collapsed_or_exploded": bool(
+            not np.isfinite(diagonal)
+            or diagonal / max(reference_diagonal, 1e-12) < 0.25
+            or diagonal / max(reference_diagonal, 1e-12) > 4.0
+            or mean_edge <= 1e-12
+        ),
     }
+
+
+def _reconstruct(
+    mesh: Mesh,
+    delta_target: np.ndarray,
+    confidence: np.ndarray,
+    config: RefinementConfig,
+    dense_vertex_limit: int,
+) -> tuple[RefinementResult, str]:
+    if mesh.num_vertices <= dense_vertex_limit or config.operator_type != "uniform":
+        result = refine_mesh_with_laplacian(
+            mesh,
+            delta_target,
+            confidence=confidence,
+            anchors=mesh.vertices,
+            config=config,
+        )
+        return result, "dense_refinement"
+    if not np.allclose(confidence, 1.0):
+        raise ValueError("Large sparse reconstruction currently requires uniform confidence.")
+    return _refine_sparse_uniform(mesh, delta_target, config), "sparse_uniform_oracle_core"
+
+
+def _refine_sparse_uniform(
+    mesh: Mesh,
+    delta_target: np.ndarray,
+    config: RefinementConfig,
+) -> RefinementResult:
+    """Reuse the existing coarse-oracle sparse loss/gradient for large meshes."""
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float64).copy()
+    anchors = vertices.copy()
+    data = build_uniform_laplacian_data(mesh.faces, mesh.num_vertices)
+    no_edges = np.zeros((0, 2), dtype=np.int64)
+    no_lengths = np.zeros((0,), dtype=np.float64)
+    m = np.zeros_like(vertices)
+    v = np.zeros_like(vertices)
+    history: list[dict[str, float]] = []
+    for step in range(0, config.num_iters + 1):
+        total, grad, parts = oracle_loss_and_grad(
+            vertices,
+            data,
+            delta_target,
+            anchors,
+            anchors,
+            no_edges,
+            no_lengths,
+            config.lambda_lap,
+            config.lambda_anchor,
+            0.0,
+            0.0,
+        )
+        if step == 0 or step == config.num_iters or step % max(config.log_every, 1) == 0:
+            history.append({"iter": float(step), "loss": float(total), **parts})
+        if step == config.num_iters:
+            break
+        update_step = step + 1
+        m = 0.9 * m + 0.1 * grad
+        v = 0.999 * v + 0.001 * (grad * grad)
+        m_hat = m / (1.0 - 0.9**update_step)
+        v_hat = v / (1.0 - 0.999**update_step)
+        vertices -= config.learning_rate * m_hat / (np.sqrt(v_hat) + 1e-8)
+    refined = mesh.with_vertices(vertices)
+    return RefinementResult(mesh=refined, vertices=vertices, history=history, operator=None)
+
+
+def _point_to_surface_stats(points: np.ndarray, surface_mesh: Mesh) -> dict[str, float | str]:
+    if len(points) <= 5000 and surface_mesh.num_faces <= 10000:
+        result = numpy_point_to_surface_stats(points, surface_mesh)
+        return {**result, "engine": "numpy_exact"}
+    try:
+        import trimesh
+    except ImportError as exc:
+        raise RuntimeError(
+            "Large-mesh surface metrics require the optional bunny dependencies. "
+            "Install with pip install -e '.[train,bunny]'."
+        ) from exc
+    surface = trimesh.Trimesh(
+        vertices=surface_mesh.vertices,
+        faces=surface_mesh.faces,
+        process=False,
+    )
+    _, distances, _ = trimesh.proximity.closest_point(surface, np.asarray(points))
+    distances = np.asarray(distances, dtype=np.float64)
+    return {
+        "mean": float(np.mean(distances)),
+        "rmse": float(np.sqrt(np.mean(distances * distances))),
+        "median": float(np.median(distances)),
+        "max": float(np.max(distances)),
+        "engine": "trimesh_rtree_exact",
+    }
+
+
+def _chamfer_distance(mesh: Mesh, gt_mesh: Mesh, samples: int, seed: int) -> float:
+    mesh_points = _sample_vertices(mesh.vertices, samples, seed)
+    gt_points = _sample_vertices(gt_mesh.vertices, samples, seed + 1)
+    mesh_to_gt = _point_to_surface_stats(mesh_points, gt_mesh)["mean"]
+    gt_to_mesh = _point_to_surface_stats(gt_points, mesh)["mean"]
+    return 0.5 * (float(mesh_to_gt) + float(gt_to_mesh))
+
+
+def _sample_vertices(vertices: np.ndarray, samples: int, seed: int) -> np.ndarray:
+    if samples <= 0 or samples >= len(vertices):
+        return vertices
+    rng = np.random.default_rng(seed)
+    return vertices[rng.choice(len(vertices), size=samples, replace=False)]
+
+
+def _normal_consistency(mesh: Mesh, gt_mesh: Mesh) -> float:
+    if mesh.num_vertices != gt_mesh.num_vertices or not np.array_equal(mesh.faces, gt_mesh.faces):
+        return float("nan")
+    mesh.ensure_normals()
+    gt_mesh.ensure_normals()
+    dots = np.einsum("ij,ij->i", mesh.normals, gt_mesh.normals)
+    return float(np.mean(np.clip(dots, -1.0, 1.0)))
 
 
 def _numpy(value: torch.Tensor | np.ndarray) -> np.ndarray:

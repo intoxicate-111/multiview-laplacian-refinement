@@ -27,6 +27,10 @@ train = [
   "torch>=2.1",
   "tqdm>=4.66",
 ]
+bunny = [
+  "trimesh>=4.4",
+  "rtree>=1.2",
+]
 
 [project.scripts]
 mlr = "mlr.cli:main"
