@@ -93,14 +93,16 @@ def reconstruct_and_evaluate(
             _numpy(sample["gt_faces"]).astype(np.int64),
         ).ensure_normals()
         chamfer_samples = int(reconstruction_config.get("chamfer_samples", 1000))
-        for index, (name, mesh) in enumerate(
-            (("coarse", coarse), ("predicted", predicted_result.mesh), ("oracle", oracle_result.mesh))
+        for name, mesh in (
+            ("coarse", coarse),
+            ("predicted", predicted_result.mesh),
+            ("oracle", oracle_result.mesh),
         ):
             surface = point_to_surface_stats(mesh.vertices, gt_mesh)
             geometry[name]["point_to_surface_mean"] = float(surface["mean"])
             geometry[name]["point_to_surface_max"] = float(surface["max"])
             geometry[name]["chamfer"] = float(
-                chamfer_distance(mesh, gt_mesh, samples=chamfer_samples, seed=7 + index)
+                chamfer_distance(mesh, gt_mesh, samples=chamfer_samples, seed=7)
             )
 
     coarse_metric = geometry["coarse"].get("point_to_surface_mean")
