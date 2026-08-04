@@ -500,3 +500,59 @@ collapse/explosion flag checks reconstruction stability. The current
 experiment remains one object with one corruption. If image and geometry-only
 modes are similar, the next experiment should use multiple deterministic
 corruptions of this same Bunny before moving to 10--20 different objects.
+
+## Edge-Scale-Normalized Laplacian Target
+
+The learned subsystem supports `target_mode` values `raw_laplacian` and
+`edge_scale_normalized_laplacian`. For vertex `i`, `h_i` is the mean length of
+its unique undirected incident edges on the input prediction mesh. The scale
+is the square of that mean, not the mean of squared edge lengths:
+
+```text
+scale_i = h_i^2
+delta_hat_target_i = delta_target_i / (h_i^2 + epsilon)
+delta_pred_i = delta_hat_pred_i * h_i^2
+```
+
+The default `epsilon` is `1e-12`. Loss is evaluated in the selected target
+space, while the existing reconstruction solver always receives denormalized
+raw `delta_pred`. Clipping is disabled unless
+`target_scaling.clip_max_norm` is explicitly configured, and its affected
+vertex count is reported. Legacy prepared samples remain valid: scale fields
+are derived on load and `laplacian_target` keeps its raw meaning. New samples
+also store raw and normalized targets, `h`, `h^2`, the definition, source
+graph, epsilon, and isolated-vertex count.
+
+This transform is not globally scale invariant. Scaling coordinates by `a`
+makes a first-order uniform Laplacian scale by `a`, but makes `h^2` scale by
+`a^2`, so `delta_hat` scales by `1/a` on nonisolated vertices. Run the measured
+global and same-surface cross-resolution diagnostic with:
+
+```bash
+python scripts/diagnose_edge_scale_normalization.py --fine-mesh inputs/stanford-bunny/mesh.obj --coarse-face-count 7000 --output-dir runs/learned_laplacian/edge_scale_diagnostics --epsilon 1e-12
+```
+
+The diagnostic uses Open3D quadric simplification to keep both resolutions on
+the same Bunny surface, saves `diagnostics.json` and the underlying NPZ arrays,
+and reports all-vertex and nonisolated statistics separately. This local Bunny
+OBJ has 1,113 of 35,947 stored vertices absent from every face. Those vertices
+receive `h=0`. Under the required formula their normalized targets are
+epsilon-dominated (up to roughly `8.37e11` here), and multiplication by `h^2`
+cannot recover a nonzero isolated-vertex raw target. No clipping or masking is
+silently applied.
+
+The matched 300-step CPU runs reuse the raw baseline's sample, views,
+corruption, seed, architecture, optimizer, and reconstruction settings:
+
+```bash
+python scripts/overfit_single_object.py --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt --config configs/learned_laplacian/overfit_bunny_edge_normalized.json --output-dir runs/learned_laplacian/bunny_edge_normalized/coarse_only --input-mode coarse_only --device cpu --steps 300
+python scripts/overfit_single_object.py --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt --config configs/learned_laplacian/overfit_bunny_edge_normalized.json --output-dir runs/learned_laplacian/bunny_edge_normalized/coarse_plus_multiview --input-mode coarse_plus_multiview --device cpu --steps 300
+python scripts/compare_edge_scale_bunny.py --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt --raw-root runs/learned_laplacian/bunny_overfit --normalized-root runs/learned_laplacian/bunny_edge_normalized --output runs/learned_laplacian/bunny_edge_normalized/comparison.json --epsilon 1e-12
+```
+
+For this unmodified topology and budget, both normalized runs fail and are
+marked exploded; both raw-target baselines remain stable and improve over the
+coarse mesh. This is a negative experimental result, not evidence against
+scale normalization on cleaned manifold graphs. A follow-up must state and
+test an explicit isolated-vertex policy (topology cleanup, masking, or bounded
+scaling) instead of introducing it implicitly into this matched comparison.

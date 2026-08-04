@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 from mlr.learned_laplacian.model import LearnedLaplacianModel
@@ -37,3 +39,18 @@ def test_cpu_training_decreases_loss_and_checkpoint_round_trips(tmp_path):
     assert loaded["step"] == result.best_step
     for expected, actual in zip(result.model.parameters(), restored.parameters()):
         torch.testing.assert_close(expected, actual)
+
+
+def test_edge_scale_normalized_target_mode_trains_and_reports_mode(tmp_path):
+    config = _config()
+    config["training"]["steps"] = 5
+    config["target_mode"] = "edge_scale_normalized_laplacian"
+    config["target_scaling"] = {"epsilon": 1e-12, "clip_max_norm": None}
+
+    result = train_single_object(tiny_sample(), config, tmp_path, progress=False)
+
+    assert result.target_mode == "edge_scale_normalized_laplacian"
+    assert result.target_scaling_epsilon == 1e-12
+    assert result.clipped_target_vertices == 0
+    assert math.isfinite(result.best_loss)
+    assert all(math.isfinite(value) for value in result.prediction_metrics.values())

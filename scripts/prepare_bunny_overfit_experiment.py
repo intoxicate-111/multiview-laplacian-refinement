@@ -36,6 +36,12 @@ def main() -> int:
     parser.add_argument("--smoothing-strength", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--backend", choices=["cpu", "opengl", "cuda"], default="cpu")
+    parser.add_argument(
+        "--target-mode",
+        choices=["raw_laplacian", "edge_scale_normalized_laplacian"],
+        default="raw_laplacian",
+    )
+    parser.add_argument("--edge-scale-epsilon", type=float, default=1e-12)
     args = parser.parse_args()
     if args.views < 1 or args.image_size < 1:
         raise ValueError("views and image-size must be positive.")
@@ -105,6 +111,8 @@ def main() -> int:
         output_path=sample_path,
         seed=args.seed,
         extra_metadata={"corruption": corruption, "rendering": rendering},
+        target_mode=args.target_mode,
+        edge_scale_epsilon=args.edge_scale_epsilon,
     )
     projection_metrics = _write_projection_debug(sample, inputs_dir, output_root)
     preparation = {

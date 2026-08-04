@@ -15,6 +15,13 @@ from .dataset import move_sample_to_device, validate_sample
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
 from .graph_layers import faces_to_edge_index
 from .model import LearnedLaplacianModel
+from .target_scaling import (
+    EDGE_SCALE_DEFINITION,
+    EDGE_SCALE_NORMALIZED_LAPLACIAN,
+    RAW_LAPLACIAN,
+    TARGET_MODES,
+    normalize_laplacian_by_edge_scale,
+)
 
 
 @dataclass
@@ -29,6 +36,9 @@ class TrainingResult:
     device: str
     runtime_seconds: float
     peak_gpu_memory_mb: float | None
+    target_mode: str
+    target_scaling_epsilon: float
+    clipped_target_vertices: int
 
 
 def train_single_object(
@@ -58,6 +68,36 @@ def train_single_object(
         )
     device_sample["edge_index"] = edge_index
     device_sample["vertex_degree"] = degree
+    target_mode = str(config.get("target_mode", RAW_LAPLACIAN))
+    if target_mode not in TARGET_MODES:
+        raise ValueError(f"target_mode must be one of {sorted(TARGET_MODES)}.")
+    scaling_config = config.get("target_scaling", {})
+    method = str(scaling_config.get("method", EDGE_SCALE_DEFINITION))
+    if method != EDGE_SCALE_DEFINITION:
+        raise ValueError(f"Unsupported target scaling method: {method}.")
+    target_scaling_epsilon = float(scaling_config.get("epsilon", 1e-12))
+    if target_scaling_epsilon <= 0:
+        raise ValueError("target_scaling.epsilon must be positive.")
+    raw_training_target = device_sample["raw_laplacian_target"]
+    if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
+        training_target = normalize_laplacian_by_edge_scale(
+            raw_training_target,
+            device_sample["local_edge_length"],
+            eps=target_scaling_epsilon,
+        )
+    else:
+        training_target = raw_training_target
+    clip_max_norm = scaling_config.get("clip_max_norm")
+    clipped_target_vertices = 0
+    if clip_max_norm is not None:
+        clip_max_norm = float(clip_max_norm)
+        if clip_max_norm <= 0:
+            raise ValueError("target_scaling.clip_max_norm must be positive when enabled.")
+        magnitudes = torch.linalg.vector_norm(training_target, dim=-1)
+        clipped = magnitudes > clip_max_norm
+        clipped_target_vertices = int(clipped.sum().item())
+        factors = (clip_max_norm / magnitudes.clamp_min(1e-12)).clamp_max(1.0)
+        training_target = training_target * factors.unsqueeze(-1)
 
     image_config = config.get("image_encoder", {})
     model_config = config.get("model", {})
@@ -97,7 +137,7 @@ def train_single_object(
         initial_prediction = model(device_sample).predicted_laplacian
         initial_tensor = weighted_robust_laplacian_loss(
             initial_prediction,
-            device_sample["laplacian_target"],
+            training_target,
             device_sample["target_confidence"],
             loss_type=loss_type,
             huber_delta=huber_delta,
@@ -116,7 +156,7 @@ def train_single_object(
         prediction = model(device_sample).predicted_laplacian
         loss = weighted_robust_laplacian_loss(
             prediction,
-            device_sample["laplacian_target"],
+            training_target,
             device_sample["target_confidence"],
             loss_type=loss_type,
             huber_delta=huber_delta,
@@ -154,7 +194,7 @@ def train_single_object(
     model.eval()
     with torch.no_grad():
         best_prediction = model(device_sample).predicted_laplacian
-        metrics = laplacian_prediction_metrics(best_prediction, device_sample["laplacian_target"])
+        metrics = laplacian_prediction_metrics(best_prediction, training_target)
     if output_path is not None:
         (output_path / "training_history.json").write_text(
             json.dumps(history, indent=2), encoding="utf-8"
@@ -174,6 +214,9 @@ def train_single_object(
         device=str(device),
         runtime_seconds=float(runtime_seconds),
         peak_gpu_memory_mb=peak_gpu_memory_mb,
+        target_mode=target_mode,
+        target_scaling_epsilon=target_scaling_epsilon,
+        clipped_target_vertices=clipped_target_vertices,
     )
 
 

@@ -22,6 +22,12 @@ def main() -> int:
     parser.add_argument("--distance-confidence-scale", type=float)
     parser.add_argument("--coarse-noise-std", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--target-mode",
+        choices=["raw_laplacian", "edge_scale_normalized_laplacian"],
+        default="raw_laplacian",
+    )
+    parser.add_argument("--edge-scale-epsilon", type=float, default=1e-12)
     args = parser.parse_args()
     sample = prepare_single_object_sample(
         dataset_path=args.dataset,
@@ -33,6 +39,8 @@ def main() -> int:
         distance_confidence_scale=args.distance_confidence_scale,
         coarse_noise_std=args.coarse_noise_std,
         seed=args.seed,
+        target_mode=args.target_mode,
+        edge_scale_epsilon=args.edge_scale_epsilon,
     )
     print(
         f"Saved {args.output}: views={sample['images'].shape[0]} "

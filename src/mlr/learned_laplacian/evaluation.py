@@ -17,6 +17,8 @@ from mlr.laplacian import unique_edges
 from mlr.refinement import RefinementConfig, RefinementResult, refine_mesh_with_laplacian
 
 from .losses import laplacian_prediction_metrics
+from .graph_layers import faces_to_edge_index
+from .target_scaling import mean_incident_edge_length, normalize_laplacian_by_edge_scale
 
 
 def reconstruct_and_evaluate(
@@ -24,6 +26,8 @@ def reconstruct_and_evaluate(
     predicted_laplacian: torch.Tensor | np.ndarray,
     output_dir: str | Path,
     reconstruction_config: Mapping[str, Any],
+    normalized_prediction: torch.Tensor | np.ndarray | None = None,
+    edge_scale_epsilon: float = 1e-12,
 ) -> dict[str, Any]:
     """Run the existing non-differentiable solver for prediction and oracle evaluation."""
 
@@ -31,13 +35,32 @@ def reconstruct_and_evaluate(
     output_dir.mkdir(parents=True, exist_ok=True)
     vertices = _numpy(sample["vertices"])
     faces = _numpy(sample["faces"]).astype(np.int64)
-    target = _numpy(sample["laplacian_target"])
+    target = _numpy(sample.get("raw_laplacian_target", sample["laplacian_target"]))
     confidence = _numpy(sample["target_confidence"])
     prediction = _numpy(predicted_laplacian)
     if prediction.shape != vertices.shape:
         raise ValueError(f"predicted_laplacian must have shape {vertices.shape}, got {prediction.shape}.")
     if not np.isfinite(prediction).all():
         raise ValueError("predicted_laplacian contains NaN or infinite values.")
+    if "local_edge_length" in sample:
+        local_edge_length_t = torch.as_tensor(sample["local_edge_length"]).detach().cpu()
+    else:
+        # Keep the public evaluation entry point compatible with legacy samples,
+        # including callers that do not pass through load_prepared_sample().
+        vertices_t = torch.as_tensor(vertices)
+        edge_index = faces_to_edge_index(torch.as_tensor(faces, dtype=torch.long))
+        local_edge_length_t = mean_incident_edge_length(vertices_t, edge_index).cpu()
+    normalized_target_t = normalize_laplacian_by_edge_scale(
+        torch.as_tensor(target), local_edge_length_t, eps=edge_scale_epsilon
+    )
+    if normalized_prediction is None:
+        normalized_prediction_t = normalize_laplacian_by_edge_scale(
+            torch.as_tensor(prediction), local_edge_length_t, eps=edge_scale_epsilon
+        )
+    else:
+        normalized_prediction_t = torch.as_tensor(normalized_prediction).detach().cpu()
+    if tuple(normalized_prediction_t.shape) != tuple(normalized_target_t.shape):
+        raise ValueError("normalized_prediction must have shape [N, 3].")
 
     coarse = Mesh(vertices.copy(), faces.copy()).ensure_normals()
     refinement = RefinementConfig(
@@ -60,13 +83,24 @@ def reconstruct_and_evaluate(
 
     np.save(output_dir / "delta_target.npy", target)
     np.save(output_dir / "delta_pred.npy", prediction)
+    np.save(output_dir / "delta_hat_target.npy", normalized_target_t.numpy())
+    np.save(output_dir / "delta_hat_pred.npy", normalized_prediction_t.numpy())
+    np.save(output_dir / "local_edge_length.npy", local_edge_length_t.numpy())
+    np.save(output_dir / "local_edge_scale.npy", local_edge_length_t.square().numpy())
     np.save(output_dir / "laplacian_error.npy", np.linalg.norm(prediction - target, axis=1))
+    np.save(
+        output_dir / "normalized_laplacian_error.npy",
+        torch.linalg.vector_norm(normalized_prediction_t - normalized_target_t, dim=-1).numpy(),
+    )
     save_mesh(coarse, output_dir / "coarse.obj")
     save_mesh(predicted_result.mesh, output_dir / "predicted_refined.obj")
     save_mesh(oracle_result.mesh, output_dir / "oracle_refined.obj")
 
-    prediction_metrics = laplacian_prediction_metrics(
+    raw_prediction_metrics = laplacian_prediction_metrics(
         torch.as_tensor(prediction), torch.as_tensor(target)
+    )
+    normalized_prediction_metrics = laplacian_prediction_metrics(
+        normalized_prediction_t, normalized_target_t
     )
     geometry = {
         "coarse": _mesh_quality_metrics(coarse, coarse),
@@ -120,7 +154,9 @@ def reconstruct_and_evaluate(
         coarse_metric is not None and predicted_metric is not None and predicted_metric < coarse_metric
     )
     return {
-        "laplacian_prediction": prediction_metrics,
+        "laplacian_prediction": raw_prediction_metrics,
+        "laplacian_prediction_raw": raw_prediction_metrics,
+        "laplacian_prediction_normalized": normalized_prediction_metrics,
         "geometry": geometry,
         "predicted_improves_over_coarse": improves,
         "reconstruction": {
@@ -240,15 +276,43 @@ def _point_to_surface_stats(points: np.ndarray, surface_mesh: Mesh) -> dict[str,
         faces=surface_mesh.faces,
         process=False,
     )
-    _, distances, _ = trimesh.proximity.closest_point(surface, np.asarray(points))
+    points = np.asarray(points)
+    point_diagonal = float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
+    surface_diagonal = float(
+        np.linalg.norm(surface_mesh.vertices.max(axis=0) - surface_mesh.vertices.min(axis=0))
+    )
+    scale_ratio = point_diagonal / max(surface_diagonal, 1e-12)
+    if scale_ratio < 0.25 or scale_ratio > 4.0:
+        distances = _nearest_vertex_distances(points, surface_mesh.vertices)
+        engine = "scipy_nearest_vertex_upper_bound_bbox_fallback"
+    else:
+        try:
+            _, distances, _ = trimesh.proximity.closest_point(surface, points)
+            engine = "trimesh_rtree_exact"
+        except Exception as exc:
+            # R-tree face candidates can exhaust memory for a severely exploded
+            # prediction whose query boxes span most of the reference mesh. A
+            # nearest reference vertex is a conservative (upper-bound) distance
+            # and still lets failure diagnostics complete without hiding collapse.
+            if not isinstance(exc, MemoryError) and exc.__class__.__name__ != "RTreeError":
+                raise
+            distances = _nearest_vertex_distances(points, surface_mesh.vertices)
+            engine = "scipy_nearest_vertex_upper_bound_error_fallback"
     distances = np.asarray(distances, dtype=np.float64)
     return {
         "mean": float(np.mean(distances)),
         "rmse": float(np.sqrt(np.mean(distances * distances))),
         "median": float(np.median(distances)),
         "max": float(np.max(distances)),
-        "engine": "trimesh_rtree_exact",
+        "engine": engine,
     }
+
+
+def _nearest_vertex_distances(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    from scipy.spatial import cKDTree
+
+    distances, _ = cKDTree(vertices).query(points, workers=-1)
+    return np.asarray(distances, dtype=np.float64)
 
 
 def _chamfer_distance(mesh: Mesh, gt_mesh: Mesh, samples: int, seed: int) -> float:

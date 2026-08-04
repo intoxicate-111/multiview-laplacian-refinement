@@ -30,6 +30,7 @@ train = [
 bunny = [
   "trimesh>=4.4",
   "rtree>=1.2",
+  "open3d>=0.18",
 ]
 
 [project.scripts]

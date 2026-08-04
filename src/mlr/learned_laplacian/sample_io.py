@@ -14,6 +14,16 @@ from mlr.io import load_mesh
 from mlr.laplacian import compute_laplacian_coordinates
 
 from .dataset import save_prepared_sample
+from .graph_layers import faces_to_edge_index
+from .target_scaling import (
+    EDGE_SCALE_DEFINITION,
+    EDGE_SCALE_SOURCE,
+    RAW_LAPLACIAN,
+    TARGET_MODES,
+    edge_scale_statistics,
+    mean_incident_edge_length,
+    normalize_laplacian_by_edge_scale,
+)
 
 
 def prepare_single_object_sample(
@@ -26,6 +36,8 @@ def prepare_single_object_sample(
     distance_confidence_scale: float | None = None,
     coarse_noise_std: float = 0.0,
     seed: int = 7,
+    target_mode: str = RAW_LAPLACIAN,
+    edge_scale_epsilon: float = 1e-12,
 ) -> dict:
     """Prepare one validated sample while reusing the repository target constructor."""
 
@@ -101,6 +113,7 @@ def prepare_single_object_sample(
             "seed": int(seed),
         },
     }
+    _attach_target_scaling(sample, target_mode, edge_scale_epsilon)
     if output_path is not None:
         save_prepared_sample(sample, output_path)
     return sample
@@ -143,6 +156,8 @@ def prepare_same_topology_sample(
     image_size: int | None = None,
     seed: int = 7,
     extra_metadata: dict | None = None,
+    target_mode: str = RAW_LAPLACIAN,
+    edge_scale_epsilon: float = 1e-12,
 ) -> dict:
     """Prepare a scalable uniform-Laplacian sample with exact GT correspondences.
 
@@ -203,6 +218,7 @@ def prepare_same_topology_sample(
         "gt_faces": torch.as_tensor(gt_mesh.faces, dtype=torch.long),
         "metadata": metadata,
     }
+    _attach_target_scaling(sample, target_mode, edge_scale_epsilon)
     if output_path is not None:
         save_prepared_sample(sample, output_path)
     return sample
@@ -278,3 +294,30 @@ def _mask_visibility(
         indices = np.flatnonzero(valid)
         result[view, indices] = mask[y[indices], x[indices]]
     return result
+
+
+def _attach_target_scaling(sample: dict, target_mode: str, epsilon: float) -> None:
+    if target_mode not in TARGET_MODES:
+        raise ValueError(f"target_mode must be one of {sorted(TARGET_MODES)}.")
+    if epsilon <= 0:
+        raise ValueError("edge_scale_epsilon must be positive.")
+    edge_index = faces_to_edge_index(sample["faces"], sample["vertices"].shape[0])
+    local_edge_length = mean_incident_edge_length(sample["vertices"], edge_index, eps=epsilon)
+    raw_target = sample["laplacian_target"]
+    normalized_target = normalize_laplacian_by_edge_scale(
+        raw_target, local_edge_length, eps=epsilon
+    )
+    sample["local_edge_length"] = local_edge_length
+    sample["local_edge_scale"] = local_edge_length.square()
+    sample["raw_laplacian_target"] = raw_target
+    sample["normalized_laplacian_target"] = normalized_target
+    metadata = sample.setdefault("metadata", {})
+    metadata.update(
+        {
+            "laplacian_target_mode": target_mode,
+            "edge_scale_definition": EDGE_SCALE_DEFINITION,
+            "edge_scale_source": EDGE_SCALE_SOURCE,
+            "edge_scale_epsilon": float(epsilon),
+            "edge_scale_statistics": edge_scale_statistics(local_edge_length),
+        }
+    )

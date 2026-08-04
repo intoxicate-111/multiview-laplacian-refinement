@@ -6,6 +6,16 @@ from typing import Any, Mapping
 import numpy as np
 import torch
 
+from .graph_layers import faces_to_edge_index
+from .target_scaling import (
+    EDGE_SCALE_DEFINITION,
+    EDGE_SCALE_SOURCE,
+    RAW_LAPLACIAN,
+    edge_scale_statistics,
+    mean_incident_edge_length,
+    normalize_laplacian_by_edge_scale,
+)
+
 
 REQUIRED_TENSOR_FIELDS = (
     "images",
@@ -89,7 +99,7 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
     result["faces"] = faces.to(dtype=torch.long)
     if visibility is not None:
         result["visibility"] = visibility.to(dtype=torch.bool)
-    return result
+    return _ensure_target_scaling_fields(result)
 
 
 def load_prepared_sample(path: str | Path, map_location: str | torch.device = "cpu") -> dict[str, Any]:
@@ -136,3 +146,57 @@ def _expect_shape(sample: Mapping[str, Any], name: str, expected: tuple[int, ...
     if actual != expected:
         expected_text = ", ".join(str(value) for value in expected)
         raise ValueError(f"{name} must have shape [{expected_text}], got {actual}.")
+
+
+def _ensure_target_scaling_fields(sample: dict[str, Any]) -> dict[str, Any]:
+    vertices = sample["vertices"]
+    num_vertices = vertices.shape[0]
+    raw_target = sample.get("raw_laplacian_target", sample["laplacian_target"])
+    if not isinstance(raw_target, torch.Tensor) or tuple(raw_target.shape) != (num_vertices, 3):
+        raise ValueError("raw_laplacian_target must have shape [N, 3].")
+    edge_index = sample.get("edge_index")
+    if edge_index is None:
+        edge_index = faces_to_edge_index(sample["faces"], num_vertices)
+    local_edge_length = sample.get("local_edge_length")
+    if local_edge_length is None:
+        local_edge_length = mean_incident_edge_length(vertices, edge_index)
+    if not isinstance(local_edge_length, torch.Tensor) or tuple(local_edge_length.shape) != (
+        num_vertices,
+    ):
+        raise ValueError("local_edge_length must have shape [N].")
+    local_edge_scale = sample.get("local_edge_scale", local_edge_length.square())
+    if not isinstance(local_edge_scale, torch.Tensor) or tuple(local_edge_scale.shape) != (
+        num_vertices,
+    ):
+        raise ValueError("local_edge_scale must have shape [N].")
+    metadata = dict(sample.get("metadata", {}))
+    epsilon = float(metadata.get("edge_scale_epsilon", 1e-12))
+    normalized_target = sample.get("normalized_laplacian_target")
+    if normalized_target is None:
+        normalized_target = normalize_laplacian_by_edge_scale(
+            raw_target, local_edge_length, eps=epsilon
+        )
+    if not isinstance(normalized_target, torch.Tensor) or tuple(normalized_target.shape) != (
+        num_vertices,
+        3,
+    ):
+        raise ValueError("normalized_laplacian_target must have shape [N, 3].")
+    for name, tensor in (
+        ("local_edge_length", local_edge_length),
+        ("local_edge_scale", local_edge_scale),
+        ("raw_laplacian_target", raw_target),
+        ("normalized_laplacian_target", normalized_target),
+    ):
+        if not torch.isfinite(tensor).all():
+            raise ValueError(f"{name} contains NaN or infinite values.")
+    metadata.setdefault("laplacian_target_mode", RAW_LAPLACIAN)
+    metadata.setdefault("edge_scale_definition", EDGE_SCALE_DEFINITION)
+    metadata.setdefault("edge_scale_source", EDGE_SCALE_SOURCE)
+    metadata.setdefault("edge_scale_epsilon", epsilon)
+    metadata["edge_scale_statistics"] = edge_scale_statistics(local_edge_length)
+    sample["metadata"] = metadata
+    sample["raw_laplacian_target"] = raw_target
+    sample["normalized_laplacian_target"] = normalized_target
+    sample["local_edge_length"] = local_edge_length
+    sample["local_edge_scale"] = local_edge_scale
+    return sample
