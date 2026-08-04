@@ -22,6 +22,8 @@ from mlr.learned_laplacian.sample_io import (
     prepare_same_topology_sample,
 )
 from mlr.synthetic import SyntheticRenderConfig, generate_synthetic_dataset
+from mlr.data import Mesh
+from mlr.mesh_cleaning import remove_unreferenced_vertices
 
 
 def main() -> int:
@@ -42,13 +44,24 @@ def main() -> int:
         default="raw_laplacian",
     )
     parser.add_argument("--edge-scale-epsilon", type=float, default=1e-12)
+    parser.add_argument("--remove-unreferenced-vertices", action="store_true")
     args = parser.parse_args()
     if args.views < 1 or args.image_size < 1:
         raise ValueError("views and image-size must be positive.")
 
     output_root = args.output_root
     output_root.mkdir(parents=True, exist_ok=True)
-    gt_mesh = load_mesh(args.gt_mesh).ensure_normals()
+    original_gt_mesh = load_mesh(args.gt_mesh)
+    cleaning = None
+    if args.remove_unreferenced_vertices:
+        cleaning = remove_unreferenced_vertices(original_gt_mesh.vertices, original_gt_mesh.faces)
+        gt_mesh = Mesh(cleaning.vertices, cleaning.faces).ensure_normals()
+        np.save(output_root / "old_to_new_vertex_index.npy", cleaning.old_to_new)
+        np.save(output_root / "new_to_old_vertex_index.npy", cleaning.new_to_old)
+        np.save(output_root / "removed_vertex_indices.npy", cleaning.removed_vertex_indices)
+        np.save(output_root / "removed_face_indices.npy", cleaning.removed_face_indices)
+    else:
+        gt_mesh = original_gt_mesh.ensure_normals()
     coarse_mesh = corrupt_same_topology_mesh(
         gt_mesh,
         noise_std=args.noise_std,
@@ -60,6 +73,8 @@ def main() -> int:
     coarse_path = output_root / "coarse.obj"
     save_mesh(gt_mesh, gt_path)
     save_mesh(coarse_mesh, coarse_path)
+    save_mesh(gt_mesh, output_root / "gt_cleaned.obj")
+    save_mesh(coarse_mesh, output_root / "coarse_corrupted.obj")
 
     inputs_dir = output_root / "inputs"
     if args.reuse_dataset is not None:
@@ -70,6 +85,7 @@ def main() -> int:
             views=args.views,
             image_size=args.image_size,
             seed=args.seed,
+            clean_source_mesh=args.remove_unreferenced_vertices,
         )
         render_source = "resampled_existing_sphere_dataset"
     else:
@@ -103,6 +119,28 @@ def main() -> int:
         "render_mode": "lit",
         "source": render_source,
     }
+    cleaning_metadata = {
+        "enabled": bool(args.remove_unreferenced_vertices),
+        "original_vertex_count": original_gt_mesh.num_vertices,
+        "cleaned_vertex_count": gt_mesh.num_vertices,
+        "removed_vertex_count": original_gt_mesh.num_vertices - gt_mesh.num_vertices,
+        "faces_before": original_gt_mesh.num_faces,
+        "faces_after": gt_mesh.num_faces,
+        "degenerate_faces_removed": (
+            0 if cleaning is None else int(len(cleaning.degenerate_face_indices))
+        ),
+        "duplicate_faces_removed": (
+            0 if cleaning is None else int(len(cleaning.duplicate_face_indices))
+        ),
+    }
+    if cleaning is not None:
+        cleaning_metadata.update(
+            {
+                "old_to_new_vertex_index": "old_to_new_vertex_index.npy",
+                "new_to_old_vertex_index": "new_to_old_vertex_index.npy",
+                "removed_vertex_indices": "removed_vertex_indices.npy",
+            }
+        )
     sample_path = output_root / "prepared_sample.pt"
     sample = prepare_same_topology_sample(
         dataset_path,
@@ -110,7 +148,11 @@ def main() -> int:
         gt_path,
         output_path=sample_path,
         seed=args.seed,
-        extra_metadata={"corruption": corruption, "rendering": rendering},
+        extra_metadata={
+            "corruption": corruption,
+            "rendering": rendering,
+            "cleaning": cleaning_metadata,
+        },
         target_mode=args.target_mode,
         edge_scale_epsilon=args.edge_scale_epsilon,
     )
@@ -124,6 +166,7 @@ def main() -> int:
         "projection": projection_metrics,
         "dataset": str(dataset_path),
         "sample": str(sample_path),
+        "cleaning": cleaning_metadata,
     }
     (output_root / "preparation.json").write_text(
         json.dumps(preparation, indent=2), encoding="utf-8"
@@ -139,11 +182,15 @@ def _resample_dataset(
     views: int,
     image_size: int,
     seed: int,
+    clean_source_mesh: bool,
 ) -> Path:
     source = load_reconstruction_input(source_dataset)
     if source.gt_mesh_path is None:
         raise ValueError("The reused dataset must identify its clean GT mesh.")
     source_mesh = load_mesh(source.gt_mesh_path)
+    if clean_source_mesh:
+        source_cleaning = remove_unreferenced_vertices(source_mesh.vertices, source_mesh.faces)
+        source_mesh = Mesh(source_cleaning.vertices, source_cleaning.faces)
     if source_mesh.vertices.shape != gt_mesh.vertices.shape or not np.allclose(
         source_mesh.vertices, gt_mesh.vertices, atol=1e-7
     ) or not np.array_equal(source_mesh.faces, gt_mesh.faces):
