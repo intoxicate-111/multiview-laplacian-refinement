@@ -561,3 +561,95 @@ coarse mesh. This is a negative experimental result, not evidence against
 scale normalization on cleaned manifold graphs. A follow-up must state and
 test an explicit isolated-vertex policy (topology cleanup, masking, or bounded
 scaling) instead of introducing it implicitly into this matched comparison.
+
+## Cleaned Bunny Edge-Scale-Normalised Experiment
+
+The 1,113 isolated Bunny vertices are OBJ vertex records that are not
+referenced by any triangle, rather than an edge-construction defect. The
+cleaning path removes unreferenced vertices before normals, corruption, graph
+edges, targets, projection, training, reconstruction, evaluation, or
+visualisation are computed. Retained vertices keep their original order and
+floating-point values, faces are remapped deterministically, and old-to-new,
+new-to-old, and removed-index arrays are saved. Deleting vertices that are not
+referenced by any face does not change the rendered triangle surface.
+
+For every vertex with at least one incident edge, the normalised target is
+
+```text
+h_i = mean incident edge length on the coarse prediction mesh
+s_i = h_i^2
+delta_hat_target_i = (L P_target)_i / (s_i + epsilon)
+delta_pred_i = delta_hat_pred_i * s_i
+```
+
+The scale is the square of the mean incident edge length, not the mean of
+squared lengths. An isolated vertex has undefined `h_i`: it is marked false in
+`valid_scale_mask`, receives zero target confidence, and is excluded from
+normalised loss and metrics. Its uniform or zero-weight cotangent Laplacian row
+is all zero, so its Laplacian vector is zero rather than its absolute position.
+Epsilon remains a numerical guard for valid scales; it is not a substitute for
+missing topology.
+
+Diagnose the original OBJ and then prepare the cleaned 24-view, 128-pixel CPU
+sample with the controlled corruption:
+
+```bash
+python scripts/diagnose_bunny_isolated_vertices.py \
+  --mesh inputs/stanford-bunny/mesh.obj \
+  --output runs/learned_laplacian/bunny_cleaned/isolated_vertex_diagnostics.json
+
+python scripts/prepare_bunny_overfit_experiment.py \
+  --gt-mesh inputs/stanford-bunny/mesh.obj \
+  --reuse-dataset inputs_sphere/stanford-bunny/dataset.json \
+  --output-root runs/learned_laplacian/bunny_cleaned \
+  --views 24 \
+  --image-size 128 \
+  --noise-std 0.015 \
+  --smoothing-iters 2 \
+  --smoothing-strength 0.1 \
+  --remove-unreferenced-vertices \
+  --seed 7
+```
+
+The comparison runner first writes raw and normalised pre-training diagnostics,
+then runs geometry-only and geometry-plus-RGB modes with identical capacity,
+seed, reconstruction settings, metric sampling, and 300-step budget:
+
+```bash
+python scripts/run_bunny_normalization_comparison.py \
+  --sample runs/learned_laplacian/bunny_cleaned/prepared_sample.pt \
+  --raw-config configs/learned_laplacian/overfit_bunny.json \
+  --normalized-config configs/learned_laplacian/overfit_bunny_edge_normalized.json \
+  --output-root runs/learned_laplacian/bunny_cleaned \
+  --device cpu \
+  --steps 300
+```
+
+For a diagnostics-only run, invoke `scripts/overfit_single_object.py` with the
+same sample and either config, an output directory, `--diagnostics-only`, and
+`--diagnostics-output <path>`. Regenerate all fixed-camera mesh, shared-range
+surface-error, recovered-raw-Laplacian-error, wireframe, histogram, scatter,
+loss, and geometry-metric figures with:
+
+```bash
+python scripts/visualize_bunny_normalization.py \
+  --sample runs/learned_laplacian/bunny_cleaned/prepared_sample.pt \
+  --output-root runs/learned_laplacian/bunny_cleaned \
+  --image-size 256
+```
+
+The output root contains cleaned/coarse/oracle/refined OBJ files and prediction
+arrays, `comparison.json`/`.csv`, preparation and diagnostic JSON, plus
+`renders/`, `errors/`, and `plots/`. Mesh grids reuse cameras derived once from
+the cleaned GT bounds, so scale changes remain visible. Position-error panels
+use exact distance to the GT triangle surface and one union 99th-percentile
+range; Laplacian-error panels compare every model in recovered raw space.
+Wireframe panels use shared GT-derived close-up cameras for the ears and feet.
+
+This remains a single object, topology, corruption, view subset, and short CPU
+overfit, so it establishes mathematical validity and numerical stability rather
+than generalisation or superiority over the raw target. Edge-scale
+normalisation is intended to reduce sampling-density sensitivity, not to
+guarantee triangulation invariance. The next experiment should compare
+edge-scale-normalised targets on multiple Bunny prediction graphs with
+different sampling resolutions or subdivision levels.
