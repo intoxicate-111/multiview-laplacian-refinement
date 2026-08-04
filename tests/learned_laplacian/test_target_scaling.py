@@ -6,6 +6,7 @@ from mlr.learned_laplacian.graph_layers import faces_to_edge_index
 from mlr.learned_laplacian.target_scaling import (
     denormalize_laplacian_by_edge_scale,
     graph_structure_statistics,
+    incident_edge_length_and_valid_mask,
     mean_incident_edge_length,
     normalize_laplacian_by_edge_scale,
 )
@@ -35,6 +36,23 @@ def test_regular_triangle_has_equal_scale_and_isolated_vertex_is_zero():
     assert graph["minimum_degree"] == 0
     assert graph["maximum_degree"] == 2
     assert graph["isolated_vertices"] == 1
+    measured_h, valid = incident_edge_length_and_valid_mask(vertices, edges)
+    torch.testing.assert_close(measured_h, h)
+    torch.testing.assert_close(valid, torch.tensor([True, True, True, False]))
+
+
+def test_invalid_scale_is_zeroed_instead_of_divided_by_epsilon():
+    delta = torch.tensor([[1.0, 2.0, 3.0], [9.0, 8.0, 7.0]])
+    h = torch.tensor([0.5, 0.0])
+    valid = torch.tensor([True, False])
+
+    normalized = normalize_laplacian_by_edge_scale(
+        delta, h, eps=1e-12, valid_scale_mask=valid
+    )
+
+    torch.testing.assert_close(normalized[0], delta[0] / 0.25)
+    torch.testing.assert_close(normalized[1], torch.zeros(3))
+    assert torch.isfinite(normalized).all()
 
 
 def test_normalize_then_denormalize_round_trips_when_epsilon_is_negligible():

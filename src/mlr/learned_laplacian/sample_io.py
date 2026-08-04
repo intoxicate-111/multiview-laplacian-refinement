@@ -21,6 +21,7 @@ from .target_scaling import (
     RAW_LAPLACIAN,
     TARGET_MODES,
     edge_scale_statistics,
+    incident_edge_length_and_valid_mask,
     mean_incident_edge_length,
     normalize_laplacian_by_edge_scale,
 )
@@ -302,15 +303,21 @@ def _attach_target_scaling(sample: dict, target_mode: str, epsilon: float) -> No
     if epsilon <= 0:
         raise ValueError("edge_scale_epsilon must be positive.")
     edge_index = faces_to_edge_index(sample["faces"], sample["vertices"].shape[0])
-    local_edge_length = mean_incident_edge_length(sample["vertices"], edge_index, eps=epsilon)
+    local_edge_length, valid_scale_mask = incident_edge_length_and_valid_mask(
+        sample["vertices"], edge_index, eps=epsilon
+    )
     raw_target = sample["laplacian_target"]
     normalized_target = normalize_laplacian_by_edge_scale(
-        raw_target, local_edge_length, eps=epsilon
+        raw_target, local_edge_length, eps=epsilon, valid_scale_mask=valid_scale_mask
     )
     sample["local_edge_length"] = local_edge_length
     sample["local_edge_scale"] = local_edge_length.square()
+    sample["valid_scale_mask"] = valid_scale_mask
     sample["raw_laplacian_target"] = raw_target
     sample["normalized_laplacian_target"] = normalized_target
+    sample["target_confidence"] = sample["target_confidence"] * valid_scale_mask.to(
+        sample["target_confidence"].dtype
+    )
     metadata = sample.setdefault("metadata", {})
     metadata.update(
         {

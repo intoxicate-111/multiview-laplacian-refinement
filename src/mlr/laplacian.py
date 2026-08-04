@@ -37,9 +37,9 @@ def build_uniform_laplacian(faces: Array, num_vertices: int) -> Array:
     neighbors = vertex_neighbors(faces, num_vertices)
     lap = np.zeros((num_vertices, num_vertices), dtype=np.float64)
     for idx, nbrs in enumerate(neighbors):
-        lap[idx, idx] = 1.0
         if not nbrs:
             continue
+        lap[idx, idx] = 1.0
         weight = -1.0 / len(nbrs)
         for nbr in nbrs:
             lap[idx, nbr] = weight
@@ -66,7 +66,6 @@ def build_cotangent_laplacian(vertices: Array, faces: Array) -> Array:
     row_sums = weights.sum(axis=1)
     for i in range(n):
         if row_sums[i] <= 1e-12:
-            lap[i, i] = 1.0
             continue
         lap[i, i] = 1.0
         lap[i, :] -= weights[i, :] / row_sums[i]

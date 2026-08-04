@@ -18,9 +18,21 @@ def mean_incident_edge_length(
     """Return mean unique incident-edge length per vertex.
 
     Directed duplicates are canonicalised into unique undirected pairs. An
-    isolated vertex receives exactly zero; callers can identify it explicitly
-    and the normalisation denominator remains protected by ``eps``.
+    isolated vertex receives exactly zero. Call
+    :func:`incident_edge_length_and_valid_mask` when downstream code must
+    exclude topology-invalid scales explicitly.
     """
+
+    local_edge_length, _ = incident_edge_length_and_valid_mask(vertices, edge_index, eps=eps)
+    return local_edge_length
+
+
+def incident_edge_length_and_valid_mask(
+    vertices: torch.Tensor,
+    edge_index: torch.Tensor,
+    eps: float = 1e-12,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return local mean incident-edge length and an explicit topology-valid mask."""
 
     if vertices.ndim != 2 or vertices.shape[1] != 3:
         raise ValueError("vertices must have shape [N, 3].")
@@ -30,12 +42,16 @@ def mean_incident_edge_length(
         raise ValueError("eps must be positive.")
     num_vertices = vertices.shape[0]
     if edge_index.numel() == 0:
-        return vertices.new_zeros((num_vertices,))
+        return vertices.new_zeros((num_vertices,)), torch.zeros(
+            num_vertices, dtype=torch.bool, device=vertices.device
+        )
     if int(edge_index.min()) < 0 or int(edge_index.max()) >= num_vertices:
         raise ValueError("edge_index contains an out-of-range vertex index.")
     pairs = _unique_undirected_pairs(edge_index)
     if pairs.numel() == 0:
-        return vertices.new_zeros((num_vertices,))
+        return vertices.new_zeros((num_vertices,)), torch.zeros(
+            num_vertices, dtype=torch.bool, device=vertices.device
+        )
     lengths = torch.linalg.vector_norm(vertices[pairs[:, 0]] - vertices[pairs[:, 1]], dim=1)
     length_sum = vertices.new_zeros((num_vertices,))
     degree = vertices.new_zeros((num_vertices,))
@@ -44,7 +60,8 @@ def mean_incident_edge_length(
     length_sum.index_add_(0, pairs[:, 1], lengths)
     degree.index_add_(0, pairs[:, 0], ones)
     degree.index_add_(0, pairs[:, 1], ones)
-    return length_sum / degree.clamp_min(1.0)
+    valid_scale_mask = degree > 0
+    return length_sum / degree.clamp_min(1.0), valid_scale_mask
 
 
 def graph_structure_statistics(
@@ -82,11 +99,21 @@ def normalize_laplacian_by_edge_scale(
     laplacian: torch.Tensor,
     local_edge_length: torch.Tensor,
     eps: float = 1e-12,
+    valid_scale_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute delta_hat_i = delta_i / (h_i^2 + eps)."""
 
     _validate_transform_inputs(laplacian, local_edge_length, eps)
-    return laplacian / (local_edge_length.square() + eps).unsqueeze(-1)
+    if valid_scale_mask is None:
+        valid_scale_mask = local_edge_length > 0
+    if tuple(valid_scale_mask.shape) != (laplacian.shape[0],):
+        raise ValueError("valid_scale_mask must have shape [N].")
+    result = torch.zeros_like(laplacian)
+    valid_scale_mask = valid_scale_mask.to(dtype=torch.bool, device=laplacian.device)
+    result[valid_scale_mask] = laplacian[valid_scale_mask] / (
+        local_edge_length[valid_scale_mask].square() + eps
+    ).unsqueeze(-1)
+    return result
 
 
 def denormalize_laplacian_by_edge_scale(
@@ -108,16 +135,21 @@ def edge_scale_statistics(local_edge_length: torch.Tensor) -> dict[str, float | 
     values = local_edge_length.detach().double().cpu()
     scales = values.square()
     isolated = values <= 0
+    valid = values[~isolated]
     return {
         "minimum_h": float(values.min().item()),
         "median_h": float(values.median().item()),
         "mean_h": float(values.mean().item()),
         "maximum_h": float(values.max().item()),
+        "p95_h": float(torch.quantile(valid, 0.95).item()) if valid.numel() else 0.0,
+        "minimum_valid_h": float(valid.min().item()) if valid.numel() else 0.0,
         "minimum_h2": float(scales.min().item()),
         "median_h2": float(scales.median().item()),
         "mean_h2": float(scales.mean().item()),
         "maximum_h2": float(scales.max().item()),
+        "p95_h2": float(torch.quantile(valid.square(), 0.95).item()) if valid.numel() else 0.0,
         "isolated_vertices": int(isolated.sum().item()),
+        "valid_scale_vertices": int((~isolated).sum().item()),
     }
 
 

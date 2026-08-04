@@ -29,9 +29,21 @@ def weighted_robust_laplacian_loss(
 
 
 @torch.no_grad()
-def laplacian_prediction_metrics(prediction: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
+def laplacian_prediction_metrics(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    valid_mask: torch.Tensor | None = None,
+) -> dict[str, float]:
     if prediction.shape != target.shape:
         raise ValueError("prediction and target shapes must match.")
+    if valid_mask is not None:
+        if tuple(valid_mask.shape) != (prediction.shape[0],):
+            raise ValueError("valid_mask must have shape [N].")
+        valid_mask = valid_mask.to(dtype=torch.bool, device=prediction.device)
+        prediction = prediction[valid_mask]
+        target = target[valid_mask]
+        if prediction.shape[0] == 0:
+            raise ValueError("valid_mask must select at least one vertex.")
     residual = prediction - target
     endpoint = torch.linalg.vector_norm(residual, dim=-1)
     pred_magnitude = torch.linalg.vector_norm(prediction, dim=-1)

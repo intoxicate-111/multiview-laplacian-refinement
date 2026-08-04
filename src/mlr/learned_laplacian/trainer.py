@@ -84,6 +84,7 @@ def train_single_object(
             raw_training_target,
             device_sample["local_edge_length"],
             eps=target_scaling_epsilon,
+            valid_scale_mask=device_sample["valid_scale_mask"],
         )
     else:
         training_target = raw_training_target
@@ -194,7 +195,9 @@ def train_single_object(
     model.eval()
     with torch.no_grad():
         best_prediction = model(device_sample).predicted_laplacian
-        metrics = laplacian_prediction_metrics(best_prediction, training_target)
+        metrics = laplacian_prediction_metrics(
+            best_prediction, training_target, valid_mask=device_sample["valid_scale_mask"]
+        )
     if output_path is not None:
         (output_path / "training_history.json").write_text(
             json.dumps(history, indent=2), encoding="utf-8"

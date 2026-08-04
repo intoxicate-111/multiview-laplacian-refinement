@@ -16,6 +16,8 @@ def test_prepared_sample_can_be_saved_and_loaded(tmp_path):
     assert loaded["raw_laplacian_target"].shape == (4, 3)
     assert loaded["normalized_laplacian_target"].shape == (4, 3)
     assert loaded["local_edge_length"].shape == (4,)
+    assert loaded["valid_scale_mask"].shape == (4,)
+    assert loaded["valid_scale_mask"].all()
     torch.testing.assert_close(loaded["local_edge_scale"], loaded["local_edge_length"].square())
 
 

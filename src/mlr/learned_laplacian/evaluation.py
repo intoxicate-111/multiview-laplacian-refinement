@@ -51,11 +51,21 @@ def reconstruct_and_evaluate(
         edge_index = faces_to_edge_index(torch.as_tensor(faces, dtype=torch.long))
         local_edge_length_t = mean_incident_edge_length(vertices_t, edge_index).cpu()
     normalized_target_t = normalize_laplacian_by_edge_scale(
-        torch.as_tensor(target), local_edge_length_t, eps=edge_scale_epsilon
+        torch.as_tensor(target),
+        local_edge_length_t,
+        eps=edge_scale_epsilon,
+        valid_scale_mask=torch.as_tensor(
+            sample.get("valid_scale_mask", local_edge_length_t > 0), dtype=torch.bool
+        ),
     )
     if normalized_prediction is None:
         normalized_prediction_t = normalize_laplacian_by_edge_scale(
-            torch.as_tensor(prediction), local_edge_length_t, eps=edge_scale_epsilon
+            torch.as_tensor(prediction),
+            local_edge_length_t,
+            eps=edge_scale_epsilon,
+            valid_scale_mask=torch.as_tensor(
+                sample.get("valid_scale_mask", local_edge_length_t > 0), dtype=torch.bool
+            ),
         )
     else:
         normalized_prediction_t = torch.as_tensor(normalized_prediction).detach().cpu()
@@ -96,11 +106,14 @@ def reconstruct_and_evaluate(
     save_mesh(predicted_result.mesh, output_dir / "predicted_refined.obj")
     save_mesh(oracle_result.mesh, output_dir / "oracle_refined.obj")
 
+    valid_scale_mask_t = torch.as_tensor(
+        sample.get("valid_scale_mask", local_edge_length_t > 0), dtype=torch.bool
+    )
     raw_prediction_metrics = laplacian_prediction_metrics(
-        torch.as_tensor(prediction), torch.as_tensor(target)
+        torch.as_tensor(prediction), torch.as_tensor(target), valid_mask=valid_scale_mask_t
     )
     normalized_prediction_metrics = laplacian_prediction_metrics(
-        normalized_prediction_t, normalized_target_t
+        normalized_prediction_t, normalized_target_t, valid_mask=valid_scale_mask_t
     )
     geometry = {
         "coarse": _mesh_quality_metrics(coarse, coarse),

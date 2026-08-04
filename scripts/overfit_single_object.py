@@ -51,6 +51,13 @@ def main() -> int:
         action="store_true",
         help="Write pre-training numerical diagnostics and exit.",
     )
+    parser.add_argument("--diagnostics-output", type=Path)
+    parser.add_argument(
+        "--diagnostic-thresholds",
+        type=float,
+        nargs="+",
+        default=[100.0, 10000.0, 100000000.0],
+    )
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -59,7 +66,12 @@ def main() -> int:
     sample = load_prepared_sample(args.sample)
     epsilon = float(config.get("target_scaling", {}).get("epsilon", 1e-12))
     pre_training_diagnostics = _write_pre_training_diagnostics(
-        sample, config, args.output_dir, epsilon
+        sample,
+        config,
+        args.output_dir,
+        epsilon,
+        output_path=args.diagnostics_output,
+        thresholds=args.diagnostic_thresholds,
     )
     if args.diagnostics_only:
         return 0
@@ -93,6 +105,7 @@ def main() -> int:
                 raw_prediction,
                 local_edge_length,
                 eps=result.target_scaling_epsilon,
+                valid_scale_mask=device_sample["valid_scale_mask"],
             )
         prediction = raw_prediction.detach().cpu()
         normalized_prediction_cpu = normalized_prediction.detach().cpu()
@@ -111,6 +124,7 @@ def main() -> int:
         raw_target,
         sample["local_edge_length"],
         eps=result.target_scaling_epsilon,
+        valid_scale_mask=sample["valid_scale_mask"],
     )
     metrics = {
         "sample_id": sample["sample_id"],
@@ -182,13 +196,41 @@ def main() -> int:
 
 
 def _write_pre_training_diagnostics(
-    sample: dict, config: dict, output_dir: Path, epsilon: float
+    sample: dict,
+    config: dict,
+    output_dir: Path,
+    epsilon: float,
+    output_path: Path | None = None,
+    thresholds: list[float] | None = None,
 ) -> dict:
     edge_index = faces_to_edge_index(sample["faces"], sample["vertices"].shape[0])
     raw_target = sample["raw_laplacian_target"]
     normalized_target = normalize_laplacian_by_edge_scale(
-        raw_target, sample["local_edge_length"], eps=epsilon
+        raw_target,
+        sample["local_edge_length"],
+        eps=epsilon,
+        valid_scale_mask=sample["valid_scale_mask"],
     )
+    degree = torch.bincount(edge_index[1], minlength=sample["vertices"].shape[0])
+    normalized_magnitude = torch.linalg.vector_norm(normalized_target.double(), dim=-1)
+    top_indices = torch.argsort(normalized_magnitude, descending=True)[:20]
+    thresholds = thresholds or [100.0, 10000.0, 100000000.0]
+    top_vertices = []
+    for index_t in top_indices:
+        index = int(index_t.item())
+        top_vertices.append(
+            {
+                "vertex_index": index,
+                "position": sample["vertices"][index].double().tolist(),
+                "degree": int(degree[index].item()),
+                "h": float(sample["local_edge_length"][index].item()),
+                "h2": float(sample["local_edge_scale"][index].item()),
+                "raw_target": raw_target[index].double().tolist(),
+                "normalized_target": normalized_target[index].double().tolist(),
+                "normalized_target_magnitude": float(normalized_magnitude[index].item()),
+                "valid_scale": bool(sample["valid_scale_mask"][index].item()),
+            }
+        )
     diagnostics = {
         "target_mode": str(config.get("target_mode", "raw_laplacian")),
         "vertex_count": int(sample["vertices"].shape[0]),
@@ -197,6 +239,17 @@ def _write_pre_training_diagnostics(
         "local_edge_scale": edge_scale_statistics(sample["local_edge_length"]),
         "raw_target_magnitude": vector_magnitude_statistics(raw_target),
         "normalized_target_magnitude": vector_magnitude_statistics(normalized_target),
+        "finite_values": {
+            "raw_target_nan_count": int(torch.isnan(raw_target).sum().item()),
+            "raw_target_infinite_count": int(torch.isinf(raw_target).sum().item()),
+            "normalized_target_nan_count": int(torch.isnan(normalized_target).sum().item()),
+            "normalized_target_infinite_count": int(torch.isinf(normalized_target).sum().item()),
+        },
+        "normalized_magnitude_above_threshold": {
+            str(float(threshold)): int((normalized_magnitude > threshold).sum().item())
+            for threshold in thresholds
+        },
+        "top_20_normalized_target_vertices": top_vertices,
         "correlations_with_h2": {
             "raw_target_magnitude": _correlation_with_scale(
                 raw_target, sample["local_edge_scale"]
@@ -208,7 +261,9 @@ def _write_pre_training_diagnostics(
         "epsilon": epsilon,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "pre_training_diagnostics.json").write_text(
+    output_path = output_path or (output_dir / "pre_training_diagnostics.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
         json.dumps(diagnostics, indent=2) + "\n", encoding="utf-8"
     )
     print("pre_training_diagnostics=" + json.dumps(diagnostics, sort_keys=True), flush=True)
@@ -236,6 +291,7 @@ def _recover_training_result(
             device_sample["raw_laplacian_target"],
             device_sample["local_edge_length"],
             eps=epsilon,
+            valid_scale_mask=device_sample["valid_scale_mask"],
         )
     else:
         training_target = device_sample["raw_laplacian_target"]
@@ -249,7 +305,9 @@ def _recover_training_result(
         training_target = training_target * factors.unsqueeze(-1)
     with torch.no_grad():
         prediction = model(device_sample).predicted_laplacian
-        prediction_metrics = laplacian_prediction_metrics(prediction, training_target)
+        prediction_metrics = laplacian_prediction_metrics(
+            prediction, training_target, valid_mask=device_sample["valid_scale_mask"]
+        )
     history_path = output_dir / "training_history.json"
     history = json.loads(history_path.read_text(encoding="utf-8"))
     # Windows preserves creation time when best.pt is overwritten. The delta to

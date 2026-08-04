@@ -12,6 +12,7 @@ from .target_scaling import (
     EDGE_SCALE_SOURCE,
     RAW_LAPLACIAN,
     edge_scale_statistics,
+    incident_edge_length_and_valid_mask,
     mean_incident_edge_length,
     normalize_laplacian_by_edge_scale,
 )
@@ -157,9 +158,10 @@ def _ensure_target_scaling_fields(sample: dict[str, Any]) -> dict[str, Any]:
     edge_index = sample.get("edge_index")
     if edge_index is None:
         edge_index = faces_to_edge_index(sample["faces"], num_vertices)
-    local_edge_length = sample.get("local_edge_length")
-    if local_edge_length is None:
-        local_edge_length = mean_incident_edge_length(vertices, edge_index)
+    computed_edge_length, computed_valid_mask = incident_edge_length_and_valid_mask(
+        vertices, edge_index
+    )
+    local_edge_length = sample.get("local_edge_length", computed_edge_length)
     if not isinstance(local_edge_length, torch.Tensor) or tuple(local_edge_length.shape) != (
         num_vertices,
     ):
@@ -171,11 +173,15 @@ def _ensure_target_scaling_fields(sample: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("local_edge_scale must have shape [N].")
     metadata = dict(sample.get("metadata", {}))
     epsilon = float(metadata.get("edge_scale_epsilon", 1e-12))
-    normalized_target = sample.get("normalized_laplacian_target")
-    if normalized_target is None:
-        normalized_target = normalize_laplacian_by_edge_scale(
-            raw_target, local_edge_length, eps=epsilon
-        )
+    valid_scale_mask = sample.get("valid_scale_mask", computed_valid_mask)
+    if not isinstance(valid_scale_mask, torch.Tensor) or tuple(valid_scale_mask.shape) != (
+        num_vertices,
+    ):
+        raise ValueError("valid_scale_mask must have shape [N].")
+    valid_scale_mask = valid_scale_mask.to(dtype=torch.bool) & computed_valid_mask
+    normalized_target = normalize_laplacian_by_edge_scale(
+        raw_target, local_edge_length, eps=epsilon, valid_scale_mask=valid_scale_mask
+    )
     if not isinstance(normalized_target, torch.Tensor) or tuple(normalized_target.shape) != (
         num_vertices,
         3,
@@ -197,6 +203,9 @@ def _ensure_target_scaling_fields(sample: dict[str, Any]) -> dict[str, Any]:
     sample["metadata"] = metadata
     sample["raw_laplacian_target"] = raw_target
     sample["normalized_laplacian_target"] = normalized_target
+    sample["valid_scale_mask"] = valid_scale_mask
     sample["local_edge_length"] = local_edge_length
     sample["local_edge_scale"] = local_edge_scale
+    sample["target_confidence"] = sample["target_confidence"].clone()
+    sample["target_confidence"][~valid_scale_mask] = 0.0
     return sample

@@ -16,6 +16,7 @@ from mlr.coarse_lap_oracle import (  # noqa: E402
     run_coarse_graph_laplacian_oracles,
 )
 from mlr.data import Mesh  # noqa: E402
+from mlr.laplacian import build_laplacian  # noqa: E402
 
 
 class CoarseLapOracleTests(unittest.TestCase):
@@ -84,6 +85,20 @@ class CoarseLapOracleTests(unittest.TestCase):
         h = local_vertex_scales(vertices, data)
         self.assertEqual(h.shape, (3,))
         self.assertTrue(np.all(h > 0.0))
+
+    def test_isolated_uniform_laplacian_row_is_zero(self):
+        vertices = np.array(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [7.0, 8.0, 9.0]]
+        )
+        faces = np.array([[0, 1, 2]])
+        data = build_uniform_laplacian_data(faces, len(vertices))
+        dense = build_laplacian(vertices, faces, "uniform").matrix
+        sparse_delta = apply_uniform_laplacian(vertices, data)
+
+        np.testing.assert_array_equal(dense[3], np.zeros(4))
+        np.testing.assert_array_equal(sparse_delta[3], np.zeros(3))
+        np.testing.assert_allclose(sparse_delta, dense @ vertices)
+        self.assertEqual(local_vertex_scales(vertices, data)[3], 0.0)
 
     def test_full_run_writes_expected_debug_outputs(self):
         coarse = Mesh(

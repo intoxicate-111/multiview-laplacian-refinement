@@ -693,13 +693,7 @@ def local_vertex_scales(vertices: Array, laplacian_data: UniformLaplacianData) -
         lengths = np.linalg.norm(vertices[laplacian_data.rows] - vertices[laplacian_data.cols], axis=1)
         np.add.at(h_sum, laplacian_data.rows, lengths)
         np.add.at(h_count, laplacian_data.rows, 1.0)
-    h = h_sum / np.maximum(h_count, 1.0)
-    valid = h_count > 0
-    if np.any(valid):
-        h[~valid] = float(np.mean(h[valid]))
-    else:
-        h[:] = 1.0
-    return np.maximum(h, 1e-12)
+    return h_sum / np.maximum(h_count, 1.0)
 
 
 def optimize_uniform_laplacian_oracle(
@@ -1021,12 +1015,17 @@ def apply_uniform_laplacian(vertices: Array, data: UniformLaplacianData) -> Arra
     neighbor_mean = np.zeros_like(vertices)
     if len(data.rows) > 0:
         np.add.at(neighbor_mean, data.rows, data.weights[:, None] * vertices[data.cols])
-    return vertices - neighbor_mean
+    result = vertices - neighbor_mean
+    isolated = np.fromiter((not neighbors for neighbors in data.neighbors), dtype=bool)
+    result[isolated] = 0.0
+    return result
 
 
 def apply_uniform_laplacian_transpose(residual: Array, data: UniformLaplacianData) -> Array:
     residual = np.asarray(residual, dtype=np.float64)
     grad = np.array(residual, dtype=np.float64, copy=True)
+    isolated = np.fromiter((not neighbors for neighbors in data.neighbors), dtype=bool)
+    grad[isolated] = 0.0
     if len(data.rows) > 0:
         np.add.at(grad, data.cols, -data.weights[:, None] * residual[data.rows])
     return grad
@@ -1116,11 +1115,19 @@ def torch_apply_uniform_laplacian(vertices, rows, cols, weights):
     neighbor_mean = vertices.new_zeros(vertices.shape)
     if rows.numel() > 0:
         neighbor_mean.index_add_(0, rows, weights * vertices[cols])
-    return vertices - neighbor_mean
+    result = vertices - neighbor_mean
+    valid = vertices.new_zeros((vertices.shape[0],), dtype=torch.bool)
+    if rows.numel() > 0:
+        valid[rows] = True
+    return result * valid.unsqueeze(1)
 
 
 def torch_apply_uniform_laplacian_transpose(residual, rows, cols, weights):
     grad = residual.clone()
+    valid = residual.new_zeros((residual.shape[0],), dtype=torch.bool)
+    if rows.numel() > 0:
+        valid[rows] = True
+    grad = grad * valid.unsqueeze(1)
     if rows.numel() > 0:
         grad.index_add_(0, cols, -weights * residual[rows])
     return grad
