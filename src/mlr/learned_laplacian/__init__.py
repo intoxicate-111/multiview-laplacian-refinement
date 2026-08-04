@@ -5,6 +5,12 @@ from .dataset import load_prepared_sample, save_prepared_sample, validate_sample
 from .graph_layers import LaplacianPredictor, faces_to_edge_index
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
 from .model import LearnedLaplacianModel, LearnedLaplacianOutput
+from .multi_dataset import (
+    PreparedMeshDataset,
+    PreparedMeshRecord,
+    validate_disjoint_splits,
+)
+from .multi_trainer import MultiObjectTrainingResult, train_multi_object
 from .projection import ProjectionResult, project_vertices, sample_vertex_features
 from .sample_io import (
     corrupt_same_topology_mesh,
@@ -26,6 +32,9 @@ __all__ = [
     "LaplacianPredictor",
     "LearnedLaplacianModel",
     "LearnedLaplacianOutput",
+    "MultiObjectTrainingResult",
+    "PreparedMeshDataset",
+    "PreparedMeshRecord",
     "ProjectionResult",
     "TrainingResult",
     "EDGE_SCALE_NORMALIZED_LAPLACIAN",
@@ -47,6 +56,8 @@ __all__ = [
     "save_prepared_sample",
     "load_checkpoint",
     "train_single_object",
+    "train_multi_object",
     "validate_sample",
+    "validate_disjoint_splits",
     "weighted_robust_laplacian_loss",
 ]

@@ -414,12 +414,12 @@ upper bound. Run all tests with:
 python -m pytest
 ```
 
-Current limitations: batch size is one, every sample has one fixed topology,
-visibility uses the prepared mask rather than learned occlusion reasoning,
-non-uniform and general different-topology target paths still use dense NumPy
-Laplacians, and no claim is made about unseen objects. The next scaling step should be 10--20 prepared
-objects with topology-aware batching or per-object gradient accumulation,
-train/validation separation, and sparse Laplacian/reconstruction operators.
+The single-object entry point remains batch size one and every prepared sample
+has one internally fixed prediction/target topology. Visibility uses the
+prepared mask rather than learned occlusion reasoning, non-uniform and general
+different-topology target paths still use dense NumPy Laplacians, and no claim
+is made about unseen objects. Shared training across multiple variable-size
+prepared meshes is described below.
 
 ## Stanford Bunny Single-Object Overfitting
 
@@ -653,3 +653,74 @@ normalisation is intended to reduce sampling-density sensitivity, not to
 guarantee triangulation invariance. The next experiment should compare
 edge-scale-normalised targets on multiple Bunny prediction graphs with
 different sampling resolutions or subdivision levels.
+
+## Multi-Mesh Shared Training
+
+The multi-mesh path trains one shared CNN/GNN over prepared samples with
+different vertex counts, face counts, graph connectivity, view counts, and
+image sizes. Meshes are loaded lazily and forwarded one at a time; gradients
+are divided by the number of meshes in each accumulation group before the
+optimizer step. This gives every mesh equal weight regardless of its vertex
+count and avoids padding large ragged graphs.
+
+Create a JSON manifest whose paths are relative to the manifest file unless
+absolute paths are used:
+
+```json
+{
+  "samples": [
+    {
+      "sample_id": "bunny_low_01",
+      "path": "prepared/bunny_low_01.pt",
+      "split": "train"
+    },
+    {
+      "sample_id": "bunny_mid_01",
+      "path": "prepared/bunny_mid_01.pt",
+      "split": "train"
+    },
+    {
+      "sample_id": "bunny_high_validation",
+      "path": "prepared/bunny_high_validation.pt",
+      "split": "validation"
+    }
+  ]
+}
+```
+
+Each file uses the existing prepared-sample schema. The coarse and target mesh
+inside one sample must still share topology, but different samples may have
+unrelated topologies and different numbers of views. Manifest `sample_id`
+values are optional consistency checks; when supplied, they must match the ID
+stored in the prepared file.
+
+Run shared edge-scale-normalised training with:
+
+```bash
+python scripts/train_multi_mesh_laplacian.py \
+  --manifest path/to/multi_mesh_manifest.json \
+  --config configs/learned_laplacian/train_multi_mesh_edge_normalized.json \
+  --output-dir runs/learned_laplacian/multi_mesh \
+  --device cuda
+```
+
+The default example configuration uses 50 epochs and four meshes per gradient
+accumulation group. `validation_every_epochs` controls validation frequency;
+only validation epochs can replace the best checkpoint when a validation split
+exists. Without a validation split, training loss is the selection criterion.
+The command-line entry point requires both `train` and `validation` manifest
+splits so accidental training-only experiments are explicit in Python.
+
+Outputs include `best.pt`, optional epoch checkpoints,
+`training_history.json`, `metrics.json`, and target-space plus recovered
+raw-space prediction arrays under `predictions/train/` and
+`predictions/validation/`. Metrics are reported separately for every object so
+failures on a small mesh cannot be hidden by averaging with a large mesh.
+
+This is gradient accumulation, not simultaneous packed-graph batching: it
+trades some throughput for simple, memory-bounded support of ragged meshes.
+Prepared samples are still expected to use consistent coordinate conventions,
+and scale normalisation does not remove global-scale dependence. A meaningful
+first dataset should contain multiple deterministic corruptions and multiple
+Bunny sampling resolutions, with graph resolutions represented in both train
+and held-out validation splits.
