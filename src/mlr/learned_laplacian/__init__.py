@@ -16,6 +16,7 @@ from .target_scaling import (
     EDGE_SCALE_NORMALIZED_LAPLACIAN,
     RAW_LAPLACIAN,
     denormalize_laplacian_by_edge_scale,
+    graph_structure_statistics,
     mean_incident_edge_length,
     normalize_laplacian_by_edge_scale,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "project_vertices",
     "normalize_laplacian_by_edge_scale",
     "denormalize_laplacian_by_edge_scale",
+    "graph_structure_statistics",
     "sample_vertex_features",
     "save_prepared_sample",
     "load_checkpoint",

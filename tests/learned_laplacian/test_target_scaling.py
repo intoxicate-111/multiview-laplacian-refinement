@@ -5,6 +5,7 @@ import torch
 from mlr.learned_laplacian.graph_layers import faces_to_edge_index
 from mlr.learned_laplacian.target_scaling import (
     denormalize_laplacian_by_edge_scale,
+    graph_structure_statistics,
     mean_incident_edge_length,
     normalize_laplacian_by_edge_scale,
 )
@@ -29,6 +30,11 @@ def test_regular_triangle_has_equal_scale_and_isolated_vertex_is_zero():
     h = mean_incident_edge_length(vertices, edges)
     torch.testing.assert_close(h[:3], torch.ones(3))
     assert h[3].item() == 0.0
+    graph = graph_structure_statistics(edges, num_vertices=4)
+    assert graph["unique_undirected_edge_count"] == 3
+    assert graph["minimum_degree"] == 0
+    assert graph["maximum_degree"] == 2
+    assert graph["isolated_vertices"] == 1
 
 
 def test_normalize_then_denormalize_round_trips_when_epsilon_is_negligible():

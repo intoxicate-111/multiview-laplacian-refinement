@@ -550,6 +550,11 @@ python scripts/overfit_single_object.py --sample runs/learned_laplacian/bunny_ov
 python scripts/compare_edge_scale_bunny.py --sample runs/learned_laplacian/bunny_overfit/prepared_sample.pt --raw-root runs/learned_laplacian/bunny_overfit --normalized-root runs/learned_laplacian/bunny_edge_normalized --output runs/learned_laplacian/bunny_edge_normalized/comparison.json --epsilon 1e-12
 ```
 
+Each run prints and writes `pre_training_diagnostics.json` before optimisation.
+It records vertex/face/unique-edge counts, degree distribution, local `h` and
+`h^2` distributions, both target-magnitude distributions, and correlations
+with `h^2`. Use `--diagnostics-only` to generate this file without training.
+
 For this unmodified topology and budget, both normalized runs fail and are
 marked exploded; both raw-target baselines remain stable and improve over the
 coarse mesh. This is a negative experimental result, not evidence against

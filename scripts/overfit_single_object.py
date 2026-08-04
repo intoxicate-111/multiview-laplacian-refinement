@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mlr.learned_laplacian.dataset import load_prepared_sample, move_sample_to_device
 from mlr.learned_laplacian.evaluation import reconstruct_and_evaluate
+from mlr.learned_laplacian.graph_layers import faces_to_edge_index
 from mlr.learned_laplacian.losses import laplacian_prediction_metrics
 from mlr.learned_laplacian.model import LearnedLaplacianModel
 from mlr.learned_laplacian.trainer import TrainingResult, load_checkpoint, train_single_object
@@ -22,6 +23,7 @@ from mlr.learned_laplacian.target_scaling import (
     EDGE_SCALE_NORMALIZED_LAPLACIAN,
     denormalize_laplacian_by_edge_scale,
     edge_scale_statistics,
+    graph_structure_statistics,
     normalize_laplacian_by_edge_scale,
     vector_magnitude_statistics,
 )
@@ -44,12 +46,23 @@ def main() -> int:
         type=Path,
         help="Skip training and resume evaluation from a saved best.pt checkpoint.",
     )
+    parser.add_argument(
+        "--diagnostics-only",
+        action="store_true",
+        help="Write pre-training numerical diagnostics and exit.",
+    )
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
     if args.steps is not None:
         config.setdefault("training", {})["steps"] = args.steps
     sample = load_prepared_sample(args.sample)
+    epsilon = float(config.get("target_scaling", {}).get("epsilon", 1e-12))
+    pre_training_diagnostics = _write_pre_training_diagnostics(
+        sample, config, args.output_dir, epsilon
+    )
+    if args.diagnostics_only:
+        return 0
     recovered_from_checkpoint = args.evaluate_checkpoint is not None
     if recovered_from_checkpoint:
         result = _recover_training_result(
@@ -105,6 +118,7 @@ def main() -> int:
         "input_mode": args.input_mode or config.get("input_mode", "coarse_plus_multiview"),
         "zero_images": bool(args.zero_images),
         "target_mode": result.target_mode,
+        "pre_training_diagnostics": pre_training_diagnostics,
         "sample": {
             "num_vertices": int(sample["vertices"].shape[0]),
             "num_faces": int(sample["faces"].shape[0]),
@@ -165,6 +179,40 @@ def main() -> int:
     _write_optional_loss_curve(result.history, args.output_dir / "loss_curve.png")
     print(json.dumps(metrics, indent=2))
     return 0
+
+
+def _write_pre_training_diagnostics(
+    sample: dict, config: dict, output_dir: Path, epsilon: float
+) -> dict:
+    edge_index = faces_to_edge_index(sample["faces"], sample["vertices"].shape[0])
+    raw_target = sample["raw_laplacian_target"]
+    normalized_target = normalize_laplacian_by_edge_scale(
+        raw_target, sample["local_edge_length"], eps=epsilon
+    )
+    diagnostics = {
+        "target_mode": str(config.get("target_mode", "raw_laplacian")),
+        "vertex_count": int(sample["vertices"].shape[0]),
+        "face_count": int(sample["faces"].shape[0]),
+        "graph": graph_structure_statistics(edge_index, sample["vertices"].shape[0]),
+        "local_edge_scale": edge_scale_statistics(sample["local_edge_length"]),
+        "raw_target_magnitude": vector_magnitude_statistics(raw_target),
+        "normalized_target_magnitude": vector_magnitude_statistics(normalized_target),
+        "correlations_with_h2": {
+            "raw_target_magnitude": _correlation_with_scale(
+                raw_target, sample["local_edge_scale"]
+            ),
+            "normalized_target_magnitude": _correlation_with_scale(
+                normalized_target, sample["local_edge_scale"]
+            ),
+        },
+        "epsilon": epsilon,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "pre_training_diagnostics.json").write_text(
+        json.dumps(diagnostics, indent=2) + "\n", encoding="utf-8"
+    )
+    print("pre_training_diagnostics=" + json.dumps(diagnostics, sort_keys=True), flush=True)
+    return diagnostics
 
 
 def _recover_training_result(

@@ -33,14 +33,9 @@ def mean_incident_edge_length(
         return vertices.new_zeros((num_vertices,))
     if int(edge_index.min()) < 0 or int(edge_index.max()) >= num_vertices:
         raise ValueError("edge_index contains an out-of-range vertex index.")
-    source, destination = edge_index.to(dtype=torch.long)
-    lower = torch.minimum(source, destination)
-    upper = torch.maximum(source, destination)
-    pairs = torch.stack((lower, upper), dim=1)
-    pairs = pairs[pairs[:, 0] != pairs[:, 1]]
+    pairs = _unique_undirected_pairs(edge_index)
     if pairs.numel() == 0:
         return vertices.new_zeros((num_vertices,))
-    pairs = torch.unique(pairs, dim=0)
     lengths = torch.linalg.vector_norm(vertices[pairs[:, 0]] - vertices[pairs[:, 1]], dim=1)
     length_sum = vertices.new_zeros((num_vertices,))
     degree = vertices.new_zeros((num_vertices,))
@@ -50,6 +45,37 @@ def mean_incident_edge_length(
     degree.index_add_(0, pairs[:, 0], ones)
     degree.index_add_(0, pairs[:, 1], ones)
     return length_sum / degree.clamp_min(1.0)
+
+
+def graph_structure_statistics(
+    edge_index: torch.Tensor, num_vertices: int
+) -> dict[str, float | int]:
+    """Summarise unique undirected edges and incident-neighbour degrees."""
+
+    if num_vertices < 1:
+        raise ValueError("num_vertices must be positive.")
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError("edge_index must have shape [2, E].")
+    if edge_index.numel() > 0 and (
+        int(edge_index.min()) < 0 or int(edge_index.max()) >= num_vertices
+    ):
+        raise ValueError("edge_index contains an out-of-range vertex index.")
+    pairs = _unique_undirected_pairs(edge_index)
+    degree = torch.zeros(num_vertices, dtype=torch.long, device=edge_index.device)
+    if pairs.numel() > 0:
+        ones = torch.ones(pairs.shape[0], dtype=torch.long, device=edge_index.device)
+        degree.index_add_(0, pairs[:, 0], ones)
+        degree.index_add_(0, pairs[:, 1], ones)
+    values = degree.detach().double().cpu()
+    return {
+        "unique_undirected_edge_count": int(pairs.shape[0]),
+        "minimum_degree": int(degree.min().item()),
+        "median_degree": float(values.median().item()),
+        "mean_degree": float(values.mean().item()),
+        "p95_degree": float(torch.quantile(values, 0.95).item()),
+        "maximum_degree": int(degree.max().item()),
+        "isolated_vertices": int((degree == 0).sum().item()),
+    }
 
 
 def normalize_laplacian_by_edge_scale(
@@ -120,3 +146,14 @@ def _validate_transform_inputs(
         raise ValueError("local_edge_length must have shape [N].")
     if eps <= 0:
         raise ValueError("eps must be positive.")
+
+
+def _unique_undirected_pairs(edge_index: torch.Tensor) -> torch.Tensor:
+    source, destination = edge_index.to(dtype=torch.long)
+    lower = torch.minimum(source, destination)
+    upper = torch.maximum(source, destination)
+    pairs = torch.stack((lower, upper), dim=1)
+    pairs = pairs[pairs[:, 0] != pairs[:, 1]]
+    if pairs.numel() == 0:
+        return pairs.reshape(0, 2)
+    return torch.unique(pairs, dim=0)
