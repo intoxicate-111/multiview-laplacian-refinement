@@ -38,7 +38,7 @@
     "shuffle": true,
     "validation_every_epochs": 5,
     "checkpoint_every_epochs": 10,
-    "cache_prepared_samples_on_device": true,
+    "cache_prepared_samples_on_device": false,
     "profile_training": true
   }
 }
