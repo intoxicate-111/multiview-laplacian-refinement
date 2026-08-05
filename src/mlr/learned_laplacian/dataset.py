@@ -130,6 +130,7 @@ def save_prepared_sample(sample: Mapping[str, Any], path: str | Path) -> Path:
     cpu_sample = {
         name: value.detach().cpu() if isinstance(value, torch.Tensor) else value
         for name, value in validated.items()
+        if name not in {"_static_prepared", "edge_index", "vertex_degree"}
     }
     torch.save(cpu_sample, path)
     return path
@@ -158,10 +159,27 @@ def _ensure_target_scaling_fields(sample: dict[str, Any]) -> dict[str, Any]:
     edge_index = sample.get("edge_index")
     if edge_index is None:
         edge_index = faces_to_edge_index(sample["faces"], num_vertices)
-    computed_edge_length, computed_valid_mask = incident_edge_length_and_valid_mask(
-        vertices, edge_index
-    )
-    local_edge_length = sample.get("local_edge_length", computed_edge_length)
+    if (
+        not isinstance(edge_index, torch.Tensor)
+        or edge_index.ndim != 2
+        or edge_index.shape[0] != 2
+    ):
+        raise ValueError("edge_index must have shape [2, E].")
+    edge_index = edge_index.to(dtype=torch.long)
+    if edge_index.numel() > 0 and (
+        int(edge_index.min()) < 0 or int(edge_index.max()) >= num_vertices
+    ):
+        raise ValueError("edge_index contains an out-of-range vertex index.")
+    local_edge_length = sample.get("local_edge_length")
+    valid_scale_mask = sample.get("valid_scale_mask")
+    if local_edge_length is None or valid_scale_mask is None:
+        computed_edge_length, computed_valid_mask = incident_edge_length_and_valid_mask(
+            vertices, edge_index
+        )
+        if local_edge_length is None:
+            local_edge_length = computed_edge_length
+        if valid_scale_mask is None:
+            valid_scale_mask = computed_valid_mask
     if not isinstance(local_edge_length, torch.Tensor) or tuple(local_edge_length.shape) != (
         num_vertices,
     ):
@@ -173,15 +191,16 @@ def _ensure_target_scaling_fields(sample: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("local_edge_scale must have shape [N].")
     metadata = dict(sample.get("metadata", {}))
     epsilon = float(metadata.get("edge_scale_epsilon", 1e-12))
-    valid_scale_mask = sample.get("valid_scale_mask", computed_valid_mask)
     if not isinstance(valid_scale_mask, torch.Tensor) or tuple(valid_scale_mask.shape) != (
         num_vertices,
     ):
         raise ValueError("valid_scale_mask must have shape [N].")
-    valid_scale_mask = valid_scale_mask.to(dtype=torch.bool) & computed_valid_mask
-    normalized_target = normalize_laplacian_by_edge_scale(
-        raw_target, local_edge_length, eps=epsilon, valid_scale_mask=valid_scale_mask
-    )
+    valid_scale_mask = valid_scale_mask.to(dtype=torch.bool)
+    normalized_target = sample.get("normalized_laplacian_target")
+    if normalized_target is None:
+        normalized_target = normalize_laplacian_by_edge_scale(
+            raw_target, local_edge_length, eps=epsilon, valid_scale_mask=valid_scale_mask
+        )
     if not isinstance(normalized_target, torch.Tensor) or tuple(normalized_target.shape) != (
         num_vertices,
         3,
@@ -206,6 +225,23 @@ def _ensure_target_scaling_fields(sample: dict[str, Any]) -> dict[str, Any]:
     sample["valid_scale_mask"] = valid_scale_mask
     sample["local_edge_length"] = local_edge_length
     sample["local_edge_scale"] = local_edge_scale
-    sample["target_confidence"] = sample["target_confidence"].clone()
-    sample["target_confidence"][~valid_scale_mask] = 0.0
+    sample["edge_index"] = edge_index
+    degree = sample.get("vertex_degree")
+    if degree is None:
+        degree = vertices.new_zeros((num_vertices, 1))
+        if edge_index.numel() > 0:
+            degree.index_add_(
+                0,
+                edge_index[1],
+                torch.ones(
+                    (edge_index.shape[1], 1), dtype=degree.dtype, device=degree.device
+                ),
+            )
+    if not isinstance(degree, torch.Tensor) or tuple(degree.shape) != (num_vertices, 1):
+        raise ValueError("vertex_degree must have shape [N, 1].")
+    sample["vertex_degree"] = degree
+    confidence = sample["target_confidence"].clone()
+    confidence[~valid_scale_mask] = 0.0
+    sample["target_confidence"] = confidence
+    sample["_static_prepared"] = True
     return sample

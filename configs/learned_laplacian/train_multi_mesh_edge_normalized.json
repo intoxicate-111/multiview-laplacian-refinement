@@ -21,14 +21,24 @@
     "weight_decay": 0.0,
     "loss": "huber",
     "huber_delta": 0.01,
-    "gradient_clip_norm": 1.0
+    "gradient_clip_norm": 1.0,
+    "lr_scheduler": {
+      "type": "reduce_on_plateau",
+      "factor": 0.5,
+      "patience_validations": 10,
+      "threshold": 0.0001,
+      "threshold_mode": "abs",
+      "cooldown_validations": 2,
+      "min_lr": 0.000001
+    }
   },
   "multi_object_training": {
-    "epochs": 50,
+    "epochs": 5000,
     "gradient_accumulation_meshes": 4,
     "shuffle": true,
-    "validation_every_epochs": 1,
-    "checkpoint_every_epochs": 10
+    "validation_every_epochs": 5,
+    "checkpoint_every_epochs": 10,
+    "cache_prepared_samples_on_device": true,
+    "profile_training": true
   }
 }
-

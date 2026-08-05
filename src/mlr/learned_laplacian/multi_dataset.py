@@ -20,6 +20,7 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
 
     def __init__(self, records: Sequence[PreparedMeshRecord]) -> None:
         self.records = tuple(records)
+        self._cache: dict[int, dict[str, Any]] = {}
         if not self.records:
             raise ValueError("PreparedMeshDataset requires at least one sample.")
         splits = {record.split for record in self.records}
@@ -67,6 +68,8 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
         return len(self.records)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
+        if index in self._cache:
+            return self._cache[index]
         record = self.records[index]
         sample = load_prepared_sample(record.path)
         if record.sample_id is not None and sample["sample_id"] != record.sample_id:
@@ -74,6 +77,7 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
                 f"Manifest declares sample_id {record.sample_id!r} for {record.path}, "
                 f"but the file contains {sample['sample_id']!r}."
             )
+        self._cache[index] = sample
         return sample
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
