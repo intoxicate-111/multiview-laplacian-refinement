@@ -13,6 +13,7 @@ class PreparedMeshRecord:
     path: Path
     split: str
     sample_id: str | None = None
+    dataset_root: Path | None = None
 
 
 class PreparedMeshDataset(Sequence[dict[str, Any]]):
@@ -58,7 +59,12 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
             if sample_id is not None and (not isinstance(sample_id, str) or not sample_id):
                 raise ValueError(f"Manifest sample {index} has an invalid sample_id.")
             records.append(
-                PreparedMeshRecord(path=path.resolve(), split=item_split, sample_id=sample_id)
+                PreparedMeshRecord(
+                    path=path.resolve(),
+                    split=item_split,
+                    sample_id=sample_id,
+                    dataset_root=manifest_path.parent.resolve(),
+                )
             )
         if not records:
             raise ValueError(f"Manifest contains no samples for split {split!r}.")
@@ -71,13 +77,32 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
         if index in self._cache:
             return self._cache[index]
         record = self.records[index]
-        sample = load_prepared_sample(record.path)
+        sample = load_prepared_sample(record.path, dataset_root=record.dataset_root)
         if record.sample_id is not None and sample["sample_id"] != record.sample_id:
             raise ValueError(
                 f"Manifest declares sample_id {record.sample_id!r} for {record.path}, "
                 f"but the file contains {sample['sample_id']!r}."
             )
-        self._cache[index] = sample
+        # Embedded-image samples retain the historical single-load cache. Lazy
+        # image-path samples are intentionally not retained with their decoded
+        # 14-view tensors, which would recreate the dataset-sized RAM/GPU cache.
+        if sample.get("prepared_storage_format") != "lazy_image_paths_v1":
+            self._cache[index] = sample
+        return sample
+
+    def load_static(self, index: int) -> dict[str, Any]:
+        """Load tensors and lazy image metadata without decoding image pixels."""
+        record = self.records[index]
+        sample = load_prepared_sample(
+            record.path,
+            materialize_images=False,
+            dataset_root=record.dataset_root,
+        )
+        if record.sample_id is not None and sample["sample_id"] != record.sample_id:
+            raise ValueError(
+                f"Manifest declares sample_id {record.sample_id!r} for {record.path}, "
+                f"but the file contains {sample['sample_id']!r}."
+            )
         return sample
 
     def __iter__(self) -> Iterator[dict[str, Any]]:

@@ -85,7 +85,7 @@ def train_multi_object(
     accumulation_meshes = int(multi.get("gradient_accumulation_meshes", 1))
     validation_every = int(multi.get("validation_every_epochs", 1))
     checkpoint_every = int(multi.get("checkpoint_every_epochs", 0))
-    cache_on_device = bool(multi.get("cache_prepared_samples_on_device", True))
+    cache_on_device = bool(multi.get("cache_prepared_samples_on_device", False))
     profile_training = bool(multi.get("profile_training", False))
     if epochs < 1 or accumulation_meshes < 1 or validation_every < 1:
         raise ValueError(
@@ -109,12 +109,23 @@ def train_multi_object(
 
     start_time = time.perf_counter()
     static_start = time.perf_counter()
-    prepared_train = tuple(_prepare_object_static(sample, config) for sample in train_samples)
+    prepared_train = tuple(
+        _prepare_object_static(_static_sample_at(train_samples, index), config)
+        for index in range(len(train_samples))
+    )
     prepared_validation = tuple(
-        _prepare_object_static(sample, config) for sample in validation_samples
+        _prepare_object_static(_static_sample_at(validation_samples, index), config)
+        for index in range(len(validation_samples))
     )
     static_preparation_seconds = float(time.perf_counter() - static_start)
     device_cache_seconds = 0.0
+    if cache_on_device and any(
+        item.sample.get("prepared_storage_format") == "lazy_image_paths_v1"
+        for item in (*prepared_train, *prepared_validation)
+    ):
+        raise ValueError(
+            "lazy_image_paths_v1 requires cache_prepared_samples_on_device=false"
+        )
     if cache_on_device:
         cache_start = time.perf_counter()
         try:
@@ -161,8 +172,8 @@ def train_multi_object(
             group = order[group_start : group_start + accumulation_meshes]
             optimizer.zero_grad(set_to_none=True)
             for sample_index in group:
-                prepared = _prepared_for_use(
-                    prepared_train[sample_index], device, cache_on_device
+                prepared = _prepare_item_for_use(
+                    prepared_train[sample_index], config, device, cache_on_device
                 )
                 prediction = model(prepared.sample).predicted_laplacian
                 loss = weighted_robust_laplacian_loss(
@@ -473,7 +484,14 @@ def _prepare_object_static(
         clipped_count = int(clipped.sum().item())
         factors = (clip_max_norm / magnitudes.clamp_min(1e-12)).clamp_max(1.0)
         target = target * factors.unsqueeze(-1)
+    if static_sample.get("prepared_storage_format") == "lazy_image_paths_v1":
+        static_sample.pop("images", None)
     return _PreparedObject(static_sample, target, clipped_count)
+
+
+def _static_sample_at(samples: Sequence[Mapping[str, Any]], index: int) -> Mapping[str, Any]:
+    load_static = getattr(samples, "load_static", None)
+    return load_static(index) if callable(load_static) else samples[index]
 
 
 def _move_prepared_object_to_device(
@@ -500,6 +518,34 @@ def _prepared_for_use(
     return _move_prepared_object_to_device(prepared, device)
 
 
+def _prepare_item_for_use(
+    item: Mapping[str, Any] | _PreparedObject,
+    config: Mapping[str, Any],
+    device: torch.device,
+    cache_on_device: bool,
+) -> _PreparedObject:
+    prepared = item if isinstance(item, _PreparedObject) else _prepare_object_static(item, config)
+    if "images" not in prepared.sample and prepared.sample.get("image_paths"):
+        from .sample_io import load_and_resize_images
+
+        dataset_root = Path(str(prepared.sample["_dataset_root"]))
+        image_paths = [
+            Path(value) if Path(value).is_absolute() else dataset_root / value
+            for value in prepared.sample["image_paths"]
+        ]
+        images, _ = load_and_resize_images(
+            image_paths, int(prepared.sample["prepared_image_size"])
+        )
+        materialized_sample = dict(prepared.sample)
+        materialized_sample["images"] = images
+        prepared = _PreparedObject(
+            materialized_sample,
+            prepared.training_target,
+            prepared.clipped_target_vertices,
+        )
+    return _prepared_for_use(prepared, device, cache_on_device)
+
+
 def _synchronize_device(device: torch.device) -> None:
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -516,7 +562,7 @@ def _loss_kwargs(training: Mapping[str, Any]) -> dict[str, Any]:
 @torch.no_grad()
 def _evaluate_dataset(
     model: LearnedLaplacianModel,
-    samples: Sequence[_PreparedObject],
+    samples: Sequence[Mapping[str, Any] | _PreparedObject],
     config: Mapping[str, Any],
     device: torch.device,
     loss_kwargs: Mapping[str, Any],
@@ -530,7 +576,7 @@ def _evaluate_dataset(
     if prediction_dir is not None:
         prediction_dir.mkdir(parents=True, exist_ok=True)
     for item in samples:
-        prepared = _prepared_for_use(item, device, cache_on_device)
+        prepared = _prepare_item_for_use(item, config, device, cache_on_device)
         prediction = model(prepared.sample).predicted_laplacian
         loss = weighted_robust_laplacian_loss(
             prediction,

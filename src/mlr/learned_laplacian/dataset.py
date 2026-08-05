@@ -19,7 +19,6 @@ from .target_scaling import (
 
 
 REQUIRED_TENSOR_FIELDS = (
-    "images",
     "intrinsics",
     "extrinsics",
     "vertices",
@@ -43,12 +42,45 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(sample[name], torch.Tensor):
             raise TypeError(f"{name} must be a torch.Tensor, got {type(sample[name]).__name__}.")
 
-    images = sample["images"]
-    if images.ndim != 4 or images.shape[1] != 3:
-        raise ValueError(f"images must have shape [V, 3, H, W], got {tuple(images.shape)}.")
-    views = images.shape[0]
-    if views < 1 or images.shape[2] < 1 or images.shape[3] < 1:
-        raise ValueError("images must contain at least one non-empty view.")
+    images = sample.get("images")
+    image_paths = sample.get("image_paths")
+    lazy_storage = sample.get("prepared_storage_format") == "lazy_image_paths_v1"
+    if images is not None:
+        if not isinstance(images, torch.Tensor):
+            raise TypeError(f"images must be a torch.Tensor, got {type(images).__name__}.")
+        if images.ndim != 4 or images.shape[1] != 3:
+            raise ValueError(f"images must have shape [V, 3, H, W], got {tuple(images.shape)}.")
+        views = images.shape[0]
+        if views < 1 or images.shape[2] < 1 or images.shape[3] < 1:
+            raise ValueError("images must contain at least one non-empty view.")
+    elif image_paths is not None:
+        if not isinstance(image_paths, list) or not image_paths or not all(
+            isinstance(path, str) and path for path in image_paths
+        ):
+            raise ValueError("image_paths must be a non-empty list of strings.")
+        views = len(image_paths)
+        if sample.get("prepared_storage_format") != "lazy_image_paths_v1":
+            raise ValueError("Lazy samples require prepared_storage_format='lazy_image_paths_v1'.")
+        prepared_size = sample.get("prepared_image_size")
+        if not isinstance(prepared_size, int) or prepared_size < 1:
+            raise ValueError("prepared_image_size must be a positive integer.")
+    else:
+        raise ValueError("Sample must contain either images or image_paths.")
+    if lazy_storage:
+        if not isinstance(image_paths, list) or len(image_paths) != views or not all(
+            isinstance(path, str) and path for path in image_paths
+        ):
+            raise ValueError("lazy_image_paths_v1 requires one non-empty image path per view.")
+        prepared_size = sample.get("prepared_image_size")
+        if not isinstance(prepared_size, int) or prepared_size < 1:
+            raise ValueError("prepared_image_size must be a positive integer.")
+        source_size = sample.get("source_image_size")
+        if (
+            not isinstance(source_size, (list, tuple))
+            or len(source_size) != 2
+            or any(not isinstance(value, int) or value < 1 for value in source_size)
+        ):
+            raise ValueError("source_image_size must contain positive integer [width, height].")
     _expect_shape(sample, "intrinsics", (views, 3, 3))
     _expect_shape(sample, "extrinsics", (views, 4, 4))
 
@@ -91,9 +123,11 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
         tensor = sample[name]
         if tensor.is_floating_point() and not torch.isfinite(tensor).all():
             raise ValueError(f"{name} contains NaN or infinite values.")
+    if images is not None and images.is_floating_point() and not torch.isfinite(images).all():
+        raise ValueError("images contains NaN or infinite values.")
     if torch.any(sample["target_confidence"] < 0):
         raise ValueError("target_confidence must be non-negative.")
-    if images.is_floating_point() and (torch.any(images < 0) or torch.any(images > 1)):
+    if images is not None and images.is_floating_point() and (torch.any(images < 0) or torch.any(images > 1)):
         raise ValueError("floating-point images must be scaled to [0, 1].")
 
     result = dict(sample)
@@ -103,8 +137,13 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
     return _ensure_target_scaling_fields(result)
 
 
-def load_prepared_sample(path: str | Path, map_location: str | torch.device = "cpu") -> dict[str, Any]:
-    path = Path(path)
+def load_prepared_sample(
+    path: str | Path,
+    map_location: str | torch.device = "cpu",
+    materialize_images: bool = True,
+    dataset_root: str | Path | None = None,
+) -> dict[str, Any]:
+    path = Path(path).resolve()
     if path.suffix.lower() in {".pt", ".pth"}:
         payload = torch.load(path, map_location=map_location, weights_only=False)
     elif path.suffix.lower() == ".npz":
@@ -118,6 +157,16 @@ def load_prepared_sample(path: str | Path, map_location: str | torch.device = "c
         raise ValueError("Prepared samples must use .pt, .pth, or .npz.")
     if not isinstance(payload, Mapping):
         raise ValueError("Prepared sample file must contain a mapping.")
+    if "images" not in payload and "image_paths" in payload:
+        payload = dict(payload)
+        resolved_root = (
+            Path(dataset_root).resolve()
+            if dataset_root is not None
+            else _infer_dataset_root(payload, path)
+        )
+        payload["_dataset_root"] = str(resolved_root)
+        if materialize_images:
+            payload = _materialize_lazy_images(payload, resolved_root, map_location)
     return validate_sample(payload)
 
 
@@ -130,10 +179,43 @@ def save_prepared_sample(sample: Mapping[str, Any], path: str | Path) -> Path:
     cpu_sample = {
         name: value.detach().cpu() if isinstance(value, torch.Tensor) else value
         for name, value in validated.items()
-        if name not in {"_static_prepared", "edge_index", "vertex_degree"}
+        if name not in {"_static_prepared", "_dataset_root", "edge_index", "vertex_degree"}
     }
+    if cpu_sample.get("prepared_storage_format") == "lazy_image_paths_v1":
+        cpu_sample.pop("images", None)
     torch.save(cpu_sample, path)
     return path
+
+
+def _materialize_lazy_images(
+    sample: dict[str, Any],
+    dataset_root: Path,
+    map_location: str | torch.device,
+) -> dict[str, Any]:
+    from .sample_io import load_and_resize_images
+
+    resolved_paths = [
+        Path(value) if Path(value).is_absolute() else dataset_root / value
+        for value in sample["image_paths"]
+    ]
+    images, _ = load_and_resize_images(resolved_paths, int(sample["prepared_image_size"]))
+    sample["images"] = images.to(map_location)
+    sample["_dataset_root"] = str(dataset_root)
+    return sample
+
+
+def _infer_dataset_root(sample: Mapping[str, Any], sample_path: Path) -> Path:
+    """Resolve legacy direct loads without consulting the process working directory."""
+    relative_root = sample.get("image_path_root")
+    if relative_root is not None:
+        if not isinstance(relative_root, str) or not relative_root:
+            raise ValueError("image_path_root must be a non-empty string when provided.")
+        root_path = Path(relative_root)
+        if root_path.is_absolute():
+            return root_path.resolve()
+        return (sample_path.parent / root_path).resolve()
+    # lazy_image_paths_v1 originally defined samples under <dataset>/prepared/.
+    return sample_path.parent.parent.resolve()
 
 
 def move_sample_to_device(sample: Mapping[str, Any], device: torch.device) -> dict[str, Any]:

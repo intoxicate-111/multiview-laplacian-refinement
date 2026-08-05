@@ -57,7 +57,7 @@ def prepare_single_object_sample(
         noisy_vertices = coarse_mesh.vertices + offsets * coarse_mesh.normals
         coarse_mesh = Mesh(noisy_vertices, coarse_mesh.faces.copy()).ensure_normals()
 
-    images, scale_xy = _load_images(reconstruction.image_paths, image_size)
+    images, scale_xy = load_and_resize_images(reconstruction.image_paths, image_size)
     intrinsics = []
     extrinsics = []
     for camera in reconstruction.cameras:
@@ -178,7 +178,7 @@ def prepare_same_topology_sample(
     ):
         raise ValueError("Same-topology preparation requires identical coarse and GT faces.")
 
-    images, scale_xy = _load_images(reconstruction.image_paths, image_size)
+    images, scale_xy = load_and_resize_images(reconstruction.image_paths, image_size)
     intrinsics, extrinsics = _camera_tensors(reconstruction.cameras, scale_xy)
     masks = load_masks(reconstruction.mask_paths)
     visibility = None
@@ -225,7 +225,9 @@ def prepare_same_topology_sample(
     return sample
 
 
-def _load_images(paths: list[Path], image_size: int | None) -> tuple[torch.Tensor, tuple[float, float]]:
+def load_and_resize_images(
+    paths: list[Path], image_size: int | None
+) -> tuple[torch.Tensor, tuple[float, float]]:
     arrays = []
     original_size = None
     target_size = None

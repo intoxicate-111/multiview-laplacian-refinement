@@ -139,9 +139,9 @@ def test_manifest_dataset_loads_each_file_only_once(tmp_path, monkeypatch):
     original_load = multi_dataset_module.load_prepared_sample
     loaded_paths = []
 
-    def counted_load(path):
+    def counted_load(path, **kwargs):
         loaded_paths.append(path)
-        return original_load(path)
+        return original_load(path, **kwargs)
 
     monkeypatch.setattr(multi_dataset_module, "load_prepared_sample", counted_load)
     validate_disjoint_splits(train_dataset, validation_dataset)

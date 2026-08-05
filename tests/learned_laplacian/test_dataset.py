@@ -1,7 +1,14 @@
+import json
+import os
+from pathlib import Path
+
 import pytest
 import torch
+from PIL import Image
+import numpy as np
 
 from mlr.learned_laplacian.dataset import load_prepared_sample, save_prepared_sample, validate_sample
+from mlr.learned_laplacian.multi_dataset import PreparedMeshDataset
 
 from .helpers import tiny_sample
 
@@ -41,3 +48,75 @@ def test_invalid_shape_has_useful_field_name():
     sample["intrinsics"] = torch.eye(4).unsqueeze(0)
     with pytest.raises(ValueError, match="intrinsics must have shape"):
         validate_sample(sample)
+
+
+def test_lazy_image_paths_save_without_images_and_load_compatibly(tmp_path):
+    root = tmp_path / "dataset"
+    prepared_dir = root / "prepared"
+    image_dir = root / "models" / "1" / "views" / "images"
+    prepared_dir.mkdir(parents=True)
+    image_dir.mkdir(parents=True)
+    image_paths = []
+    for index in range(14):
+        path = image_dir / f"{index:04d}.png"
+        Image.fromarray(np.full((8, 8, 3), index, dtype=np.uint8)).save(path)
+        image_paths.append(path.relative_to(root).as_posix())
+
+    sample = tiny_sample()
+    sample.pop("images")
+    sample["image_paths"] = image_paths
+    sample["source_image_size"] = [8, 8]
+    sample["prepared_image_size"] = 16
+    sample["prepared_storage_format"] = "lazy_image_paths_v1"
+    sample["intrinsics"] = sample["intrinsics"].repeat(14, 1, 1)
+    sample["extrinsics"] = sample["extrinsics"].repeat(14, 1, 1)
+    sample["visibility"] = sample["visibility"].repeat(14, 1)
+    path = prepared_dir / "sample.pt"
+    save_prepared_sample(sample, path)
+
+    raw = torch.load(path, map_location="cpu", weights_only=False)
+    assert "images" not in raw
+    assert raw["image_paths"] == image_paths
+    loaded = load_prepared_sample(path)
+    assert loaded["images"].shape == (14, 3, 16, 16)
+    assert loaded["images"].dtype == torch.float32
+    assert torch.all((loaded["images"] >= 0) & (loaded["images"] <= 1))
+
+
+def test_lazy_manifest_paths_resolve_from_manifest_root_across_working_directories(tmp_path):
+    root = tmp_path / "dataset"
+    prepared_dir = root / "artifacts" / "prepared"
+    image_dir = root / "images"
+    prepared_dir.mkdir(parents=True)
+    image_dir.mkdir()
+    image_path = image_dir / "view.png"
+    Image.fromarray(np.full((6, 10, 3), 127, dtype=np.uint8)).save(image_path)
+
+    sample = tiny_sample()
+    sample.pop("images")
+    sample["image_paths"] = ["images/view.png"]
+    sample["source_image_size"] = [10, 6]
+    sample["prepared_image_size"] = 12
+    sample["prepared_storage_format"] = "lazy_image_paths_v1"
+    sample_path = prepared_dir / "sample.pt"
+    save_prepared_sample(sample, sample_path)
+    manifest_path = root / "prepared_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {"samples": [{"path": "artifacts/prepared/sample.pt", "split": "train", "sample_id": "tiny"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    other_cwd = tmp_path / "other-cwd"
+    other_cwd.mkdir()
+    previous_cwd = Path.cwd()
+    try:
+        os.chdir(other_cwd)
+        dataset = PreparedMeshDataset.from_manifest(manifest_path, "train")
+        loaded = dataset[0]
+    finally:
+        os.chdir(previous_cwd)
+
+    assert loaded["images"].shape == (1, 3, 12, 12)
+    assert loaded["_dataset_root"] == str(root.resolve())
