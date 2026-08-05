@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     synthetic.add_argument("--views", default=24, type=int)
     synthetic.add_argument("--width", default=512, type=int)
     synthetic.add_argument("--height", default=512, type=int)
-    synthetic.add_argument("--trajectory", default="orbit", choices=["orbit", "sphere"])
+    synthetic.add_argument("--trajectory", default="orbit", choices=["orbit", "sphere", "cube_surface"])
     synthetic.add_argument("--radius-scale", default=2.5, type=float)
     synthetic.add_argument("--elevation", default=20.0, type=float)
     synthetic.add_argument("--min-elevation", default=-60.0, type=float)
@@ -155,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     synthetic.add_argument("--fov", default=50.0, type=float)
     synthetic.add_argument("--mode", default="lit", choices=["lit", "normal", "depth"])
     synthetic.add_argument("--backend", default="cpu", choices=["cpu", "opengl", "cuda"])
+    synthetic.add_argument("--opengl-context-backend", default="egl")
+    synthetic.add_argument("--cube-half-extent", default=1.5, type=float)
+    synthetic.add_argument("--antialiasing", default="msaa4", choices=["none", "msaa4"])
     synthetic.add_argument("--no-normalize", action="store_true")
 
     args = parser.parse_args(argv)
@@ -528,6 +531,9 @@ def _run_synthetic(args: argparse.Namespace) -> int:
         fov_degrees=args.fov,
         render_mode=args.mode,
         backend=args.backend,
+        opengl_context_backend=args.opengl_context_backend,
+        cube_half_extent=args.cube_half_extent,
+        antialiasing=args.antialiasing,
         normalize_mesh=not args.no_normalize,
     )
     if args.mesh_dir is not None:

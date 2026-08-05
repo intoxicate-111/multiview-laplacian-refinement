@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
+import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
@@ -30,6 +33,10 @@ class SyntheticRenderConfig:
     background_color: tuple[int, int, int] = (0, 0, 0)
     object_color: tuple[int, int, int] = (190, 205, 220)
     light_direction: tuple[float, float, float] = (0.4, -0.6, 0.7)
+    opengl_context_backend: str = "egl"
+    cube_half_extent: float = 1.5
+    antialiasing: str = "msaa4"
+    camera_layout_version: str = "unit_sphere_cube_surface_faces6_corners8_v1"
 
 
 @dataclass
@@ -101,6 +108,14 @@ def generate_synthetic_dataset(
     image_dir = out_dir / "images"
     mask_dir = out_dir / "masks"
     depth_dir = out_dir / "depth"
+    for stale_path in (
+        image_dir, mask_dir, depth_dir, out_dir / "cameras.json",
+        out_dir / "dataset.json", out_dir / "mesh.obj",
+    ):
+        if stale_path.is_dir():
+            shutil.rmtree(stale_path)
+        elif stale_path.exists():
+            stale_path.unlink()
     image_dir.mkdir(parents=True, exist_ok=True)
     mask_dir.mkdir(parents=True, exist_ok=True)
     depth_dir.mkdir(parents=True, exist_ok=True)
@@ -121,6 +136,7 @@ def generate_synthetic_dataset(
         min_elevation_degrees=config.min_elevation_degrees,
         max_elevation_degrees=config.max_elevation_degrees,
         fov_degrees=config.fov_degrees,
+        cube_half_extent=config.cube_half_extent,
     )
 
     normalized_mesh_path = out_dir / "mesh.obj"
@@ -129,10 +145,11 @@ def generate_synthetic_dataset(
     image_paths: list[Path] = []
     mask_paths: list[Path] = []
     depth_paths: list[Path] = []
-    for idx, camera in enumerate(cameras):
+    rendered_views, actual_backend = _render_dataset_views(render_mesh, cameras, config, progress)
+    for idx, (camera, rendered_view) in enumerate(zip(cameras, rendered_views, strict=True)):
         if progress is not None:
             progress(f"  view {idx + 1}/{len(cameras)}")
-        rgb, mask, depth = render_mesh_view(render_mesh, camera, config)
+        rgb, mask, depth = rendered_view
         image_path = image_dir / f"{idx:04d}.png"
         mask_path = mask_dir / f"{idx:04d}.png"
         depth_path = depth_dir / f"{idx:04d}.npy"
@@ -148,6 +165,7 @@ def generate_synthetic_dataset(
     _write_cameras_json(cameras_path, cameras, image_paths, mask_paths, depth_paths, out_dir)
     _write_dataset_json(
         dataset_path,
+        cameras=cameras,
         cameras_path=cameras_path,
         image_paths=image_paths,
         mask_paths=mask_paths,
@@ -156,6 +174,7 @@ def generate_synthetic_dataset(
         source_mesh_path=source_mesh_path,
         out_dir=out_dir,
         config=config,
+        actual_backend=actual_backend,
     )
     return SyntheticDataset(image_paths, mask_paths, depth_paths, cameras, normalized_mesh_path, dataset_path)
 
@@ -188,6 +207,7 @@ def create_synthetic_cameras(
     min_elevation_degrees: float = -60.0,
     max_elevation_degrees: float = 60.0,
     fov_degrees: float = 50.0,
+    cube_half_extent: float = 1.5,
 ) -> list[Camera]:
     if trajectory == "orbit":
         return create_orbit_cameras(
@@ -208,7 +228,57 @@ def create_synthetic_cameras(
             max_elevation_degrees=max_elevation_degrees,
             fov_degrees=fov_degrees,
         )
+    if trajectory == "cube_surface":
+        return create_cube_surface_cameras(
+            mesh,
+            num_views=num_views,
+            image_size=image_size,
+            cube_half_extent=cube_half_extent,
+            fov_degrees=fov_degrees,
+        )
     raise ValueError(f"Unsupported camera trajectory: {trajectory}")
+
+
+CUBE_SURFACE_VIEW_NAMES = (
+    "pos_x", "neg_x", "pos_y", "neg_y", "pos_z", "neg_z",
+    "neg_x_neg_y_neg_z", "neg_x_neg_y_pos_z", "neg_x_pos_y_neg_z",
+    "neg_x_pos_y_pos_z", "pos_x_neg_y_neg_z", "pos_x_neg_y_pos_z",
+    "pos_x_pos_y_neg_z", "pos_x_pos_y_pos_z",
+)
+
+
+def create_cube_surface_cameras(
+    mesh: Mesh,
+    num_views: int,
+    image_size: tuple[int, int],
+    cube_half_extent: float = 1.5,
+    fov_degrees: float = 90.0,
+) -> list[Camera]:
+    del mesh
+    if num_views != len(CUBE_SURFACE_VIEW_NAMES):
+        raise ValueError(f"cube_surface requires exactly 14 views, got {num_views}")
+    if cube_half_extent <= 1.0:
+        raise ValueError("cube_half_extent must be greater than the unit-sphere radius")
+    width, height = image_size
+    focal = 0.5 * width / math.tan(math.radians(fov_degrees) * 0.5)
+    intrinsics = np.array(
+        [[focal, 0.0, width * 0.5], [0.0, focal, height * 0.5], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    a = float(cube_half_extent)
+    centers = (
+        (a, 0.0, 0.0), (-a, 0.0, 0.0), (0.0, a, 0.0), (0.0, -a, 0.0),
+        (0.0, 0.0, a), (0.0, 0.0, -a),
+        (-a, -a, -a), (-a, -a, a), (-a, a, -a), (-a, a, a),
+        (a, -a, -a), (a, -a, a), (a, a, -a), (a, a, a),
+    )
+    target = np.zeros(3, dtype=np.float64)
+    cameras = []
+    for name, position in zip(CUBE_SURFACE_VIEW_NAMES, centers, strict=True):
+        center = np.asarray(position, dtype=np.float64)
+        rotation, translation = look_at_world_to_camera(center, target)
+        cameras.append(Camera(intrinsics.copy(), rotation, translation, image_size, name))
+    return cameras
 
 
 def create_orbit_cameras(
@@ -399,6 +469,36 @@ def render_mesh_view(
     return rgb, mask, depth
 
 
+def _render_dataset_views(
+    mesh: Mesh,
+    cameras: list[Camera],
+    config: SyntheticRenderConfig,
+    progress: Callable[[str], None] | None,
+) -> tuple[list[tuple[Array, Array, Array]], str]:
+    if config.backend != "opengl":
+        return [render_mesh_view(mesh, camera, config) for camera in cameras], config.backend
+    try:
+        return render_mesh_views_opengl(mesh, cameras, config), "opengl"
+    except Exception as opengl_error:  # noqa: BLE001
+        warning = (
+            "OpenGL/EGL production renderer unavailable; using CPU reference renderer. "
+            "Current CUDA rasterizer remains disabled for production. "
+            f"OpenGL/EGL error: {opengl_error}"
+        )
+        warnings.warn(warning, RuntimeWarning, stacklevel=2)
+        if progress is not None:
+            progress(warning)
+        try:
+            cpu_config = SyntheticRenderConfig(**{**config.__dict__, "backend": "cpu"})
+            return [render_mesh_view(mesh, camera, cpu_config) for camera in cameras], "cpu_reference"
+        except Exception as cpu_error:  # noqa: BLE001
+            raise RuntimeError(
+                "Stable production renderer unavailable. Current CUDA rasterizer is disabled "
+                "for production because it may generate rasterization artifacts. "
+                f"OpenGL/EGL error: {opengl_error}; CPU reference error: {cpu_error}"
+            ) from cpu_error
+
+
 def render_mesh_view_cuda(
     mesh: Mesh,
     camera: Camera,
@@ -583,75 +683,173 @@ def render_mesh_view_opengl(
     camera: Camera,
     config: SyntheticRenderConfig | None = None,
 ) -> tuple[Array, Array, Array]:
-    try:
-        import moderngl
-    except ImportError as exc:
-        raise RuntimeError(
-            "OpenGL backend requires ModernGL. Install it with: "
-            "python -m pip install -e .[gpu]"
-        ) from exc
-
     config = config or SyntheticRenderConfig(backend="opengl")
-    width, height = camera.image_size or (config.width, config.height)
-    mesh.ensure_normals()
+    return render_mesh_views_opengl(mesh, [camera], config)[0]
 
-    cam_vertices = camera.world_to_camera(mesh.vertices)
-    positive = cam_vertices[:, 2] > 1e-8
-    if np.any(positive):
-        near_z = max(1e-4, float(np.min(cam_vertices[positive, 2])) * 0.5)
-        far_z = max(near_z + 1e-3, float(np.max(cam_vertices[positive, 2])) * 1.5)
-    else:
-        near_z, far_z = 1e-4, 10.0
 
-    ctx = moderngl.create_standalone_context()
-    color_tex = ctx.texture((width, height), 4, dtype="f4")
-    depth_rb = ctx.depth_renderbuffer((width, height))
-    fbo = ctx.framebuffer(color_attachments=[color_tex], depth_attachment=depth_rb)
-    fbo.use()
-    bg = tuple(float(c) / 255.0 for c in config.background_color)
-    ctx.clear(bg[0], bg[1], bg[2], 0.0, depth=1.0)
-    ctx.enable(moderngl.DEPTH_TEST)
+_OPENGL_RENDERERS: dict[str, "_OpenGLRenderer"] = {}
 
-    program = ctx.program(vertex_shader=_OPENGL_VERTEX_SHADER, fragment_shader=_OPENGL_FRAGMENT_SHADER)
-    packed = np.concatenate(
+
+def render_mesh_views_opengl(
+    mesh: Mesh,
+    cameras: list[Camera],
+    config: SyntheticRenderConfig | None = None,
+) -> list[tuple[Array, Array, Array]]:
+    config = config or SyntheticRenderConfig(backend="opengl")
+    renderer = _OPENGL_RENDERERS.get(config.opengl_context_backend)
+    if renderer is None:
+        renderer = _OpenGLRenderer(config.opengl_context_backend)
+        _OPENGL_RENDERERS[config.opengl_context_backend] = renderer
+    return renderer.render_mesh(mesh, cameras, config)
+
+
+class _OpenGLRenderer:
+    def __init__(self, context_backend: str) -> None:
+        try:
+            import moderngl
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenGL backend requires ModernGL. Install it with: python -m pip install -e .[gpu]"
+            ) from exc
+        self.moderngl = moderngl
+        try:
+            self.ctx = moderngl.create_context(
+                standalone=True, backend=context_backend, require=330
+            )
+        except (AttributeError, TypeError):
+            self.ctx = moderngl.create_standalone_context(
+                backend=context_backend, require=330
+            )
+        self.ctx.enable(moderngl.DEPTH_TEST)
+        self.program = self.ctx.program(
+            vertex_shader=_OPENGL_VERTEX_SHADER,
+            fragment_shader=_OPENGL_FRAGMENT_SHADER,
+        )
+
+    def render_mesh(
+        self,
+        mesh: Mesh,
+        cameras: list[Camera],
+        config: SyntheticRenderConfig,
+    ) -> list[tuple[Array, Array, Array]]:
+        mesh.ensure_normals()
+        packed = np.concatenate(
+            [np.asarray(mesh.vertices, dtype=np.float32), np.asarray(mesh.normals, dtype=np.float32)],
+            axis=1,
+        )
+        vbo = self.ctx.buffer(packed.tobytes())
+        ibo = self.ctx.buffer(np.asarray(mesh.faces, dtype=np.uint32).tobytes())
+        vao = self.ctx.vertex_array(
+            self.program,
+            [(vbo, "3f 3f", "in_position", "in_normal")],
+            index_buffer=ibo,
+        )
+        try:
+            return [
+                self._render_camera(vao, camera, config, mesh.vertices)
+                for camera in cameras
+            ]
+        finally:
+            vao.release()
+            ibo.release()
+            vbo.release()
+
+    def _render_camera(
+        self,
+        vao: Any,
+        camera: Camera,
+        config: SyntheticRenderConfig,
+        vertices: Array,
+    ) -> tuple[Array, Array, Array]:
+        width, height = camera.image_size or (config.width, config.height)
+        camera_vertices = camera.world_to_camera(vertices)
+        positive_z = camera_vertices[:, 2][camera_vertices[:, 2] > 1e-8]
+        if positive_z.size:
+            near_z = max(1e-4, float(positive_z.min()) * 0.5)
+            far_z = max(near_z + 1e-3, float(positive_z.max()) * 1.5)
+        else:
+            near_z, far_z = 1e-4, 10.0
+        view = np.eye(4, dtype=np.float32)
+        view[:3, :3] = camera.rotation
+        view[:3, 3] = camera.translation
+        projection = _cv_projection_matrix(camera.intrinsics, width, height, near_z, far_z)
+        self.program["view_matrix"].write(view.T.astype("f4").tobytes())
+        self.program["projection_matrix"].write(projection.T.astype("f4").tobytes())
+        self.program["near_z"].value = near_z
+        self.program["far_z"].value = far_z
+        self.program["render_mode"].value = {"lit": 0, "normal": 1, "depth": 2}[config.render_mode]
+        self.program["object_color"].value = tuple(float(c) / 255.0 for c in config.object_color)
+        light = np.asarray(config.light_direction, dtype=np.float64)
+        light /= max(np.linalg.norm(light), 1e-12)
+        self.program["light_dir"].value = tuple(float(x) for x in light)
+
+        color_tex = self.ctx.texture((width, height), 4, dtype="f4")
+        depth_rb = self.ctx.depth_renderbuffer((width, height))
+        fbo = self.ctx.framebuffer(color_attachments=[color_tex], depth_attachment=depth_rb)
+        try:
+            self._draw(vao, fbo, config)
+            rgba = np.frombuffer(color_tex.read(alignment=1), dtype=np.float32).reshape(height, width, 4)
+            rgba = np.flipud(rgba)
+            camera_z = rgba[:, :, 3].astype(np.float64)
+            mask = camera_z > 0.0
+            depth = np.full((height, width), np.inf, dtype=np.float64)
+            depth[mask] = camera_z[mask]
+            if config.antialiasing == "msaa4" and config.render_mode != "depth":
+                rgb = self._render_msaa_rgb(vao, width, height, config)
+            else:
+                rgb = np.clip(rgba[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
+            rgb[~mask] = np.asarray(config.background_color, dtype=np.uint8)
+            return rgb, mask, depth
+        finally:
+            fbo.release()
+            depth_rb.release()
+            color_tex.release()
+
+    def _draw(self, vao: Any, fbo: Any, config: SyntheticRenderConfig) -> None:
+        fbo.use()
+        bg = tuple(float(c) / 255.0 for c in config.background_color)
+        self.ctx.clear(bg[0], bg[1], bg[2], 0.0, depth=1.0)
+        vao.render(self.moderngl.TRIANGLES)
+
+    def _render_msaa_rgb(
+        self, vao: Any, width: int, height: int, config: SyntheticRenderConfig
+    ) -> Array:
+        color_msaa = self.ctx.renderbuffer((width, height), components=4, samples=4)
+        depth_msaa = self.ctx.depth_renderbuffer((width, height), samples=4)
+        msaa_fbo = self.ctx.framebuffer(color_attachments=[color_msaa], depth_attachment=depth_msaa)
+        resolved_tex = self.ctx.texture((width, height), 4, dtype="f1")
+        resolved_fbo = self.ctx.framebuffer(color_attachments=[resolved_tex])
+        try:
+            self._draw(vao, msaa_fbo, config)
+            self.ctx.copy_framebuffer(resolved_fbo, msaa_fbo)
+            rgba = np.frombuffer(resolved_tex.read(alignment=1), dtype=np.uint8).reshape(height, width, 4)
+            return np.flipud(rgba[:, :, :3]).copy()
+        finally:
+            resolved_fbo.release()
+            resolved_tex.release()
+            msaa_fbo.release()
+            depth_msaa.release()
+            color_msaa.release()
+
+
+def _cv_projection_matrix(
+    intrinsics: Array,
+    width: int,
+    height: int,
+    near_z: float,
+    far_z: float,
+) -> Array:
+    fx, fy = float(intrinsics[0, 0]), float(intrinsics[1, 1])
+    cx, cy = float(intrinsics[0, 2]), float(intrinsics[1, 2])
+    return np.array(
         [
-            np.asarray(mesh.vertices, dtype=np.float32),
-            np.asarray(mesh.normals, dtype=np.float32),
+            [2.0 * fx / width, 0.0, 2.0 * cx / width - 1.0, 0.0],
+            [0.0, -2.0 * fy / height, 1.0 - 2.0 * cy / height, 0.0],
+            [0.0, 0.0, (far_z + near_z) / (far_z - near_z), -2.0 * far_z * near_z / (far_z - near_z)],
+            [0.0, 0.0, 1.0, 0.0],
         ],
-        axis=1,
+        dtype=np.float32,
     )
-    vbo = ctx.buffer(packed.tobytes())
-    ibo = ctx.buffer(np.asarray(mesh.faces, dtype=np.uint32).tobytes())
-    vao = ctx.vertex_array(program, [(vbo, "3f 3f", "in_position", "in_normal")], index_buffer=ibo)
-
-    program["rot0"].value = tuple(float(x) for x in camera.rotation[0])
-    program["rot1"].value = tuple(float(x) for x in camera.rotation[1])
-    program["rot2"].value = tuple(float(x) for x in camera.rotation[2])
-    program["translation"].value = tuple(float(x) for x in camera.translation)
-    program["fx"].value = float(camera.intrinsics[0, 0])
-    program["fy"].value = float(camera.intrinsics[1, 1])
-    program["cx"].value = float(camera.intrinsics[0, 2])
-    program["cy"].value = float(camera.intrinsics[1, 2])
-    program["viewport_size"].value = (float(width), float(height))
-    program["near_z"].value = float(near_z)
-    program["far_z"].value = float(far_z)
-    program["render_mode"].value = {"lit": 0, "normal": 1, "depth": 2}[config.render_mode]
-    program["object_color"].value = tuple(float(c) / 255.0 for c in config.object_color)
-    light = np.asarray(config.light_direction, dtype=np.float64)
-    light = light / max(np.linalg.norm(light), 1e-12)
-    program["light_dir"].value = tuple(float(x) for x in light)
-
-    vao.render(moderngl.TRIANGLES)
-    data = np.frombuffer(fbo.read(components=4, dtype="f4"), dtype=np.float32)
-    rgba = data.reshape((height, width, 4))
-    rgba = np.flipud(rgba)
-    alpha_depth = rgba[:, :, 3].astype(np.float64)
-    mask = alpha_depth > 0.0
-    depth = np.full((height, width), np.inf, dtype=np.float64)
-    depth[mask] = alpha_depth[mask]
-    rgb = np.clip(rgba[:, :, :3] * 255.0, 0, 255).astype(np.uint8)
-    rgb[~mask] = np.asarray(config.background_color, dtype=np.uint8)
-    return rgb, mask, depth
 
 
 _OPENGL_VERTEX_SHADER = """
@@ -659,35 +857,15 @@ _OPENGL_VERTEX_SHADER = """
 in vec3 in_position;
 in vec3 in_normal;
 
-uniform vec3 rot0;
-uniform vec3 rot1;
-uniform vec3 rot2;
-uniform vec3 translation;
-uniform float fx;
-uniform float fy;
-uniform float cx;
-uniform float cy;
-uniform vec2 viewport_size;
-uniform float near_z;
-uniform float far_z;
+uniform mat4 view_matrix;
+uniform mat4 projection_matrix;
 
 out vec3 v_normal;
 out float v_cam_z;
 
 void main() {
-    vec3 cam;
-    cam.x = dot(rot0, in_position) + translation.x;
-    cam.y = dot(rot1, in_position) + translation.y;
-    cam.z = dot(rot2, in_position) + translation.z;
-
-    float safe_z = max(cam.z, 1e-6);
-    float px = fx * cam.x / safe_z + cx;
-    float py = fy * cam.y / safe_z + cy;
-    float x_ndc = 2.0 * px / viewport_size.x - 1.0;
-    float y_ndc = 1.0 - 2.0 * py / viewport_size.y;
-    float z_ndc = 2.0 * (safe_z - near_z) / max(far_z - near_z, 1e-6) - 1.0;
-
-    gl_Position = vec4(x_ndc, y_ndc, z_ndc, 1.0);
+    vec4 cam = view_matrix * vec4(in_position, 1.0);
+    gl_Position = projection_matrix * cam;
     v_normal = normalize(in_normal);
     v_cam_z = cam.z;
 }
@@ -805,10 +983,25 @@ def _write_cameras_json(
     depth_paths: list[Path],
     root: Path,
 ) -> None:
+    payload = _camera_records(cameras, image_paths, mask_paths, depth_paths, root)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+
+
+def _camera_records(
+    cameras: list[Camera],
+    image_paths: list[Path],
+    mask_paths: list[Path],
+    depth_paths: list[Path],
+    root: Path,
+) -> list[dict[str, Any]]:
     payload = []
     for camera, image_path, mask_path, depth_path in zip(
         cameras, image_paths, mask_paths, depth_paths, strict=True
     ):
+        extrinsics = np.eye(4, dtype=np.float64)
+        extrinsics[:3, :3] = camera.rotation
+        extrinsics[:3, 3] = camera.translation
         payload.append(
             {
                 "name": camera.name,
@@ -816,18 +1009,19 @@ def _write_cameras_json(
                 "mask_path": _rel(mask_path, root),
                 "depth_path": _rel(depth_path, root),
                 "intrinsics": camera.intrinsics.tolist(),
+                "extrinsics": extrinsics.tolist(),
                 "rotation": camera.rotation.tolist(),
                 "translation": camera.translation.tolist(),
                 "image_size": list(camera.image_size) if camera.image_size else None,
                 "convention": "world_to_camera_cv_z_forward_y_down",
             }
         )
-    with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2)
+    return payload
 
 
 def _write_dataset_json(
     path: Path,
+    cameras: list[Camera],
     cameras_path: Path,
     image_paths: list[Path],
     mask_paths: list[Path],
@@ -836,6 +1030,7 @@ def _write_dataset_json(
     source_mesh_path: Path | None,
     out_dir: Path,
     config: SyntheticRenderConfig,
+    actual_backend: str,
 ) -> None:
     payload = {
         "mesh_path": _rel(mesh_path, out_dir),
@@ -844,6 +1039,9 @@ def _write_dataset_json(
         "image_paths": [_rel(path, out_dir) for path in image_paths],
         "mask_paths": [_rel(path, out_dir) for path in mask_paths],
         "depth_paths": [_rel(path, out_dir) for path in depth_paths],
+        "cameras": _camera_records(
+            cameras, image_paths, mask_paths, depth_paths, out_dir
+        ),
         "config": {
             "num_views": config.num_views,
             "width": config.width,
@@ -855,7 +1053,13 @@ def _write_dataset_json(
             "max_elevation_degrees": config.max_elevation_degrees,
             "fov_degrees": config.fov_degrees,
             "render_mode": config.render_mode,
-            "backend": config.backend,
+            "backend": actual_backend,
+            "requested_backend": config.backend,
+            "opengl_context_backend": config.opengl_context_backend,
+            "cube_half_extent": config.cube_half_extent,
+            "antialiasing": config.antialiasing,
+            "camera_layout_version": config.camera_layout_version,
+            "normalized_mesh_checksum": _mesh_checksum(load_mesh(mesh_path)),
             "normalize_mesh": config.normalize_mesh,
         },
     }
@@ -868,3 +1072,10 @@ def _rel(path: Path, root: Path) -> str:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _mesh_checksum(mesh: Mesh) -> str:
+    digest = hashlib.sha256()
+    digest.update(np.asarray(mesh.vertices, dtype=np.float64).tobytes())
+    digest.update(np.asarray(mesh.faces, dtype=np.int64).tobytes())
+    return digest.hexdigest()
