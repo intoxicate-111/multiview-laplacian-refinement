@@ -10,10 +10,17 @@ runs/**
 !runs/**/
 !runs/**/*.obj
 
+# Local high-volume training trials are generated artifacts, including OBJ
+# visualizations that are otherwise allowed by the generic runs rule above.
+runs/thingi10k50_gpu_trial/
+
 # Learned single-object runs include checkpoints and diagnostic meshes; keep
 # them local even though other run OBJ artifacts may be versioned.
 runs/learned_laplacian/**
 projected_gt_on_coarse.obj
+.external/
+mesh/input.obj
+mesh/test1.obj
 *.log
 *.dmap
 *.mvs
