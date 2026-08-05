@@ -658,7 +658,7 @@ different sampling resolutions or subdivision levels.
 
 The multi-mesh path trains one shared CNN/GNN over prepared samples with
 different vertex counts, face counts, graph connectivity, view counts, and
-image sizes. Meshes are loaded lazily and forwarded one at a time; gradients
+image sizes. Meshes are loaded and statically prepared once, then forwarded one at a time; gradients
 are divided by the number of meshes in each accumulation group before the
 optimizer step. This gives every mesh equal weight regardless of its vertex
 count and avoids padding large ragged graphs.
@@ -704,8 +704,8 @@ python scripts/train_multi_mesh_laplacian.py \
   --device cuda
 ```
 
-The default example configuration uses 50 epochs and four meshes per gradient
-accumulation group. `validation_every_epochs` controls validation frequency;
+The example configuration uses four meshes per gradient accumulation group.
+`validation_every_epochs` controls validation frequency;
 only validation epochs can replace the best checkpoint when a validation split
 exists. Without a validation split, training loss is the selection criterion.
 The command-line entry point requires both `train` and `validation` manifest
@@ -724,3 +724,59 @@ and scale normalisation does not remove global-scale dependence. A meaningful
 first dataset should contain multiple deterministic corruptions and multiple
 Bunny sampling resolutions, with graph resolutions represented in both train
 and held-out validation splits.
+
+## Saved Prediction Visualization
+
+Multi-mesh training writes `config.json`, `run_config.json`, and an absolute-path
+`dataset_manifest.json` into new run directories. These records let the generic
+visualizer load the exact prepared mesh, topology, GT data, and cameras used for
+prediction instead of guessing from a sample ID.
+
+List predictions and their available metadata:
+
+```bash
+PYTHONPATH=src python scripts/visualize_predictions.py \
+  --run-dir runs/learned_laplacian/multi_mesh \
+  --split validation \
+  --list
+```
+
+Reconstruct one sample or every prediction in a split:
+
+```bash
+PYTHONPATH=src python scripts/visualize_predictions.py \
+  --run-dir runs/learned_laplacian/multi_mesh \
+  --split validation \
+  --sample-id bunny_high_validation
+
+PYTHONPATH=src python scripts/visualize_predictions.py \
+  --run-dir runs/learned_laplacian/multi_mesh \
+  --split validation \
+  --all
+```
+
+The default output is
+`<run-dir>/visualizations/<split>/<sample-id>/`. Each successful reconstruction
+contains `coarse.obj`, `predicted_refined.obj`, optional `gt.obj`, a fixed-camera
+`comparison.png`, `refinement_history.json`, diagnostic arrays, and
+`summary.json`. Batch mode also writes `batch_summary.json` and continues after
+individual sample failures.
+
+`*_raw_delta.npy` is already in the coordinate space required by mesh
+reconstruction and is always preferred. `*_target_space_delta.npy` may be
+inverse-scaled only when the run records the exact target mode, scaling method,
+epsilon, and the prepared sample contains its local edge lengths. The command
+stops rather than guessing when this metadata is incomplete.
+
+A prediction must have exactly the same `[N, 3]` shape and vertex ordering as
+the prepared coarse mesh. Shape mismatches usually mean the prediction was
+paired with another resolution or preprocessing result; the tool never resizes,
+interpolates, reorders, or finds new correspondences. Rendering uses one sample
+camera for coarse, prediction, and GT in their shared coordinate system. If no
+camera is stored, the summary explicitly records use of the deterministic orbit
+fallback.
+
+Legacy runs created before run-local manifests were added can be handled only
+when their exact original manifest is known. Pass it explicitly with
+`--manifest /path/to/original_manifest.json`; this override is intentionally
+required instead of searching for a same-named mesh.

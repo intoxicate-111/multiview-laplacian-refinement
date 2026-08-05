@@ -12,6 +12,16 @@ from .multi_dataset import (
 )
 from .multi_trainer import MultiObjectTrainingResult, train_multi_object
 from .projection import ProjectionResult, project_vertices, sample_vertex_features
+from .prediction_visualizer import (
+    PredictionRecord,
+    RunMetadata,
+    VisualizationOptions,
+    discover_predictions,
+    discover_run_metadata,
+    load_prediction_sample,
+    visualize_prediction_sample,
+    visualize_prediction_split,
+)
 from .sample_io import (
     corrupt_same_topology_mesh,
     prepare_same_topology_sample,
@@ -36,14 +46,20 @@ __all__ = [
     "PreparedMeshDataset",
     "PreparedMeshRecord",
     "ProjectionResult",
+    "PredictionRecord",
+    "RunMetadata",
     "TrainingResult",
+    "VisualizationOptions",
     "EDGE_SCALE_NORMALIZED_LAPLACIAN",
     "RAW_LAPLACIAN",
     "faces_to_edge_index",
+    "discover_predictions",
+    "discover_run_metadata",
     "corrupt_same_topology_mesh",
     "laplacian_prediction_metrics",
     "mean_incident_edge_length",
     "load_prepared_sample",
+    "load_prediction_sample",
     "masked_mean_aggregate",
     "prepare_single_object_sample",
     "prepare_same_topology_sample",
@@ -59,5 +75,7 @@ __all__ = [
     "train_multi_object",
     "validate_sample",
     "validate_disjoint_splits",
+    "visualize_prediction_sample",
+    "visualize_prediction_split",
     "weighted_robust_laplacian_loss",
 ]

@@ -34,6 +34,7 @@ def main() -> int:
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    _write_run_metadata(args.output_dir, args.manifest, config)
     train_dataset = PreparedMeshDataset.from_manifest(args.manifest, "train")
     validation_dataset = PreparedMeshDataset.from_manifest(args.manifest, "validation")
     loading_start = time.perf_counter()
@@ -81,6 +82,44 @@ def main() -> int:
     }
     print(json.dumps(summary, indent=2))
     return 0
+
+
+def _write_run_metadata(output_dir: Path, manifest_path: Path, config: dict) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_path.resolve()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("samples"), list):
+        raise ValueError("Manifest must be an object containing a 'samples' list.")
+    portable_manifest = dict(manifest)
+    portable_samples = []
+    for item in manifest["samples"]:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ValueError("Each manifest sample must be an object with a path.")
+        sample = dict(item)
+        path = Path(sample["path"])
+        if not path.is_absolute():
+            path = manifest_path.parent / path
+        sample["path"] = str(path.resolve())
+        portable_samples.append(sample)
+    portable_manifest["samples"] = portable_samples
+    (output_dir / "config.json").write_text(
+        json.dumps(config, indent=2) + "\n", encoding="utf-8"
+    )
+    (output_dir / "run_config.json").write_text(
+        json.dumps(
+            {
+                "experiment_config": config,
+                "manifest_path": "dataset_manifest.json",
+                "source_manifest": str(manifest_path),
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / "dataset_manifest.json").write_text(
+        json.dumps(portable_manifest, indent=2) + "\n", encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":
