@@ -1,280 +1,272 @@
-# Optimized Multi-Mesh Training Guide
+# Multi-Mesh GT-Query Training Guide
 
 [简体中文](MULTI_MESH_TRAINING.zh-CN.md) | [Project README](../README.md)
 
-This guide documents the optimized training path for the existing CNN + graph
-network. It does not change the model architecture and does not implement
-sparse vertex-view patches.
+## Purpose
 
-## Current production dataset
-
-The checked local production manifest is:
+This guide documents the production path for learning a shared local
+Laplacian field from calibrated multi-view images:
 
 ```text
-/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/thingi10k50/sample_50_960/prepared_manifest.json
+multi-view RGB + 3D query + local graph context
+    -> GT edge-scale-normalised Laplacian at the query location
 ```
 
-Its contract is:
+The network is trained on GT mesh graphs and is expected to generalise to
+unseen objects and to vertices of arbitrary coarse/expanded inference meshes.
+Training does not generate a coarse mesh, does not optimise a coarse-to-GT
+residual and does not interpolate GT Laplacian vectors to another graph.
 
-- 50 prepared meshes: 40 train, 5 validation, and 5 test;
-- 14 views per mesh;
-- 960 x 960 prepared images;
-- `lazy_image_paths_v1` storage for every sample;
-- variable mesh topology and size across samples.
+## Supervision and query construction
 
-The production config validates these split counts before creating a run:
+For each supervised object, sample preparation computes the uniform Laplacian
+directly on the GT graph:
 
 ```text
-configs/learned_laplacian/train_multi_mesh_edge_normalized_50_960.json
+raw_target_i        = (L_gt V_gt)_i
+local_scale_i       = mean incident GT edge length
+normalised_target_i = raw_target_i / (local_scale_i^2 + epsilon)
 ```
 
-## One-command launch
+At training time, the query position is generated dynamically. Twenty percent
+of vertices remain exact by default; the others receive bounded normal and
+tangent offsets relative to local edge length. The target remains the direct
+GT-graph target of the corresponding original vertex.
 
-Run from any directory:
+This trains a local query field around the surface while retaining exact-query
+supervision. Exact and perturbed losses are reported separately.
+
+## Leakage prevention
+
+The following invariants are mandatory:
+
+- GT-query samples store a zero `initial_laplacian`;
+- raw and normalised GT Laplacian tensors are supervision, not input features;
+- no GT Laplacian vector is transferred to a coarse or expanded graph;
+- training geometry comes from GT vertices and GT faces;
+- inference-only expanded samples never enter the training dataset;
+- test objects are reserved for final evaluation.
+
+The trainer validates the zero-initial-Laplacian invariant before use.
+
+## Dynamic Fourier query encoding
+
+Dataset preparation stores the coordinate-normalisation center and scale, but
+does not precompute Fourier features. The model encodes the actual query after
+augmentation:
+
+```text
+q_normalised = (q - center) / scale
+PE(q) = [q, sin(2^k pi q), cos(2^k pi q)]
+```
+
+The production predictor concatenates:
+
+- aggregated multi-view CNN features sampled at the query projection;
+- valid-view ratio;
+- Fourier-encoded query coordinates;
+- query-graph vertex normal;
+- relative local edge scale;
+- graph degree.
+
+`geometry_mode=query_fourier` excludes `initial_laplacian` from this feature
+set. The config name `coarse_plus_multiview` is a legacy input-mode label; in
+the production query-Fourier model it means graph/query context plus images,
+not coarse-mesh supervision.
+
+## Current Sofa50 contract
+
+The checked dataset root is:
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960
+```
+
+It contains 50 objects split into 40 train, 5 validation and 5 held-out test
+objects. Every object has 14 calibrated 960 x 960 RGB views and variable mesh
+topology.
+
+Use this manifest for training:
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960/gt_query_manifest.json
+```
+
+Use this manifest only for downstream inference evaluation:
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960/expanded_inference_manifest.json
+```
+
+The expanded manifest's schema-required target is not GT supervision. Passing
+that manifest to the training loop would violate the project objective.
+
+## Full launch
+
+The production launcher is:
 
 ```bash
-bash /home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/multiview-laplacian-refinement/scripts/train_thingi10k50_960_full.sh
+bash scripts/train_sofa50_v8_960_5000.sh
 ```
 
-The launcher:
-
-1. activates the `test` Conda environment;
-2. checks the manifest and JSON config;
-3. requires a visible CUDA device;
-4. refuses to overwrite a non-empty output directory;
-5. starts training and tees the console to `console.log`.
-
-The fixed output directory is:
+It uses:
 
 ```text
-runs/learned_laplacian/thingi10k50_960_full
+configs/learned_laplacian/train_gt_query_sofa50_v8_960_5000.json
 ```
 
-Validate the launch contract without training:
+The full run writes to:
 
-```bash
-bash scripts/train_thingi10k50_960_full.sh --check
+```text
+runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full
 ```
 
-For a long foreground run, keep the terminal open or invoke the launcher from
-`tmux`. The current trainer does not resume from an interrupted checkpoint;
-the non-empty-output guard prevents accidental mixing of two runs.
-
-## Production training policy
-
-The 50-mesh 960 profile uses:
+The current long-run policy is:
 
 | Setting | Value |
 |---|---:|
 | Maximum epochs | 5,000 |
 | Maximum optimizer steps | 50,000 |
 | Gradient accumulation | 4 meshes |
-| Optimizer steps per complete epoch | 10 |
+| Optimizer steps per full epoch | 10 |
 | Validation interval | 5 epochs |
-| Checkpoint interval | 10 epochs |
-| Early-stopping patience | 15 validation events |
-| Early-stopping minimum delta | 0.0001 |
+| Checkpoint interval | 100 epochs |
 | DataLoader workers | 4 |
 | Prefetch factor | 2 |
 | Pinned memory | enabled |
 | Persistent workers | enabled |
 | CUDA AMP | FP16 enabled |
+| Primary loss | Huber, delta 0.01 |
 
-Training stops when any configured terminal condition is reached: maximum
-epochs, maximum optimizer steps, or early stopping. With validation every five
-epochs, an early-stopping patience of 15 corresponds to 75 epochs without a
-sufficient validation improvement. The ReduceLROnPlateau scheduler uses
-validation events rather than raw epochs.
+The launcher uses the `test` Conda environment and requires CUDA. Split counts
+are checked before training starts.
 
 ## Lazy data and precision path
 
-The command-line entry point passes `PreparedMeshDataset` directly into the
-trainer. It does not convert the dataset to `tuple` or `list`.
-
+`PreparedMeshDataset` remains lazy; it is not converted to a tuple or list.
 The data path is:
 
 ```text
-prepared static mesh tensors
+static GT graph and supervision metadata
   -> lazy DataLoader worker
-  -> decode current images as uint8
-  -> pinned CPU memory
+  -> decode requested RGB views as uint8
+  -> pinned CPU tensor
   -> non-blocking CUDA transfer
-  -> FP32 conversion / 255 and configured normalization on GPU
-  -> FP16 autocast CNN + graph-network forward
-  -> FP32 Laplacian target, robust loss, and metrics
+  -> convert to float, divide by 255 and normalise on GPU
+  -> AMP CNN feature extraction and GNN prediction
+  -> FP32 target scaling, Huber loss and metrics
 ```
 
-Only currently requested and prefetched images are decoded. Images are not
-cached for all meshes, so dataset size does not directly multiply GPU memory.
-Static graph/target tensors are still prepared once for all train and
-validation meshes.
+Only requested and prefetched images are decoded. The full image dataset is
+not cached in CPU or GPU memory. Meshes are forwarded one at a time and
+gradients are accumulated across meshes, avoiding padded ragged-graph batches.
 
-The configured image normalization is identity after `[0,1]` scaling:
+## Validation and model selection
 
-```json
-{
-  "mean": [0.0, 0.0, 0.0],
-  "std": [1.0, 1.0, 1.0]
-}
+Validation uses held-out objects, never training meshes. When query
+augmentation is enabled for validation, the aggregate validation curve can be
+noisy; exact-query and perturbed-query losses should therefore be inspected
+separately as well as together.
+
+A few worsening validation events are not enough to stop a run. A plateau
+decision should require a window of validation events in which both:
+
+- training loss no longer improves materially; and
+- validation best no longer improves materially.
+
+The best checkpoint is selected by validation loss. Periodic checkpoints are
+kept independently so later image and expanded-query ablations can compare the
+same training stage.
+
+## Required evaluation
+
+GT-query validation alone does not prove the final objective. Every candidate
+checkpoint should report:
+
+- loss and relative improvement versus a zero predictor;
+- `mean |prediction| / mean |GT|`;
+- magnitude-binned error;
+- high-10% target-magnitude cosine similarity;
+- per-object metrics, not only an aggregate mean.
+
+Image dependence must be tested with the query, graph and target fixed:
+
+1. original RGB;
+2. zero RGB;
+3. shuffled view order;
+4. cross-object RGB.
+
+If all four results are similar, the model is relying primarily on query/graph
+context. If original RGB wins but amplitude remains near zero, the image branch
+works and the next issue is target/loss calibration.
+
+Mesh-count scaling should use nested 1/2/4/8/16-object subsets with comparable
+per-object exposure. It identifies whether output amplitude collapses as object
+diversity increases.
+
+Finally, apply the same checkpoint to the expanded inference manifest and
+report reconstruction Chamfer, normal consistency and visual results. This is
+the step that tests transfer from GT training graphs to arbitrary inference
+graphs.
+
+## Diagnostics
+
+```bash
+python scripts/ablate_single_mesh_checkpoint_images.py --help
+python scripts/run_mesh_count_scaling.py --help
+python scripts/diagnose_laplacian_prediction.py --help
+python scripts/render_image_ablation_reconstructions.py --help
 ```
 
-This preserves the input semantics of the original training path. It is not
-ImageNet normalization because the image encoder is trained from scratch.
-
-## Available configs
-
-| Config | Purpose |
-|---|---|
-| `train_multi_mesh_edge_normalized_50_960.json` | Full 40/5/5 production run |
-| `train_multi_mesh_edge_normalized_960_epoch1.json` | 960-pixel one-epoch CUDA smoke test |
-| `train_multi_mesh_edge_normalized_1920_epoch1.json` | 1920-pixel one-epoch CUDA smoke test |
-| `train_multi_mesh_edge_normalized_1000_1920.json` | 800/100/100, 250-epoch, 50k-step profile |
-
-The prepared sample records the actual image size. Config filenames document
-the intended manifest profile, while the loader reads `prepared_image_size`
-from each sample.
-
-The 1,000-sample config rejects manifests that do not contain exactly 800
-train, 100 validation, and 100 test entries. The test split is reserved for
-held-out evaluation and is not used by the training loop.
-
-## Data loading controls
-
-Lazy samples are pruned before entering DataLoader workers. Forward fields,
-camera tensors, confidence, local scale, and the selected training target are
-retained. GT meshes, faces, target positions, duplicate raw/normalized targets,
-`local_edge_scale`, and metadata stay out of worker IPC and GPU transfer. The
-raw target and face count remain in the main process and are attached only for
-validation and final prediction metrics.
-
-Optional view sampling is configured under `data_loading`:
-
-```json
-{
-  "train_views_per_sample": null,
-  "validation_views_per_sample": null
-}
-```
-
-`null` preserves the original all-view behavior. A positive integer selects
-that many aligned image paths, intrinsics, extrinsics, and visibility rows.
-Training selection changes deterministically by epoch and sample ID;
-validation selection is fixed and reproducible. Values at least as large as
-the available view count use all views.
-The CLI can override these values with `--train-views-per-sample 4` and
-`--validation-views-per-sample 4` without editing the source config.
-
-`coarse_only` and `--zero-images` do not open or resize image files. The former
-also omits camera tensors because image features and valid-view ratio are both
-zero in that ablation. The latter retains camera projection so its historical
-valid-view-ratio input remains unchanged.
-
-With profiling enabled, each epoch records `sample_wait_seconds`, worker-side
-`image_decode_resize_seconds`, `pin_or_transfer_seconds`,
-`forward_backward_seconds`, mean selected views, and decoded uint8 image bytes.
-Worker-to-main IPC time is not reported separately because it cannot be
-isolated reliably from DataLoader waiting and prefetching.
+The optional magnitude-weighted Huber experiment is a diagnostic alternative,
+not the production objective. Its loss values are not directly comparable to
+unweighted Huber because target-magnitude weighting changes the metric.
 
 ## Outputs and monitoring
 
-During training, each epoch prints:
-
-```text
-epoch, train loss, validation loss, best loss, learning rate
-DataLoader wait, GPU transfer, forward/backward, total step, validation time
-```
-
 The run directory contains:
 
-- `console.log`: live launcher output;
-- `best.pt`: best validation checkpoint;
-- `checkpoint_epoch_*.pt`: periodic checkpoints;
-- `training_history.json`: epoch losses, learning rates, steps, and timing;
-- `metrics.json`: final losses, stop reason, performance, and per-object metrics;
-- `config.json`, `run_config.json`, and `dataset_manifest.json`: reproducibility metadata;
-- `predictions/train/` and `predictions/validation/`: target-space and recovered raw predictions.
+- `best.pt`;
+- `checkpoint_epoch_*.pt`;
+- `config.json`, `run_config.json` and `dataset_manifest.json`;
+- `training_history.json` and `metrics.json` after completion;
+- per-object prediction arrays after final evaluation;
+- the launcher/service log used for live monitoring.
 
-Follow a running job with:
-
-```bash
-tail -f runs/learned_laplacian/thingi10k50_960_full/console.log
-```
-
-`metrics.json` records at least:
-
-- initial/static preparation time;
-- mean DataLoader wait time;
-- mean GPU transfer time;
-- mean forward/backward time;
-- mean total optimizer-step time;
-- validation time;
-- peak allocated GPU memory;
-- peak main-process CPU memory;
-- completed epochs, optimizer steps, AMP state, and stop reason.
-
-The CPU peak is the main-process high-water mark, not a strict aggregate of
-all persistent worker RSS values.
-
-## Measured performance
-
-Measurements used the same 40/5/5 dataset contract and a Quadro RTX 5000:
-
-| Metric | Optimized 1920 | Optimized 960 |
-|---|---:|---:|
-| One training epoch | 10.85 s | 4.78 s |
-| Validation pass | 2.24 s | 1.06 s |
-| DataLoader wait | 5.45 s | 2.52 s |
-| GPU transfer | 1.89 s | 0.54 s |
-| Forward/backward | 3.17 s | 1.52 s |
-| Peak GPU allocation | 3.01 GiB | 1.00 GiB |
-| Peak main-process CPU memory | 5.06 GiB | 2.83 GiB |
-| Complete one-epoch smoke runtime | 48.86 s | 33.94 s |
-
-The optimized 960 steady-state training epoch was approximately 2.27 times
-faster than optimized 1920. Compared with the original eager 1920 path, the
-complete smoke runtime improved from 187.96 seconds to 48.86 seconds at 1920.
-
-The one-epoch 960 and 1920 losses were almost identical, but one epoch is not
-enough to establish equal final accuracy. Use a longer controlled A/B run
-before treating 960 as accuracy-equivalent.
-
-## Loss interpretation
-
-The target uses edge-scale-normalized Laplacian coordinates and Huber loss with
-`delta=0.01`. Normalized targets have a heavy-tailed magnitude distribution,
-so loss values can move slowly even while checkpoints improve. On the current
-960 dataset, the zero-prediction baselines were approximately 0.281828 train
-and 0.305586 validation. The live production run reached a validation loss of
-approximately 0.298575 by epoch 40, so it had moved materially below the zero
-baseline.
-
-Do not change target clipping, Huber delta, or target standardization during a
-running experiment. Compare those choices in a new run with a new output
-directory.
-
-## Verification
-
-Activate the same environment and run:
+Follow the current run with:
 
 ```bash
-source /home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/miniconda3/etc/profile.d/conda.sh
-conda activate test
-PYTHONPATH=src pytest -q
+tail -f runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full/training.log
 ```
 
-The optimized implementation was validated with 108 passing tests, including
-lazy manifest loading, uint8 CPU images, persistent workers, max-step stopping,
-early stopping, aligned epoch-aware view sampling, image-free ablations, CUDA
-transfer paths, and finite CUDA AMP loss.
+The trainer reports data wait, image decode, GPU transfer,
+forward/backward, total epoch time, validation time, used views, decoded bytes
+and CPU/GPU peak memory.
 
-## Remaining constraints
+## Operational constraints
 
 - Training is one ragged mesh forward at a time with gradient accumulation,
   not packed-graph batching.
-- PNG decoding remains the largest steady-state component at 960 pixels.
-- Static mesh/graph preparation scales with the number and complexity of
-  train/validation meshes, but runs once at startup.
-- The trainer writes final metrics by evaluating train and validation again.
+- PNG decoding is currently the dominant steady-state cost at 960 pixels.
+- Static graph preparation runs once and scales with mesh count and complexity.
 - Automatic checkpoint resume is not implemented.
-- The 1,000-sample profile is configured, but it requires a real matching
-  800/100/100 prepared manifest before launch.
+- A run must not start while dataset files are still being generated or moved.
+- Coordinate and camera conventions must remain identical between GT training
+  observations and coarse/expanded inference queries.
+
+## Legacy code
+
+Historical coarse-graph targets, closest-surface pseudo targets, oracle
+refinement and single-object Bunny experiments remain useful tests. They are
+not the production learned-Laplacian supervision contract and must not be used
+as evidence of cross-object or expanded-query generalisation.
+
+## Verification
+
+```bash
+PYTHONPATH=src conda run --no-capture-output -n test pytest -q
+```
+
+Focused learned-Laplacian tests cover lazy loading, GT-query leakage guards,
+query perturbation bounds, Fourier encoding, image ablation, mesh-count
+scaling, AMP and Sofa50 preparation.
