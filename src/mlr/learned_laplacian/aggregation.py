@@ -13,9 +13,14 @@ def masked_mean_aggregate(
         raise ValueError("per_view_features must have shape [V, N, C].")
     if tuple(valid.shape) != tuple(per_view_features.shape[:2]):
         raise ValueError("valid must have shape [V, N].")
-    weights = valid.to(per_view_features.dtype).unsqueeze(-1)
+    # View aggregation is a reduction and is intentionally kept in FP32 under
+    # autocast. Besides avoiding overflow, this makes consistently permuted
+    # views numerically stable instead of changing predictions through FP16
+    # summation order.
+    features = per_view_features.float()
+    weights = valid.to(dtype=torch.float32).unsqueeze(-1)
     counts = weights.sum(dim=0)
-    aggregated = (per_view_features * weights).sum(dim=0) / counts.clamp_min(1.0)
+    aggregated = (features * weights).sum(dim=0) / counts.clamp_min(1.0)
     aggregated = torch.where(counts > 0, aggregated, torch.zeros_like(aggregated))
     valid_ratio = counts.squeeze(-1) / float(max(per_view_features.shape[0], 1))
     return aggregated, valid_ratio

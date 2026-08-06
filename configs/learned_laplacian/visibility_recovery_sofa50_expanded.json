@@ -1,0 +1,23 @@
+{
+  "seed": 7,
+  "renderer_visibility_condition": "backface_and_occlusion",
+  "visibility_recovery": {
+    "enabled": true,
+    "mode": "hard_any_view",
+    "unseen_anchor_weight": 1.0
+  },
+  "reconstruction": {
+    "operator_type": "uniform",
+    "lambda_lap": 1.0,
+    "lambda_anchor": 0.01,
+    "lambda_edge": 0.0,
+    "num_iters": 200,
+    "learning_rate": 0.01,
+    "robust_loss": "huber",
+    "huber_delta": 0.01,
+    "dense_vertex_limit": 5000,
+    "chamfer_samples": 3000,
+    "metric_seed": 7,
+    "evaluate_oracle": false
+  }
+}

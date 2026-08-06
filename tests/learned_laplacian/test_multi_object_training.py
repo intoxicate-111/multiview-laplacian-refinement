@@ -740,6 +740,37 @@ def test_epoch_aware_view_selection_is_aligned_and_reproducible():
 
 
 @pytest.mark.parametrize(
+    ("condition", "field"),
+    [
+        ("backface_only", "visibility_backface_only"),
+        ("occlusion_only", "visibility_occlusion_only"),
+        ("backface_and_occlusion", "visibility_backface_and_occlusion"),
+    ],
+)
+def test_precomputed_renderer_visibility_condition_is_selected(condition, field):
+    sample = _multi_view_sample(3)
+    sample["visibility_backface_only"] = torch.tensor(
+        [[True, False, True, False], [False, True, False, True], [True] * 4]
+    )
+    sample["visibility_occlusion_only"] = ~sample["visibility_backface_only"]
+    sample["visibility_backface_and_occlusion"] = torch.zeros((3, 4), dtype=torch.bool)
+    config = _multi_config()
+    config["renderer_visibility"] = {"condition": condition}
+    prepared = _prepare_object_static(sample, config)
+    assert torch.equal(prepared.sample["visibility"], sample[field])
+    assert "depth_maps" not in prepared.sample
+    assert "depth_paths" not in prepared.sample
+
+
+def test_frustum_only_explicitly_ignores_prepared_renderer_visibility():
+    sample = _multi_view_sample(3)
+    config = _multi_config()
+    config["renderer_visibility"] = {"condition": "frustum_only"}
+    prepared = _prepare_object_static(sample, config)
+    assert prepared.sample["visibility"] is None
+
+
+@pytest.mark.parametrize(
     ("input_mode", "zero_images"),
     [("coarse_only", False), ("coarse_plus_multiview", True)],
 )

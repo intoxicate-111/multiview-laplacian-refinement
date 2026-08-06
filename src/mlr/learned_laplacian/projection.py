@@ -8,18 +8,26 @@ from torch.nn import functional as F
 
 @dataclass(frozen=True)
 class ProjectionResult:
-    """Projected vertices under the documented CV camera convention.
+    """Projected queries under the right-handed CV camera convention.
 
-    Extrinsics are right-handed world-to-camera 4x4 transforms. Camera +X is
-    image-right, +Y is image-down, and +Z is forward. Pixel coordinates use a
-    top-left origin. ``grid`` follows grid_sample with align_corners=True, so
-    pixel (0, 0) maps to (-1, -1) and (W-1, H-1) maps to (1, 1).
+    Extrinsics are world-to-camera transforms with +Z forward, +X image-right
+    and +Y image-down. ``renderer_visible`` is precomputed by the same renderer
+    that produced RGB; this module deliberately does not infer occlusion from a
+    depth image or from a normal/view-direction approximation.
     """
 
     pixels: torch.Tensor
     grid: torch.Tensor
     depth: torch.Tensor
-    valid: torch.Tensor
+    frustum_valid: torch.Tensor
+    renderer_visible: torch.Tensor
+    final_valid: torch.Tensor
+
+    @property
+    def valid(self) -> torch.Tensor:
+        """Backward-compatible alias for ``final_valid``."""
+
+        return self.final_valid
 
 
 def project_vertices(
@@ -30,7 +38,7 @@ def project_vertices(
     visibility: torch.Tensor | None = None,
     eps: float = 1e-8,
 ) -> ProjectionResult:
-    """Project world-space vertices into each view and reject invalid samples."""
+    """Project queries and intersect frustum validity with renderer visibility."""
 
     if vertices.ndim != 2 or vertices.shape[1] != 3:
         raise ValueError("vertices must have shape [N, 3].")
@@ -57,14 +65,32 @@ def project_vertices(
     x_grid = torch.zeros_like(u) if width == 1 else 2.0 * u / float(width - 1) - 1.0
     y_grid = torch.zeros_like(v) if height == 1 else 2.0 * v / float(height - 1) - 1.0
     grid = torch.stack((x_grid, y_grid), dim=-1)
-    valid = (depth > eps) & (u >= 0.0) & (u <= width - 1) & (v >= 0.0) & (v <= height - 1)
-    if visibility is not None:
-        if tuple(visibility.shape) != tuple(valid.shape):
+    frustum_valid = (
+        (depth > eps)
+        & torch.isfinite(pixels).all(dim=-1)
+        & (u >= 0.0)
+        & (u <= width - 1)
+        & (v >= 0.0)
+        & (v <= height - 1)
+    )
+    if visibility is None:
+        renderer_visible = torch.ones_like(frustum_valid)
+    else:
+        if tuple(visibility.shape) != tuple(frustum_valid.shape):
             raise ValueError(
-                f"visibility must have shape {tuple(valid.shape)}, got {tuple(visibility.shape)}."
+                f"visibility must have shape {tuple(frustum_valid.shape)}, "
+                f"got {tuple(visibility.shape)}."
             )
-        valid = valid & visibility.to(dtype=torch.bool)
-    return ProjectionResult(pixels=pixels, grid=grid, depth=depth, valid=valid)
+        renderer_visible = visibility.to(device=vertices.device, dtype=torch.bool)
+    final_valid = frustum_valid & renderer_visible
+    return ProjectionResult(
+        pixels=pixels,
+        grid=grid,
+        depth=depth,
+        frustum_valid=frustum_valid,
+        renderer_visible=renderer_visible,
+        final_valid=final_valid,
+    )
 
 
 def sample_vertex_features(
@@ -75,7 +101,7 @@ def sample_vertex_features(
     image_size: tuple[int, int],
     visibility: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, ProjectionResult]:
-    """Return differentiably sampled features [V, N, C] and their valid mask."""
+    """Return sampled features [V, N, C] and renderer-filtered valid mask."""
 
     if feature_maps.ndim != 4:
         raise ValueError("feature_maps must have shape [V, C, Hf, Wf].")
@@ -96,5 +122,5 @@ def sample_vertex_features(
         align_corners=True,
     )
     sampled = sampled.squeeze(-1).transpose(1, 2)
-    sampled = sampled * projection.valid.unsqueeze(-1).to(sampled.dtype)
-    return sampled, projection.valid, projection
+    sampled = sampled * projection.final_valid.unsqueeze(-1).to(sampled.dtype)
+    return sampled, projection.final_valid, projection

@@ -7,8 +7,9 @@ import numpy as np
 import torch
 
 from mlr.coarse_lap_oracle import (
+    apply_uniform_laplacian,
+    apply_uniform_laplacian_transpose,
     build_uniform_laplacian_data,
-    oracle_loss_and_grad,
     point_to_surface_stats as numpy_point_to_surface_stats,
 )
 from mlr.data import Mesh
@@ -28,6 +29,8 @@ def reconstruct_and_evaluate(
     reconstruction_config: Mapping[str, Any],
     normalized_prediction: torch.Tensor | np.ndarray | None = None,
     edge_scale_epsilon: float = 1e-12,
+    laplacian_weight: torch.Tensor | np.ndarray | None = None,
+    unseen_anchor_weight: float = 0.0,
 ) -> dict[str, Any]:
     """Run the existing non-differentiable solver for prediction and oracle evaluation."""
 
@@ -38,6 +41,17 @@ def reconstruct_and_evaluate(
     target = _numpy(sample.get("raw_laplacian_target", sample["laplacian_target"]))
     confidence = _numpy(sample["target_confidence"])
     prediction = _numpy(predicted_laplacian)
+    recovery_weight = (
+        np.ones(vertices.shape[0], dtype=np.float64)
+        if laplacian_weight is None
+        else _numpy(laplacian_weight).astype(np.float64).reshape(-1)
+    )
+    if recovery_weight.shape != (vertices.shape[0],):
+        raise ValueError("laplacian_weight must have shape [N].")
+    if not np.isfinite(recovery_weight).all() or np.any(recovery_weight < 0):
+        raise ValueError("laplacian_weight must be finite and non-negative.")
+    if unseen_anchor_weight < 0:
+        raise ValueError("unseen_anchor_weight must be non-negative.")
     if prediction.shape != vertices.shape:
         raise ValueError(f"predicted_laplacian must have shape {vertices.shape}, got {prediction.shape}.")
     if not np.isfinite(prediction).all():
@@ -78,6 +92,7 @@ def reconstruct_and_evaluate(
         lambda_lap=float(reconstruction_config.get("lambda_lap", 1.0)),
         lambda_anchor=float(reconstruction_config.get("lambda_anchor", 0.01)),
         lambda_edge=float(reconstruction_config.get("lambda_edge", 0.0)),
+        lambda_unseen_anchor=float(unseen_anchor_weight),
         num_iters=int(reconstruction_config.get("num_iters", 500)),
         learning_rate=float(reconstruction_config.get("learning_rate", 0.01)),
         robust_loss=str(reconstruction_config.get("robust_loss", "huber")),
@@ -85,11 +100,20 @@ def reconstruct_and_evaluate(
     )
     dense_vertex_limit = int(reconstruction_config.get("dense_vertex_limit", 5000))
     predicted_result, solver_name = _reconstruct(
-        coarse, prediction, confidence, refinement, dense_vertex_limit
+        coarse,
+        prediction,
+        confidence,
+        refinement,
+        dense_vertex_limit,
+        laplacian_weight=recovery_weight,
     )
-    oracle_result, oracle_solver_name = _reconstruct(
-        coarse, target, confidence, refinement, dense_vertex_limit
-    )
+    evaluate_oracle = bool(reconstruction_config.get("evaluate_oracle", True))
+    oracle_result = None
+    oracle_solver_name = None
+    if evaluate_oracle:
+        oracle_result, oracle_solver_name = _reconstruct(
+            coarse, target, confidence, refinement, dense_vertex_limit
+        )
 
     np.save(output_dir / "delta_target.npy", target)
     np.save(output_dir / "delta_pred.npy", prediction)
@@ -104,7 +128,8 @@ def reconstruct_and_evaluate(
     )
     save_mesh(coarse, output_dir / "coarse.obj")
     save_mesh(predicted_result.mesh, output_dir / "predicted_refined.obj")
-    save_mesh(oracle_result.mesh, output_dir / "oracle_refined.obj")
+    if oracle_result is not None:
+        save_mesh(oracle_result.mesh, output_dir / "oracle_refined.obj")
 
     valid_scale_mask_t = torch.as_tensor(
         sample.get("valid_scale_mask", local_edge_length_t > 0), dtype=torch.bool
@@ -118,16 +143,16 @@ def reconstruct_and_evaluate(
     geometry = {
         "coarse": _mesh_quality_metrics(coarse, coarse),
         "predicted": _mesh_quality_metrics(predicted_result.mesh, coarse),
-        "oracle": _mesh_quality_metrics(oracle_result.mesh, coarse),
     }
+    if oracle_result is not None:
+        geometry["oracle"] = _mesh_quality_metrics(oracle_result.mesh, coarse)
     target_positions = sample.get("target_positions")
     if target_positions is not None:
         target_positions_np = _numpy(target_positions)
-        for name, mesh in (
-            ("coarse", coarse),
-            ("predicted", predicted_result.mesh),
-            ("oracle", oracle_result.mesh),
-        ):
+        evaluated_meshes = [("coarse", coarse), ("predicted", predicted_result.mesh)]
+        if oracle_result is not None:
+            evaluated_meshes.append(("oracle", oracle_result.mesh))
+        for name, mesh in evaluated_meshes:
             distances = np.linalg.norm(mesh.vertices - target_positions_np, axis=1)
             geometry[name]["target_position_rmse"] = float(np.sqrt(np.mean(distances**2)))
             geometry[name]["target_position_mae"] = float(np.mean(distances))
@@ -143,16 +168,23 @@ def reconstruct_and_evaluate(
         ).ensure_normals()
         chamfer_samples = int(reconstruction_config.get("chamfer_samples", 1000))
         metric_seed = int(reconstruction_config.get("metric_seed", 7))
-        for name, mesh in (
-            ("coarse", coarse),
-            ("predicted", predicted_result.mesh),
-            ("oracle", oracle_result.mesh),
-        ):
+        evaluated_meshes = [("coarse", coarse), ("predicted", predicted_result.mesh)]
+        if oracle_result is not None:
+            evaluated_meshes.append(("oracle", oracle_result.mesh))
+        for name, mesh in evaluated_meshes:
             surface = _point_to_surface_stats(mesh.vertices, gt_mesh)
+            reverse_surface = _point_to_surface_stats(gt_mesh.vertices, mesh)
             geometry[name]["point_to_surface_mean"] = float(surface["mean"])
             geometry[name]["point_to_surface_median"] = float(surface["median"])
             geometry[name]["point_to_surface_max"] = float(surface["max"])
             geometry[name]["point_to_surface_engine"] = surface["engine"]
+            geometry[name]["point_to_surface_forward_mean"] = float(surface["mean"])
+            geometry[name]["point_to_surface_reverse_mean"] = float(
+                reverse_surface["mean"]
+            )
+            geometry[name]["point_to_surface_bidirectional_mean"] = float(
+                0.5 * (surface["mean"] + reverse_surface["mean"])
+            )
             geometry[name]["chamfer"] = float(
                 _chamfer_distance(mesh, gt_mesh, samples=chamfer_samples, seed=metric_seed)
             )
@@ -174,12 +206,25 @@ def reconstruct_and_evaluate(
         "predicted_improves_over_coarse": improves,
         "reconstruction": {
             "predicted_final_loss": predicted_result.history[-1]["loss"],
-            "oracle_final_loss": oracle_result.history[-1]["loss"],
+            "oracle_final_loss": (
+                oracle_result.history[-1]["loss"] if oracle_result is not None else None
+            ),
             "all_finite": bool(
-                np.isfinite(predicted_result.vertices).all() and np.isfinite(oracle_result.vertices).all()
+                np.isfinite(predicted_result.vertices).all()
+                and (
+                    oracle_result is None
+                    or np.isfinite(oracle_result.vertices).all()
+                )
             ),
             "predicted_solver": solver_name,
             "oracle_solver": oracle_solver_name,
+            "oracle_evaluated": evaluate_oracle,
+            "visibility_weighted": laplacian_weight is not None,
+            "visible_laplacian_equations": int(np.count_nonzero(recovery_weight > 0)),
+            "zero_weight_laplacian_equations": int(
+                np.count_nonzero(recovery_weight <= 0)
+            ),
+            "unseen_anchor_weight": float(unseen_anchor_weight),
         },
     }
 
@@ -215,6 +260,8 @@ def _reconstruct(
     confidence: np.ndarray,
     config: RefinementConfig,
     dense_vertex_limit: int,
+    *,
+    laplacian_weight: np.ndarray | None = None,
 ) -> tuple[RefinementResult, str]:
     if mesh.num_vertices <= dense_vertex_limit or config.operator_type != "uniform":
         result = refine_mesh_with_laplacian(
@@ -223,42 +270,76 @@ def _reconstruct(
             confidence=confidence,
             anchors=mesh.vertices,
             config=config,
+            laplacian_weight=laplacian_weight,
         )
         return result, "dense_refinement"
     if not np.allclose(confidence, 1.0):
         raise ValueError("Large sparse reconstruction currently requires uniform confidence.")
-    return _refine_sparse_uniform(mesh, delta_target, config), "sparse_uniform_oracle_core"
+    return (
+        _refine_sparse_uniform(mesh, delta_target, config, laplacian_weight),
+        "sparse_uniform_oracle_core",
+    )
 
 
 def _refine_sparse_uniform(
     mesh: Mesh,
     delta_target: np.ndarray,
     config: RefinementConfig,
+    laplacian_weight: np.ndarray | None = None,
 ) -> RefinementResult:
     """Reuse the existing coarse-oracle sparse loss/gradient for large meshes."""
 
     vertices = np.asarray(mesh.vertices, dtype=np.float64).copy()
     anchors = vertices.copy()
     data = build_uniform_laplacian_data(mesh.faces, mesh.num_vertices)
-    no_edges = np.zeros((0, 2), dtype=np.int64)
-    no_lengths = np.zeros((0,), dtype=np.float64)
     m = np.zeros_like(vertices)
     v = np.zeros_like(vertices)
     history: list[dict[str, float]] = []
-    for step in range(0, config.num_iters + 1):
-        total, grad, parts = oracle_loss_and_grad(
-            vertices,
-            data,
-            delta_target,
-            anchors,
-            anchors,
-            no_edges,
-            no_lengths,
-            config.lambda_lap,
-            config.lambda_anchor,
-            0.0,
-            0.0,
+    weight = (
+        np.ones(mesh.num_vertices, dtype=np.float64)
+        if laplacian_weight is None
+        else np.asarray(laplacian_weight, dtype=np.float64).reshape(mesh.num_vertices)
+    )
+
+    def loss_and_grad(current: np.ndarray):
+        lap_residual = apply_uniform_laplacian(current, data) - delta_target
+        weighted_lap_residual = lap_residual * np.sqrt(weight)[:, None]
+        lap_loss = float(
+            np.mean(np.sum(weighted_lap_residual * weighted_lap_residual, axis=1))
         )
+        gradient = config.lambda_lap * (2.0 / mesh.num_vertices) * (
+            apply_uniform_laplacian_transpose(lap_residual * weight[:, None], data)
+        )
+        anchor_residual = current - anchors
+        anchor_loss = float(np.mean(np.sum(anchor_residual * anchor_residual, axis=1)))
+        gradient += config.lambda_anchor * (2.0 / mesh.num_vertices) * anchor_residual
+        unseen = (weight <= 0).astype(np.float64)[:, None]
+        unseen_residual = anchor_residual * unseen
+        unseen_loss = float(np.mean(np.sum(unseen_residual * unseen_residual, axis=1)))
+        gradient += (
+            config.lambda_unseen_anchor
+            * (2.0 / mesh.num_vertices)
+            * unseen_residual
+        )
+        total = (
+            config.lambda_lap * lap_loss
+            + config.lambda_anchor * anchor_loss
+            + config.lambda_unseen_anchor * unseen_loss
+        )
+        parts = {
+            "lap_loss": lap_loss,
+            "weighted_lap_loss": float(config.lambda_lap * lap_loss),
+            "anchor_loss": anchor_loss,
+            "weighted_anchor_loss": float(config.lambda_anchor * anchor_loss),
+            "unseen_anchor_loss": unseen_loss,
+            "weighted_unseen_anchor_loss": float(
+                config.lambda_unseen_anchor * unseen_loss
+            ),
+        }
+        return total, gradient, parts
+
+    for step in range(0, config.num_iters + 1):
+        total, grad, parts = loss_and_grad(vertices)
         if step == 0 or step == config.num_iters or step % max(config.log_every, 1) == 0:
             history.append({"iter": float(step), "loss": float(total), **parts})
         if step == config.num_iters:
@@ -344,12 +425,48 @@ def _sample_vertices(vertices: np.ndarray, samples: int, seed: int) -> np.ndarra
 
 
 def _normal_consistency(mesh: Mesh, gt_mesh: Mesh) -> float:
-    if mesh.num_vertices != gt_mesh.num_vertices or not np.array_equal(mesh.faces, gt_mesh.faces):
-        return float("nan")
     mesh.ensure_normals()
     gt_mesh.ensure_normals()
-    dots = np.einsum("ij,ij->i", mesh.normals, gt_mesh.normals)
-    return float(np.mean(np.clip(dots, -1.0, 1.0)))
+    if mesh.num_vertices == gt_mesh.num_vertices and np.array_equal(mesh.faces, gt_mesh.faces):
+        dots = np.einsum("ij,ij->i", mesh.normals, gt_mesh.normals)
+        return float(np.mean(np.abs(np.clip(dots, -1.0, 1.0))))
+    # Different-topology coarse/expanded evaluation uses nearest-surface normals
+    # in both directions. Absolute cosine avoids conflating a local winding flip
+    # with geometric normal disagreement; winding is reported separately by the
+    # renderer-orientation diagnostics.
+    return 0.5 * (
+        _directed_nearest_normal_consistency(mesh, gt_mesh)
+        + _directed_nearest_normal_consistency(gt_mesh, mesh)
+    )
+
+
+def _directed_nearest_normal_consistency(query: Mesh, surface_mesh: Mesh) -> float:
+    from scipy.spatial import cKDTree
+
+    query.ensure_normals()
+    surface_mesh.ensure_normals()
+    try:
+        import trimesh
+
+        surface = trimesh.Trimesh(
+            vertices=surface_mesh.vertices,
+            faces=surface_mesh.faces,
+            process=False,
+        )
+        _, _, face_indices = trimesh.proximity.closest_point(surface, query.vertices)
+        triangles = surface_mesh.vertices[surface_mesh.faces]
+        face_normals = np.cross(
+            triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+        )
+        face_normals /= np.maximum(
+            np.linalg.norm(face_normals, axis=1, keepdims=True), 1e-12
+        )
+        matched_normals = face_normals[np.asarray(face_indices, dtype=np.int64)]
+    except Exception:
+        _, nearest = cKDTree(surface_mesh.vertices).query(query.vertices, workers=-1)
+        matched_normals = surface_mesh.normals[np.asarray(nearest, dtype=np.int64)]
+    dots = np.einsum("ij,ij->i", query.normals, matched_normals)
+    return float(np.mean(np.abs(np.clip(dots, -1.0, 1.0))))
 
 
 def _numpy(value: torch.Tensor | np.ndarray) -> np.ndarray:

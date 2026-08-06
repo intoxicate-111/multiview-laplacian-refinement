@@ -15,6 +15,7 @@ class RefinementConfig:
     lambda_lap: float = 1.0
     lambda_anchor: float = 0.05
     lambda_edge: float = 0.0
+    lambda_unseen_anchor: float = 0.0
     num_iters: int = 200
     learning_rate: float = 1e-2
     robust_loss: str = "charbonnier"
@@ -39,6 +40,8 @@ def refine_mesh_with_laplacian(
     confidence: Array | None = None,
     anchors: Array | None = None,
     config: RefinementConfig | None = None,
+    *,
+    laplacian_weight: Array | None = None,
 ) -> RefinementResult:
     config = config or RefinementConfig()
     vertices = np.array(mesh.vertices, dtype=np.float64, copy=True)
@@ -61,6 +64,15 @@ def refine_mesh_with_laplacian(
         if max_conf > 0:
             conf = conf / max_conf
 
+    if laplacian_weight is None:
+        lap_weight = np.ones((mesh.num_vertices, 1), dtype=np.float64)
+    else:
+        lap_weight = np.asarray(laplacian_weight, dtype=np.float64).reshape(
+            mesh.num_vertices, 1
+        )
+        if not np.isfinite(lap_weight).all() or np.any(lap_weight < 0):
+            raise ValueError("laplacian_weight must be finite and non-negative.")
+
     edge_pairs = unique_edges(mesh.faces)
     target_edge_lengths = None
     if config.lambda_edge > 0 and len(edge_pairs) > 0:
@@ -81,6 +93,7 @@ def refine_mesh_with_laplacian(
             lap=lap,
             delta_target=delta_target,
             confidence=conf,
+            laplacian_weight=lap_weight,
             anchors=anchors,
             edge_pairs=edge_pairs,
             target_edge_lengths=target_edge_lengths,
@@ -170,6 +183,7 @@ def _loss_and_grad(
     lap: Array,
     delta_target: Array,
     confidence: Array,
+    laplacian_weight: Array,
     anchors: Array,
     edge_pairs: Array,
     target_edge_lengths: Array | None,
@@ -180,14 +194,19 @@ def _loss_and_grad(
     parts: dict[str, float] = {}
 
     if config.lambda_lap > 0:
-        residual_lap = (lap @ vertices - delta_target) * confidence
+        sqrt_weight = np.sqrt(laplacian_weight)
+        residual_lap = visibility_weighted_laplacian_residual(
+            lap @ vertices - delta_target, laplacian_weight
+        ) * confidence
         lap_value, lap_grad_robust = robust_value_and_grad(
             residual_lap,
             loss_type=config.robust_loss,
             epsilon=config.charbonnier_epsilon,
             huber_delta=config.huber_delta,
         )
-        grad += config.lambda_lap * (lap.T @ (lap_grad_robust * confidence))
+        grad += config.lambda_lap * (
+            lap.T @ (lap_grad_robust * confidence * sqrt_weight)
+        )
         total += config.lambda_lap * lap_value
         parts["laplacian"] = float(config.lambda_lap * lap_value)
 
@@ -198,6 +217,14 @@ def _loss_and_grad(
         total += config.lambda_anchor * anchor_value
         parts["anchor"] = float(config.lambda_anchor * anchor_value)
 
+    if config.lambda_unseen_anchor > 0:
+        unseen = (laplacian_weight <= 0).astype(np.float64)
+        unseen_residual = (vertices - anchors) * unseen
+        unseen_value = 0.5 * float(np.sum(unseen_residual * unseen_residual))
+        grad += config.lambda_unseen_anchor * unseen_residual
+        total += config.lambda_unseen_anchor * unseen_value
+        parts["unseen_anchor"] = float(config.lambda_unseen_anchor * unseen_value)
+
     if config.lambda_edge > 0 and target_edge_lengths is not None and len(edge_pairs) > 0:
         edge_value, edge_grad = _edge_length_value_and_grad(vertices, edge_pairs, target_edge_lengths)
         grad += config.lambda_edge * edge_grad
@@ -205,6 +232,20 @@ def _loss_and_grad(
         parts["edge"] = float(config.lambda_edge * edge_value)
 
     return total, grad, parts
+
+
+def visibility_weighted_laplacian_residual(
+    laplacian_residual: Array, laplacian_weight: Array
+) -> Array:
+    """Apply sqrt(W) to complete Laplacian equation residual rows."""
+
+    residual = np.asarray(laplacian_residual)
+    weight = np.asarray(laplacian_weight, dtype=residual.dtype).reshape(-1, 1)
+    if residual.ndim != 2 or residual.shape[0] != weight.shape[0]:
+        raise ValueError("residual must be [N, C] and laplacian_weight must contain N values.")
+    if not np.isfinite(weight).all() or np.any(weight < 0):
+        raise ValueError("laplacian_weight must be finite and non-negative.")
+    return residual * np.sqrt(weight)
 
 
 def _edge_length_value_and_grad(vertices: Array, edges: Array, target_lengths: Array) -> tuple[float, Array]:

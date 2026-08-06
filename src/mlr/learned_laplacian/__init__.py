@@ -12,6 +12,16 @@ from .multi_dataset import (
 )
 from .multi_trainer import MultiObjectTrainingResult, train_multi_object
 from .projection import ProjectionResult, project_vertices, sample_vertex_features
+from .renderer_visibility import (
+    RendererVisibilityResult,
+    compute_renderer_visibility,
+    vertex_visibility_from_face_id_buffer,
+)
+from .visibility_recovery import (
+    HardVisibilityRecoveryMask,
+    hard_any_view_recovery_mask,
+    visibility_coverage_diagnostics,
+)
 from .prediction_visualizer import (
     PredictionRecord,
     RunMetadata,
@@ -48,6 +58,8 @@ __all__ = [
     "PreparedMeshDataset",
     "PreparedMeshRecord",
     "ProjectionResult",
+    "RendererVisibilityResult",
+    "HardVisibilityRecoveryMask",
     "PredictionRecord",
     "RunMetadata",
     "TrainingResult",
@@ -67,11 +79,15 @@ __all__ = [
     "prepare_gt_query_sample_from_prepared",
     "prepare_same_topology_sample",
     "project_vertices",
+    "compute_renderer_visibility",
     "normalize_laplacian_by_edge_scale",
     "denormalize_laplacian_by_edge_scale",
     "graph_structure_statistics",
     "incident_edge_length_and_valid_mask",
     "sample_vertex_features",
+    "vertex_visibility_from_face_id_buffer",
+    "hard_any_view_recovery_mask",
+    "visibility_coverage_diagnostics",
     "save_prepared_sample",
     "load_checkpoint",
     "train_single_object",

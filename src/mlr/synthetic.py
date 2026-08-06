@@ -37,6 +37,8 @@ class SyntheticRenderConfig:
     cube_half_extent: float = 1.5
     antialiasing: str = "msaa4"
     camera_layout_version: str = "unit_sphere_cube_surface_faces6_corners8_v1"
+    backface_culling: bool = False
+    front_face_winding: str = "ccw"
 
 
 @dataclass
@@ -420,11 +422,44 @@ def render_mesh_view(
         return render_mesh_view_opengl(mesh, camera, config)
     if config.backend != "cpu":
         raise ValueError(f"Unsupported synthetic renderer backend: {config.backend}")
+    rgb, mask, depth, _ = _render_mesh_view_cpu_outputs(mesh, camera, config)
+    return rgb, mask, depth
+
+
+def render_mesh_face_ids(
+    mesh: Mesh,
+    camera: Camera,
+    config: SyntheticRenderConfig | None = None,
+) -> Array:
+    """Render the depth-winning face ID per pixel; background is ``-1``.
+
+    This uses the selected RGB backend's rasterization, face-culling and depth
+    test rather than reconstructing visibility from a saved depth image.
+    """
+
+    config = config or SyntheticRenderConfig()
+    _validate_winding(config.front_face_winding)
+    if config.backend == "opengl":
+        return render_mesh_face_ids_opengl(mesh, camera, config)
+    if config.backend == "cpu":
+        return _render_mesh_view_cpu_outputs(mesh, camera, config)[3]
+    raise ValueError("Face-ID visibility supports the cpu and opengl backends.")
+
+
+def _render_mesh_view_cpu_outputs(
+    mesh: Mesh,
+    camera: Camera,
+    config: SyntheticRenderConfig,
+) -> tuple[Array, Array, Array, Array]:
+    """Shared software RGB/depth/face-ID rasterization and depth-winner loop."""
+
+    _validate_winding(config.front_face_winding)
     width, height = camera.image_size or (config.width, config.height)
     rgb = np.zeros((height, width, 3), dtype=np.uint8)
     rgb[:, :] = np.asarray(config.background_color, dtype=np.uint8)
     mask = np.zeros((height, width), dtype=bool)
     depth = np.full((height, width), np.inf, dtype=np.float64)
+    face_ids = np.full((height, width), -1, dtype=np.int32)
 
     mesh.ensure_normals()
     pixels, z = camera.project(mesh.vertices)
@@ -437,6 +472,10 @@ def render_mesh_view(
         if np.any(face_z <= 1e-8):
             continue
         pts = pixels[face]
+        if config.backface_culling and not _is_front_facing_projected(
+            pts, config.front_face_winding
+        ):
+            continue
         min_x = max(0, int(math.floor(np.min(pts[:, 0]))))
         max_x = min(width - 1, int(math.ceil(np.max(pts[:, 0]))))
         min_y = max(0, int(math.floor(np.min(pts[:, 1]))))
@@ -463,10 +502,27 @@ def render_mesh_view(
         depth_patch[update] = point_depth[update]
         mask[min_y : max_y + 1, min_x : max_x + 1][update] = True
         rgb[min_y : max_y + 1, min_x : max_x + 1][update] = face_color
+        face_ids[min_y : max_y + 1, min_x : max_x + 1][update] = face_idx
 
     if config.render_mode == "depth":
         rgb = _depth_to_rgb(depth, mask)
-    return rgb, mask, depth
+    return rgb, mask, depth, face_ids
+
+
+def _validate_winding(value: str) -> None:
+    if value not in {"ccw", "cw"}:
+        raise ValueError("front_face_winding must be 'ccw' or 'cw'.")
+
+
+def _is_front_facing_projected(points: Array, winding: str) -> bool:
+    """Match OpenGL winding after the CV-y-down to NDC-y-up projection flip."""
+
+    edge_a = points[1] - points[0]
+    edge_b = points[2] - points[0]
+    pixel_area2 = float(edge_a[0] * edge_b[1] - edge_a[1] * edge_b[0])
+    # Pixel y points down whereas OpenGL window/NDC y points up. Therefore a
+    # GL-CCW front face has negative signed area in CV pixel coordinates.
+    return pixel_area2 < 0.0 if winding == "ccw" else pixel_area2 > 0.0
 
 
 def _render_dataset_views(
@@ -687,6 +743,19 @@ def render_mesh_view_opengl(
     return render_mesh_views_opengl(mesh, [camera], config)[0]
 
 
+def render_mesh_face_ids_opengl(
+    mesh: Mesh,
+    camera: Camera,
+    config: SyntheticRenderConfig | None = None,
+) -> Array:
+    config = config or SyntheticRenderConfig(backend="opengl")
+    renderer = _OPENGL_RENDERERS.get(config.opengl_context_backend)
+    if renderer is None:
+        renderer = _OpenGLRenderer(config.opengl_context_backend)
+        _OPENGL_RENDERERS[config.opengl_context_backend] = renderer
+    return renderer.render_face_ids(mesh, [camera], config)[0]
+
+
 _OPENGL_RENDERERS: dict[str, "_OpenGLRenderer"] = {}
 
 
@@ -725,6 +794,10 @@ class _OpenGLRenderer:
             vertex_shader=_OPENGL_VERTEX_SHADER,
             fragment_shader=_OPENGL_FRAGMENT_SHADER,
         )
+        self.face_id_program = self.ctx.program(
+            vertex_shader=_OPENGL_FACE_ID_VERTEX_SHADER,
+            fragment_shader=_OPENGL_FACE_ID_FRAGMENT_SHADER,
+        )
 
     def render_mesh(
         self,
@@ -754,6 +827,27 @@ class _OpenGLRenderer:
             ibo.release()
             vbo.release()
 
+    def render_face_ids(
+        self,
+        mesh: Mesh,
+        cameras: list[Camera],
+        config: SyntheticRenderConfig,
+    ) -> list[Array]:
+        positions = np.asarray(mesh.vertices, dtype=np.float32)
+        vbo = self.ctx.buffer(positions.tobytes())
+        ibo = self.ctx.buffer(np.asarray(mesh.faces, dtype=np.uint32).tobytes())
+        vao = self.ctx.vertex_array(
+            self.face_id_program,
+            [(vbo, "3f", "in_position")],
+            index_buffer=ibo,
+        )
+        try:
+            return [self._render_face_ids_camera(vao, camera, config, mesh.vertices) for camera in cameras]
+        finally:
+            vao.release()
+            ibo.release()
+            vbo.release()
+
     def _render_camera(
         self,
         vao: Any,
@@ -762,17 +856,9 @@ class _OpenGLRenderer:
         vertices: Array,
     ) -> tuple[Array, Array, Array]:
         width, height = camera.image_size or (config.width, config.height)
-        camera_vertices = camera.world_to_camera(vertices)
-        positive_z = camera_vertices[:, 2][camera_vertices[:, 2] > 1e-8]
-        if positive_z.size:
-            near_z = max(1e-4, float(positive_z.min()) * 0.5)
-            far_z = max(near_z + 1e-3, float(positive_z.max()) * 1.5)
-        else:
-            near_z, far_z = 1e-4, 10.0
-        view = np.eye(4, dtype=np.float32)
-        view[:3, :3] = camera.rotation
-        view[:3, 3] = camera.translation
-        projection = _cv_projection_matrix(camera.intrinsics, width, height, near_z, far_z)
+        view, projection, near_z, far_z = _camera_view_projection(
+            camera, vertices, width, height
+        )
         self.program["view_matrix"].write(view.T.astype("f4").tobytes())
         self.program["projection_matrix"].write(projection.T.astype("f4").tobytes())
         self.program["near_z"].value = near_z
@@ -805,11 +891,52 @@ class _OpenGLRenderer:
             depth_rb.release()
             color_tex.release()
 
+    def _render_face_ids_camera(
+        self,
+        vao: Any,
+        camera: Camera,
+        config: SyntheticRenderConfig,
+        vertices: Array,
+    ) -> Array:
+        width, height = camera.image_size or (config.width, config.height)
+        view, projection, _, _ = _camera_view_projection(camera, vertices, width, height)
+        self.face_id_program["view_matrix"].write(view.T.astype("f4").tobytes())
+        self.face_id_program["projection_matrix"].write(projection.T.astype("f4").tobytes())
+        id_texture = self.ctx.texture((width, height), 1, dtype="i4")
+        depth_buffer = self.ctx.depth_renderbuffer((width, height))
+        fbo = self.ctx.framebuffer(
+            color_attachments=[id_texture], depth_attachment=depth_buffer
+        )
+        try:
+            fbo.use()
+            self._set_raster_state(config)
+            # The shader stores primitive_id + 1, so integer clear value zero is
+            # unambiguously converted back to background -1.
+            self.ctx.clear(0.0, 0.0, 0.0, 0.0, depth=1.0)
+            vao.render(self.moderngl.TRIANGLES)
+            encoded = np.frombuffer(
+                id_texture.read(alignment=1), dtype=np.int32
+            ).reshape(height, width)
+            return np.flipud(encoded).copy() - 1
+        finally:
+            fbo.release()
+            depth_buffer.release()
+            id_texture.release()
+
     def _draw(self, vao: Any, fbo: Any, config: SyntheticRenderConfig) -> None:
         fbo.use()
+        self._set_raster_state(config)
         bg = tuple(float(c) / 255.0 for c in config.background_color)
         self.ctx.clear(bg[0], bg[1], bg[2], 0.0, depth=1.0)
         vao.render(self.moderngl.TRIANGLES)
+
+    def _set_raster_state(self, config: SyntheticRenderConfig) -> None:
+        _validate_winding(config.front_face_winding)
+        self.ctx.front_face = config.front_face_winding
+        if config.backface_culling:
+            self.ctx.enable(self.moderngl.CULL_FACE)
+        else:
+            self.ctx.disable(self.moderngl.CULL_FACE)
 
     def _render_msaa_rgb(
         self, vao: Any, width: int, height: int, config: SyntheticRenderConfig
@@ -830,6 +957,26 @@ class _OpenGLRenderer:
             msaa_fbo.release()
             depth_msaa.release()
             color_msaa.release()
+
+
+def _camera_view_projection(
+    camera: Camera,
+    vertices: Array,
+    width: int,
+    height: int,
+) -> tuple[Array, Array, float, float]:
+    camera_vertices = camera.world_to_camera(vertices)
+    positive_z = camera_vertices[:, 2][camera_vertices[:, 2] > 1e-8]
+    if positive_z.size:
+        near_z = max(1e-4, float(positive_z.min()) * 0.5)
+        far_z = max(near_z + 1e-3, float(positive_z.max()) * 1.5)
+    else:
+        near_z, far_z = 1e-4, 10.0
+    view = np.eye(4, dtype=np.float32)
+    view[:3, :3] = camera.rotation
+    view[:3, 3] = camera.translation
+    projection = _cv_projection_matrix(camera.intrinsics, width, height, near_z, far_z)
+    return view, projection, near_z, far_z
 
 
 def _cv_projection_matrix(
@@ -903,6 +1050,29 @@ void main() {
         color = object_color * intensity;
     }
     frag_color = vec4(color, v_cam_z);
+}
+"""
+
+
+_OPENGL_FACE_ID_VERTEX_SHADER = """
+#version 330
+in vec3 in_position;
+
+uniform mat4 view_matrix;
+uniform mat4 projection_matrix;
+
+void main() {
+    gl_Position = projection_matrix * view_matrix * vec4(in_position, 1.0);
+}
+"""
+
+
+_OPENGL_FACE_ID_FRAGMENT_SHADER = """
+#version 330
+layout(location = 0) out int out_face_id;
+
+void main() {
+    out_face_id = gl_PrimitiveID + 1;
 }
 """
 
@@ -1059,6 +1229,8 @@ def _write_dataset_json(
             "cube_half_extent": config.cube_half_extent,
             "antialiasing": config.antialiasing,
             "camera_layout_version": config.camera_layout_version,
+            "backface_culling": config.backface_culling,
+            "front_face_winding": config.front_face_winding,
             "normalized_mesh_checksum": _mesh_checksum(load_mesh(mesh_path)),
             "normalize_mesh": config.normalize_mesh,
         },

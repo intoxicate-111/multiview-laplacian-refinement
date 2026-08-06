@@ -233,6 +233,11 @@ must not be described as the production learned-Laplacian target. Production
 training is direct GT-query supervision; coarse/expanded meshes appear only as
 queries during downstream inference and evaluation.
 
+Renderer-native visibility and hard any-view Laplacian recovery are documented in
+[the visibility-aware recovery report](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md).
+All-view-invisible vertices can be removed from the recovery Laplacian objective
+without using depth images or changing the network.
+
 ## Tests
 
 ```bash

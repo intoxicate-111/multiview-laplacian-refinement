@@ -41,3 +41,24 @@ def test_sparse_uniform_reconstruction_path_writes_error_arrays(tmp_path):
     assert metrics["reconstruction"]["all_finite"]
     assert (tmp_path / "laplacian_error.npy").exists()
     assert (tmp_path / "position_error.npy").exists()
+
+
+def test_reconstruction_can_disable_placeholder_oracle(tmp_path):
+    sample = tiny_sample()
+    metrics = reconstruct_and_evaluate(
+        sample,
+        sample["laplacian_target"],
+        tmp_path,
+        {
+            "operator_type": "uniform",
+            "num_iters": 1,
+            "dense_vertex_limit": 100,
+            "chamfer_samples": 0,
+            "evaluate_oracle": False,
+        },
+    )
+
+    assert "oracle" not in metrics["geometry"]
+    assert metrics["reconstruction"]["oracle_evaluated"] is False
+    assert metrics["reconstruction"]["oracle_final_loss"] is None
+    assert not (tmp_path / "oracle_refined.obj").exists()

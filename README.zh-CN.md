@@ -216,6 +216,11 @@ single-object Bunny experiment 和 reconstruction solver。它们是有用的基
 learned-Laplacian target。正式训练使用直接 GT-query supervision；coarse/expanded
 mesh 只在 downstream inference 和 evaluation 阶段作为 query 出现。
 
+Renderer-native visibility 与 hard any-view Laplacian recovery 的定义、实验结果和
+复现命令见[可见性感知恢复报告](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)。该功能
+无需 depth image，也不修改网络；它会从 recovery 的 Laplacian objective 中移除
+所有 view 均不可见 vertex 自身的预测方程。
+
 ## 测试
 
 ```bash

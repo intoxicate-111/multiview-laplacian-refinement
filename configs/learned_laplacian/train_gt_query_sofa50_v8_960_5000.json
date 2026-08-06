@@ -24,6 +24,13 @@
     "apply_to_validation": true,
     "zero_initial_laplacian": true
   },
+  "renderer_visibility": {
+    "condition": "backface_and_occlusion",
+    "source": "precomputed_depth_tested_face_id_buffer",
+    "neighborhood_radius": 1,
+    "front_face_winding": "ccw",
+    "depth_image_used": false
+  },
   "image_encoder": {
     "feature_dim": 16,
     "normalization": {

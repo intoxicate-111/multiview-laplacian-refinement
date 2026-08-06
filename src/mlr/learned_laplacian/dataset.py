@@ -118,6 +118,18 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
                 f"visibility must have shape [V, N] = [{views}, {num_vertices}], "
                 f"got {tuple(visibility.shape)}."
             )
+    for name in (
+        "visibility_backface_only",
+        "visibility_occlusion_only",
+        "visibility_backface_and_occlusion",
+    ):
+        condition_visibility = sample.get(name)
+        if condition_visibility is None:
+            continue
+        if not isinstance(condition_visibility, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor when provided.")
+        if tuple(condition_visibility.shape) != (views, num_vertices):
+            raise ValueError(f"{name} must have shape [V, N] = [{views}, {num_vertices}].")
 
     query_positions = sample.get("query_positions")
     if query_positions is not None:
@@ -164,6 +176,13 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
     result["faces"] = faces.to(dtype=torch.long)
     if visibility is not None:
         result["visibility"] = visibility.to(dtype=torch.bool)
+    for name in (
+        "visibility_backface_only",
+        "visibility_occlusion_only",
+        "visibility_backface_and_occlusion",
+    ):
+        if result.get(name) is not None:
+            result[name] = result[name].to(dtype=torch.bool)
     if query_is_exact is not None:
         result["query_is_exact"] = query_is_exact.to(dtype=torch.bool)
     return _ensure_target_scaling_fields(result)

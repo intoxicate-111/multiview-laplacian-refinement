@@ -915,6 +915,7 @@ def _prepare_object_static(
     static_sample = (
         dict(sample) if sample.get("_static_prepared") is True else validate_sample(sample)
     )
+    static_sample = _select_renderer_visibility(static_sample, config)
     if query_augmentation_settings(config).enabled:
         validate_gt_query_contract(static_sample)
     target_mode, epsilon = _target_settings(config)
@@ -960,6 +961,43 @@ def _prepare_object_static(
         face_count=face_count,
         used_view_count=int(static_sample["num_views"]),
     )
+
+
+def _select_renderer_visibility(
+    sample: Mapping[str, Any], config: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Select one precomputed renderer mask without reconstructing visibility."""
+
+    result = dict(sample)
+    settings = config.get("renderer_visibility")
+    if settings is None:
+        return result
+    if not isinstance(settings, Mapping):
+        raise ValueError("renderer_visibility must be an object.")
+    condition = str(settings.get("condition", "prepared"))
+    if condition == "prepared":
+        return result
+    if condition == "frustum_only":
+        result["visibility"] = None
+        return result
+    fields = {
+        "backface_only": "visibility_backface_only",
+        "occlusion_only": "visibility_occlusion_only",
+        "backface_and_occlusion": "visibility_backface_and_occlusion",
+    }
+    field = fields.get(condition)
+    if field is None:
+        raise ValueError(
+            "renderer_visibility.condition must be prepared, frustum_only, "
+            "backface_only, occlusion_only, or backface_and_occlusion."
+        )
+    value = result.get(field)
+    if not isinstance(value, torch.Tensor):
+        raise ValueError(
+            f"Renderer visibility condition {condition!r} requires sample field {field!r}."
+        )
+    result["visibility"] = value
+    return result
 
 
 def _prune_sample_for_training(
