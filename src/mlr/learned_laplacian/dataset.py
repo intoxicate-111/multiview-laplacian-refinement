@@ -119,6 +119,36 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
                 f"got {tuple(visibility.shape)}."
             )
 
+    query_positions = sample.get("query_positions")
+    if query_positions is not None:
+        if not isinstance(query_positions, torch.Tensor):
+            raise TypeError("query_positions must be a torch.Tensor when provided.")
+        if tuple(query_positions.shape) != (num_vertices, 3):
+            raise ValueError("query_positions must have shape [N, 3].")
+        if not torch.isfinite(query_positions).all():
+            raise ValueError("query_positions contains NaN or infinite values.")
+    query_is_exact = sample.get("query_is_exact")
+    if query_is_exact is not None:
+        if not isinstance(query_is_exact, torch.Tensor) or tuple(query_is_exact.shape) != (
+            num_vertices,
+        ):
+            raise ValueError("query_is_exact must have shape [N].")
+    center = sample.get("position_normalization_center")
+    scale = sample.get("position_normalization_scale")
+    if (center is None) != (scale is None):
+        raise ValueError("Position normalization center and scale must be provided together.")
+    if center is not None:
+        if not isinstance(center, torch.Tensor) or tuple(center.shape) != (3,):
+            raise ValueError("position_normalization_center must have shape [3].")
+        if not isinstance(scale, torch.Tensor) or scale.numel() != 1:
+            raise ValueError("position_normalization_scale must be a scalar tensor.")
+        if (
+            not torch.isfinite(center).all()
+            or not torch.isfinite(scale).all()
+            or float(scale) <= 0
+        ):
+            raise ValueError("Position normalization values must be finite with positive scale.")
+
     for name in REQUIRED_TENSOR_FIELDS:
         tensor = sample[name]
         if tensor.is_floating_point() and not torch.isfinite(tensor).all():
@@ -134,6 +164,8 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
     result["faces"] = faces.to(dtype=torch.long)
     if visibility is not None:
         result["visibility"] = visibility.to(dtype=torch.bool)
+    if query_is_exact is not None:
+        result["query_is_exact"] = query_is_exact.to(dtype=torch.bool)
     return _ensure_target_scaling_fields(result)
 
 

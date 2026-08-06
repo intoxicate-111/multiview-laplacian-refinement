@@ -15,6 +15,7 @@ from mlr.laplacian import compute_laplacian_coordinates
 
 from .dataset import save_prepared_sample
 from .graph_layers import faces_to_edge_index
+from .query_training import GT_QUERY_TRAINING_MODE
 from .target_scaling import (
     EDGE_SCALE_DEFINITION,
     EDGE_SCALE_SOURCE,
@@ -225,6 +226,134 @@ def prepare_same_topology_sample(
     return sample
 
 
+def prepare_gt_query_sample_from_prepared(
+    source_sample: dict,
+    output_path: str | Path | None = None,
+    image_size: int | None = None,
+    target_mode: str = "edge_scale_normalized_laplacian",
+    edge_scale_epsilon: float = 1e-12,
+) -> dict:
+    """Rebuild one prepared item on its GT graph for query-position training.
+
+    The source coarse/expanded vertices and their Laplacian target are discarded.
+    The target is recomputed directly as the uniform Laplacian of ``gt_vertices``
+    on ``gt_faces``; no GT Laplacian is interpolated onto a prediction graph.
+    """
+
+    gt_vertices_tensor = source_sample.get("gt_vertices")
+    gt_faces_tensor = source_sample.get("gt_faces")
+    if not isinstance(gt_vertices_tensor, torch.Tensor) or not isinstance(
+        gt_faces_tensor, torch.Tensor
+    ):
+        raise ValueError("Source sample must contain gt_vertices and gt_faces tensors.")
+    gt_mesh = Mesh(
+        gt_vertices_tensor.detach().cpu().numpy(),
+        gt_faces_tensor.detach().cpu().numpy(),
+    ).ensure_normals()
+    laplacian_data = build_uniform_laplacian_data(gt_mesh.faces, gt_mesh.num_vertices)
+    target_laplacian = apply_uniform_laplacian(gt_mesh.vertices, laplacian_data)
+    vertices = torch.as_tensor(gt_mesh.vertices, dtype=torch.float32)
+    faces = torch.as_tensor(gt_mesh.faces, dtype=torch.long)
+    bounds_center = 0.5 * (vertices.amin(dim=0) + vertices.amax(dim=0))
+    position_scale = torch.linalg.vector_norm(vertices - bounds_center, dim=-1).amax()
+    if not torch.isfinite(position_scale) or float(position_scale) <= 1e-12:
+        raise ValueError("GT mesh must have a finite non-zero spatial extent.")
+
+    per_vertex_fields = {
+        "vertices",
+        "faces",
+        "vertex_normals",
+        "initial_laplacian",
+        "laplacian_target",
+        "raw_laplacian_target",
+        "normalized_laplacian_target",
+        "target_confidence",
+        "visibility",
+        "target_positions",
+        "gt_vertices",
+        "gt_faces",
+        "valid_scale_mask",
+        "local_edge_length",
+        "local_edge_scale",
+        "edge_index",
+        "vertex_degree",
+        "query_positions",
+        "query_offsets",
+        "query_is_exact",
+        "position_normalization_center",
+        "position_normalization_scale",
+        "_static_prepared",
+    }
+    sample = {
+        name: value
+        for name, value in source_sample.items()
+        if name not in per_vertex_fields
+    }
+    if image_size is not None:
+        source_image_size = int(source_sample.get("prepared_image_size", 0))
+        if image_size < 1 or source_image_size < 1:
+            raise ValueError("image_size and source prepared_image_size must be positive.")
+        image_scale = float(image_size) / float(source_image_size)
+        intrinsics = sample["intrinsics"].clone()
+        intrinsics[:, 0, :] *= image_scale
+        intrinsics[:, 1, :] *= image_scale
+        sample["intrinsics"] = intrinsics
+        sample["prepared_image_size"] = int(image_size)
+    if sample.get("prepared_storage_format") == "lazy_image_paths_v1" and source_sample.get(
+        "_dataset_root"
+    ):
+        image_root = Path(str(source_sample["_dataset_root"])).resolve()
+        sample["image_path_root"] = str(image_root)
+        sample["image_paths"] = [
+            str(path if path.is_absolute() else (image_root / path).resolve())
+            for value in sample["image_paths"]
+            for path in (Path(value),)
+        ]
+    metadata = dict(source_sample.get("metadata", {}))
+    source_constructor = metadata.get("target_constructor")
+    source_coarse_mesh = metadata.pop("coarse_mesh_path", None)
+    metadata.update(
+        {
+            "query_training_mode": GT_QUERY_TRAINING_MODE,
+            "training_geometry_source": "gt_mesh_vertices_and_faces",
+            "target_constructor": "direct_gt_graph_sparse_uniform_laplacian",
+            "initial_laplacian_input": "zeros",
+            "position_normalization": "bbox_center_max_radius",
+            "source_target_constructor": source_constructor,
+            "source_coarse_mesh_ignored": source_coarse_mesh,
+            "edge_scale_source": "gt_mesh_graph",
+            "query_prepared_image_size": int(
+                sample.get("prepared_image_size", source_sample.get("prepared_image_size", 0))
+            ),
+        }
+    )
+    sample.update(
+        {
+            "vertices": vertices,
+            "faces": faces,
+            "vertex_normals": torch.as_tensor(gt_mesh.normals, dtype=torch.float32),
+            "initial_laplacian": torch.zeros_like(vertices),
+            "laplacian_target": torch.as_tensor(target_laplacian, dtype=torch.float32),
+            "target_confidence": torch.ones(gt_mesh.num_vertices, dtype=torch.float32),
+            # The former visibility tensor belongs to expanded vertices. Projection
+            # validity is recomputed from cameras for the new GT queries.
+            "visibility": None,
+            "target_positions": vertices.clone(),
+            "gt_vertices": vertices.clone(),
+            "gt_faces": faces.clone(),
+            "position_normalization_center": bounds_center,
+            "position_normalization_scale": position_scale.reshape(()),
+            "metadata": metadata,
+        }
+    )
+    _attach_target_scaling(
+        sample, target_mode, edge_scale_epsilon, edge_scale_source="gt_mesh_graph"
+    )
+    if output_path is not None:
+        save_prepared_sample(sample, output_path)
+    return sample
+
+
 def load_and_resize_images(
     paths: list[Path],
     image_size: int | None,
@@ -308,7 +437,13 @@ def _mask_visibility(
     return result
 
 
-def _attach_target_scaling(sample: dict, target_mode: str, epsilon: float) -> None:
+def _attach_target_scaling(
+    sample: dict,
+    target_mode: str,
+    epsilon: float,
+    *,
+    edge_scale_source: str = EDGE_SCALE_SOURCE,
+) -> None:
     if target_mode not in TARGET_MODES:
         raise ValueError(f"target_mode must be one of {sorted(TARGET_MODES)}.")
     if epsilon <= 0:
@@ -334,7 +469,7 @@ def _attach_target_scaling(sample: dict, target_mode: str, epsilon: float) -> No
         {
             "laplacian_target_mode": target_mode,
             "edge_scale_definition": EDGE_SCALE_DEFINITION,
-            "edge_scale_source": EDGE_SCALE_SOURCE,
+            "edge_scale_source": edge_scale_source,
             "edge_scale_epsilon": float(epsilon),
             "edge_scale_statistics": edge_scale_statistics(local_edge_length),
         }

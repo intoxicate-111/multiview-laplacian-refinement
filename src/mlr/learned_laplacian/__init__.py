@@ -4,7 +4,7 @@ from .aggregation import masked_mean_aggregate
 from .dataset import load_prepared_sample, save_prepared_sample, validate_sample
 from .graph_layers import LaplacianPredictor, faces_to_edge_index
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
-from .model import LearnedLaplacianModel, LearnedLaplacianOutput
+from .model import FourierPositionEncoding, LearnedLaplacianModel, LearnedLaplacianOutput
 from .multi_dataset import (
     PreparedMeshDataset,
     PreparedMeshRecord,
@@ -24,6 +24,7 @@ from .prediction_visualizer import (
 )
 from .sample_io import (
     corrupt_same_topology_mesh,
+    prepare_gt_query_sample_from_prepared,
     prepare_same_topology_sample,
     prepare_single_object_sample,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "LaplacianPredictor",
     "LearnedLaplacianModel",
     "LearnedLaplacianOutput",
+    "FourierPositionEncoding",
     "MultiObjectTrainingResult",
     "PreparedMeshDataset",
     "PreparedMeshRecord",
@@ -62,6 +64,7 @@ __all__ = [
     "load_prediction_sample",
     "masked_mean_aggregate",
     "prepare_single_object_sample",
+    "prepare_gt_query_sample_from_prepared",
     "prepare_same_topology_sample",
     "project_vertices",
     "normalize_laplacian_by_edge_scale",

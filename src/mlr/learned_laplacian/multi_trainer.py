@@ -17,6 +17,13 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampl
 from .dataset import validate_sample
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
 from .model import LearnedLaplacianModel
+from .query_training import (
+    QUERY_FOURIER_GEOMETRY_MODE,
+    QueryAugmentationSettings,
+    apply_query_augmentation,
+    query_augmentation_settings,
+    validate_gt_query_contract,
+)
 from .sample_io import load_and_resize_images
 from .target_scaling import (
     EDGE_SCALE_DEFINITION,
@@ -123,6 +130,13 @@ def train_multi_object(
     _seed_everything(seed)
     device = _resolve_device(device_override or str(config.get("device", "cpu")))
     target_mode, epsilon = _target_settings(config)
+    query_settings = query_augmentation_settings(config)
+    if query_settings.enabled and str(
+        config.get("model", {}).get("geometry_mode", "legacy")
+    ) != QUERY_FOURIER_GEOMETRY_MODE:
+        raise ValueError(
+            "query_training.enabled=true requires model.geometry_mode='query_fourier'."
+        )
     model = _build_model(config, input_mode_override, zero_images).to(device)
     training = config.get("training", {})
     multi = config.get("multi_object_training", {})
@@ -265,6 +279,8 @@ def train_multi_object(
         item_iterator = iter(epoch_items)
         model.train()
         mesh_loss_tensors: list[torch.Tensor] = []
+        exact_query_loss_tensors: list[torch.Tensor] = []
+        perturbed_query_loss_tensors: list[torch.Tensor] = []
         data_loading_seconds = 0.0
         gpu_transfer_seconds = 0.0
         forward_backward_seconds = 0.0
@@ -299,6 +315,13 @@ def train_multi_object(
                     cache_on_device,
                     non_blocking=loader_settings.pin_memory,
                 )
+                prepared = _with_query_augmentation(
+                    prepared,
+                    query_settings,
+                    base_seed=seed,
+                    epoch=epoch,
+                    enabled=query_settings.enabled,
+                )
                 transfer_events.append(_finish_cuda_timing(device, transfer_event))
                 if device.type != "cuda":
                     gpu_transfer_seconds += time.perf_counter() - transfer_start
@@ -327,6 +350,18 @@ def train_multi_object(
                 if device.type != "cuda":
                     forward_backward_seconds += time.perf_counter() - forward_start
                 mesh_loss_tensors.append(loss.detach())
+                with torch.no_grad():
+                    exact_loss, perturbed_loss = _query_subset_losses(
+                        prediction_fp32,
+                        prepared.training_target.float(),
+                        prepared.sample["target_confidence"].float(),
+                        prepared.sample.get("query_is_exact"),
+                        loss_kwargs,
+                    )
+                if exact_loss is not None:
+                    exact_query_loss_tensors.append(exact_loss.detach())
+                if perturbed_loss is not None:
+                    perturbed_query_loss_tensors.append(perturbed_loss.detach())
             if gradient_clip > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
@@ -335,6 +370,8 @@ def train_multi_object(
             optimizer_steps += 1
 
         train_loss = float(torch.stack(mesh_loss_tensors).mean().item())
+        train_exact_query_loss = _mean_optional_tensors(exact_query_loss_tensors)
+        train_perturbed_query_loss = _mean_optional_tensors(perturbed_query_loss_tensors)
         _synchronize_device(device)
         if device.type == "cuda":
             gpu_transfer_seconds = _elapsed_cuda_seconds(transfer_events)
@@ -355,7 +392,7 @@ def train_multi_object(
         if should_validate:
             _synchronize_device(device)
             validation_start = time.perf_counter()
-            validation_loss, _ = _evaluate_dataset(
+            validation_loss, validation_epoch_metrics = _evaluate_dataset(
                 model,
                 prepared_validation,
                 config,
@@ -365,6 +402,17 @@ def train_multi_object(
                 data_loader=validation_loader,
                 amp_enabled=amp_enabled,
                 amp_dtype=amp_dtype,
+                query_settings=query_settings,
+                query_seed=seed,
+                query_epoch=epoch,
+                augment_queries=query_settings.enabled
+                and query_settings.apply_to_validation,
+            )
+            validation_exact_query_loss = _mean_metric(
+                validation_epoch_metrics, "exact_query_loss"
+            )
+            validation_perturbed_query_loss = _mean_metric(
+                validation_epoch_metrics, "perturbed_query_loss"
             )
             _synchronize_device(device)
             validation_seconds = float(time.perf_counter() - validation_start)
@@ -415,6 +463,14 @@ def train_multi_object(
             "total_step_seconds": train_seconds,
             "optimizer_steps_this_epoch": optimizer_steps - steps_at_epoch_start,
             "learning_rate": current_lr,
+            "train_exact_query_loss": train_exact_query_loss,
+            "train_perturbed_query_loss": train_perturbed_query_loss,
+            "validation_exact_query_loss": (
+                validation_exact_query_loss if should_validate else None
+            ),
+            "validation_perturbed_query_loss": (
+                validation_perturbed_query_loss if should_validate else None
+            ),
         }
         history.append(record)
         if progress:
@@ -424,6 +480,13 @@ def train_multi_object(
                 f"best={best_selection_loss:.8f} lr={current_lr:.8e}",
                 flush=True,
             )
+            if train_exact_query_loss is not None:
+                print(
+                    "query loss "
+                    f"exact={train_exact_query_loss:.8f} "
+                    f"perturbed={train_perturbed_query_loss:.8f}",
+                    flush=True,
+                )
             if lr_was_reduced:
                 print(
                     "learning rate reduced: "
@@ -482,6 +545,10 @@ def train_multi_object(
         data_loader=final_train_loader,
         amp_enabled=amp_enabled,
         amp_dtype=amp_dtype,
+        query_settings=query_settings,
+        query_seed=seed,
+        query_epoch=0,
+        augment_queries=query_settings.enabled,
     )
     final_validation_loss = None
     validation_metrics: dict[str, dict[str, Any]] = {}
@@ -497,6 +564,11 @@ def train_multi_object(
             data_loader=validation_loader,
             amp_enabled=amp_enabled,
             amp_dtype=amp_dtype,
+            query_settings=query_settings,
+            query_seed=seed,
+            query_epoch=0,
+            augment_queries=query_settings.enabled
+            and query_settings.apply_to_validation,
         )
     _synchronize_device(device)
     runtime_seconds = float(initial_loading_seconds + time.perf_counter() - start_time)
@@ -612,6 +684,9 @@ def _build_model(
 ) -> LearnedLaplacianModel:
     image_config = config.get("image_encoder", {})
     model_config = config.get("model", {})
+    position_config = model_config.get("position_encoding", {})
+    if not isinstance(position_config, Mapping):
+        raise ValueError("model.position_encoding must be an object.")
     return LearnedLaplacianModel(
         image_feature_dim=int(image_config.get("feature_dim", 32)),
         hidden_dim=int(model_config.get("hidden_dim", 128)),
@@ -619,6 +694,9 @@ def _build_model(
         dropout=float(model_config.get("dropout", 0.0)),
         input_mode=input_mode_override or str(config.get("input_mode", "coarse_plus_multiview")),
         zero_images=zero_images,
+        geometry_mode=str(model_config.get("geometry_mode", "legacy")),
+        position_num_frequencies=int(position_config.get("num_frequencies", 6)),
+        position_include_input=bool(position_config.get("include_input", True)),
     )
 
 
@@ -686,6 +764,8 @@ def _prepare_object_static(
     static_sample = (
         dict(sample) if sample.get("_static_prepared") is True else validate_sample(sample)
     )
+    if query_augmentation_settings(config).enabled:
+        validate_gt_query_contract(static_sample)
     target_mode, epsilon = _target_settings(config)
     target = static_sample["raw_laplacian_target"]
     if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
@@ -976,6 +1056,67 @@ def _loss_kwargs(training: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _with_query_augmentation(
+    prepared: _PreparedObject,
+    settings: QueryAugmentationSettings,
+    *,
+    base_seed: int,
+    epoch: int,
+    enabled: bool,
+) -> _PreparedObject:
+    if not settings.enabled:
+        return prepared
+    effective = (
+        settings
+        if enabled
+        else QueryAugmentationSettings(
+            enabled=False,
+            exact_fraction=settings.exact_fraction,
+            normal_std_h=settings.normal_std_h,
+            tangent_std_h=settings.tangent_std_h,
+            max_offset_h=settings.max_offset_h,
+            apply_to_validation=settings.apply_to_validation,
+            zero_initial_laplacian=settings.zero_initial_laplacian,
+        )
+    )
+    return _PreparedObject(
+        sample=apply_query_augmentation(
+            prepared.sample, effective, base_seed=base_seed, epoch=epoch
+        ),
+        training_target=prepared.training_target,
+        clipped_target_vertices=prepared.clipped_target_vertices,
+    )
+
+
+def _query_subset_losses(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    confidence: torch.Tensor,
+    exact_mask: torch.Tensor | None,
+    loss_kwargs: Mapping[str, Any],
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    if exact_mask is None:
+        return None, None
+    exact_mask = exact_mask.to(dtype=torch.bool, device=prediction.device)
+
+    def subset(mask: torch.Tensor) -> torch.Tensor | None:
+        weights = confidence * mask.to(dtype=confidence.dtype)
+        return weighted_robust_laplacian_loss(
+            prediction, target, weights, **loss_kwargs
+        )
+
+    return subset(exact_mask), subset(~exact_mask)
+
+
+def _mean_optional_tensors(values: Sequence[torch.Tensor]) -> float | None:
+    return float(torch.stack(tuple(values)).mean().item()) if values else None
+
+
+def _mean_metric(metrics: Mapping[str, Mapping[str, Any]], name: str) -> float | None:
+    values = [float(item[name]) for item in metrics.values() if item.get(name) is not None]
+    return float(np.mean(values)) if values else None
+
+
 @torch.no_grad()
 def _evaluate_dataset(
     model: LearnedLaplacianModel,
@@ -988,6 +1129,10 @@ def _evaluate_dataset(
     data_loader: Iterable[Any] | None = None,
     amp_enabled: bool = False,
     amp_dtype: torch.dtype = torch.float16,
+    query_settings: QueryAugmentationSettings | None = None,
+    query_seed: int = 7,
+    query_epoch: int = 0,
+    augment_queries: bool = False,
 ) -> tuple[float, dict[str, dict[str, Any]]]:
     model.eval()
     target_mode, _ = _target_settings(config)
@@ -1005,6 +1150,14 @@ def _evaluate_dataset(
             cache_on_device,
             non_blocking=non_blocking,
         )
+        if query_settings is not None:
+            prepared = _with_query_augmentation(
+                prepared,
+                query_settings,
+                base_seed=query_seed,
+                epoch=query_epoch,
+                enabled=augment_queries,
+            )
         with torch.autocast(
             device_type=device.type,
             dtype=amp_dtype,
@@ -1019,6 +1172,13 @@ def _evaluate_dataset(
             **loss_kwargs,
         )
         loss_value = float(loss.item())
+        exact_loss, perturbed_loss = _query_subset_losses(
+            prediction,
+            prepared.training_target.float(),
+            prepared.sample["target_confidence"].float(),
+            prepared.sample.get("query_is_exact"),
+            loss_kwargs,
+        )
         losses.append(loss_value)
         valid_mask = prepared.sample["valid_scale_mask"]
         target_metrics = laplacian_prediction_metrics(
@@ -1040,6 +1200,10 @@ def _evaluate_dataset(
             raise ValueError(f"Duplicate sample_id {sample_id!r} in one dataset split.")
         metrics[sample_id] = {
             "loss": loss_value,
+            "exact_query_loss": None if exact_loss is None else float(exact_loss.item()),
+            "perturbed_query_loss": (
+                None if perturbed_loss is None else float(perturbed_loss.item())
+            ),
             "vertex_count": int(prepared.sample["vertices"].shape[0]),
             "face_count": int(prepared.sample["faces"].shape[0]),
             "view_count": int(prepared.sample["images"].shape[0]),

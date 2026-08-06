@@ -1,0 +1,85 @@
+{
+  "seed": 7,
+  "device": "cuda",
+  "dataset": {
+    "expected_split_counts": {
+      "train": 40,
+      "validation": 5,
+      "test": 5
+    }
+  },
+  "input_mode": "coarse_plus_multiview",
+  "target_mode": "edge_scale_normalized_laplacian",
+  "target_scaling": {
+    "method": "square_of_mean_incident_edge_length",
+    "epsilon": 1e-12,
+    "clip_max_norm": null
+  },
+  "query_training": {
+    "enabled": true,
+    "exact_fraction": 0.2,
+    "normal_std_h": 0.08,
+    "tangent_std_h": 0.08,
+    "max_offset_h": 0.25,
+    "apply_to_validation": true,
+    "zero_initial_laplacian": true
+  },
+  "image_encoder": {
+    "feature_dim": 16,
+    "normalization": {
+      "mean": [0.0, 0.0, 0.0],
+      "std": [1.0, 1.0, 1.0]
+    }
+  },
+  "model": {
+    "hidden_dim": 64,
+    "num_graph_layers": 3,
+    "dropout": 0.0,
+    "geometry_mode": "query_fourier",
+    "position_encoding": {
+      "num_frequencies": 6,
+      "include_input": true
+    }
+  },
+  "training": {
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "loss": "huber",
+    "huber_delta": 0.01,
+    "gradient_clip_norm": 1.0,
+    "amp": {
+      "enabled": true,
+      "dtype": "float16"
+    },
+    "lr_scheduler": {
+      "type": "reduce_on_plateau",
+      "factor": 0.5,
+      "patience_validations": 10,
+      "threshold": 0.0001,
+      "threshold_mode": "abs",
+      "cooldown_validations": 1,
+      "min_lr": 0.000001
+    }
+  },
+  "data_loading": {
+    "num_workers": 4,
+    "pin_memory": true,
+    "persistent_workers": true,
+    "prefetch_factor": 2
+  },
+  "multi_object_training": {
+    "epochs": 250,
+    "max_optimizer_steps": 50000,
+    "gradient_accumulation_meshes": 4,
+    "shuffle": true,
+    "validation_every_epochs": 5,
+    "checkpoint_every_epochs": 10,
+    "cache_prepared_samples_on_device": false,
+    "profile_training": true,
+    "early_stopping": {
+      "enabled": true,
+      "patience_validations": 15,
+      "min_delta": 0.0001
+    }
+  }
+}
