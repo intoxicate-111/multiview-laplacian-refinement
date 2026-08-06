@@ -92,6 +92,8 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
 
     def load_static(self, index: int) -> dict[str, Any]:
         """Load tensors and lazy image metadata without decoding image pixels."""
+        if index in self._cache:
+            return self._cache[index]
         record = self.records[index]
         sample = load_prepared_sample(
             record.path,
@@ -103,6 +105,8 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
                 f"Manifest declares sample_id {record.sample_id!r} for {record.path}, "
                 f"but the file contains {sample['sample_id']!r}."
             )
+        if sample.get("prepared_storage_format") != "lazy_image_paths_v1":
+            self._cache[index] = sample
         return sample
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
@@ -113,7 +117,8 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
     def sample_ids(self) -> tuple[str, ...]:
         result = []
         for index, record in enumerate(self.records):
-            result.append(record.sample_id or self[index]["sample_id"])
+            # Avoid decoding every lazy sample's images merely to validate split IDs.
+            result.append(record.sample_id or self.load_static(index)["sample_id"])
         return tuple(result)
 
 

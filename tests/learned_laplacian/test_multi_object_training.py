@@ -16,8 +16,10 @@ from mlr.learned_laplacian.multi_dataset import (
 )
 from mlr.learned_laplacian import multi_trainer
 from mlr.learned_laplacian.multi_trainer import (
+    _MaterializedPreparedDataset,
     _build_lr_scheduler,
     _prepare_object_static,
+    _select_prepared_views,
     train_multi_object,
 )
 from mlr.learned_laplacian.target_scaling import normalize_laplacian_by_edge_scale
@@ -85,6 +87,25 @@ def _multi_config() -> dict:
             "checkpoint_every_epochs": 0,
         },
     }
+
+
+def _multi_view_sample(num_views: int = 14) -> dict:
+    sample = tiny_sample()
+    sample["sample_id"] = "multi_view"
+    sample["images"] = torch.stack(
+        [torch.full((3, 16, 16), index / 20.0) for index in range(num_views)]
+    )
+    sample["image_paths"] = [f"view_{index:02d}.png" for index in range(num_views)]
+    sample["intrinsics"] = sample["intrinsics"].repeat(num_views, 1, 1)
+    sample["extrinsics"] = sample["extrinsics"].repeat(num_views, 1, 1)
+    sample["visibility"] = sample["visibility"].repeat(num_views, 1)
+    for index in range(num_views):
+        sample["intrinsics"][index, 0, 1] = float(index)
+        sample["extrinsics"][index, 0, 3] = float(index)
+        sample["visibility"][index] = torch.tensor(
+            [(index >> bit) & 1 for bit in range(4)], dtype=torch.bool
+        )
+    return sample
 
 
 def test_manifest_lazily_loads_variable_topology_splits(tmp_path):
@@ -252,7 +273,7 @@ def test_static_prepared_fields_match_reference_calculation():
         torch.ones((expected_edges.shape[1], 1)),
     )
     expected_target = normalize_laplacian_by_edge_scale(
-        prepared.sample["raw_laplacian_target"],
+        prepared.raw_target,
         prepared.sample["local_edge_length"],
         eps=config["target_scaling"]["epsilon"],
         valid_scale_mask=prepared.sample["valid_scale_mask"],
@@ -319,6 +340,9 @@ def test_validation_schedule_and_timing_metrics(tmp_path):
     assert result.mean_epoch_data_loading_seconds >= 0
     assert result.mean_epoch_gpu_transfer_seconds >= 0
     assert result.mean_epoch_forward_backward_seconds >= 0
+    assert result.mean_epoch_image_decode_resize_seconds >= 0
+    assert result.mean_train_views_per_sample >= 1
+    assert result.mean_epoch_decoded_image_bytes >= 0
     assert result.mean_optimizer_step_seconds >= 0
     assert result.peak_cpu_memory_mb > 0
     metrics = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
@@ -328,7 +352,13 @@ def test_validation_schedule_and_timing_metrics(tmp_path):
         key in result.history[0]
         for key in (
             "data_loading_seconds",
+            "sample_wait_seconds",
+            "image_decode_resize_seconds",
+            "mean_image_decode_resize_seconds_per_mesh",
+            "mean_used_view_count",
+            "decoded_image_bytes",
             "gpu_transfer_seconds",
+            "pin_or_transfer_seconds",
             "forward_backward_seconds",
             "total_step_seconds",
         )
@@ -652,6 +682,100 @@ def test_early_stopping_counts_validation_events(monkeypatch):
     assert result.stop_reason == "early_stopping"
 
 
+def test_default_view_selection_uses_all_views_and_pruned_worker_sample():
+    prepared = _prepare_object_static(_multi_view_sample(), _multi_config())
+    selected = _select_prepared_views(prepared, None, base_seed=11, epoch=1)
+    item = _MaterializedPreparedDataset(
+        [selected],
+        decode_images=False,
+        views_per_sample=None,
+        base_seed=11,
+        profile_loading=False,
+    )[0]
+
+    assert item["sample"]["images"].shape[0] == 14
+    assert item["used_view_count"] == 14
+    assert "raw_target" not in item
+    for removed in (
+        "gt_vertices",
+        "gt_faces",
+        "target_positions",
+        "laplacian_target",
+        "raw_laplacian_target",
+        "normalized_laplacian_target",
+        "local_edge_scale",
+        "faces",
+        "metadata",
+    ):
+        assert removed not in item["sample"]
+    assert prepared.raw_target is not None
+    assert prepared.face_count == 4
+
+
+def test_epoch_aware_view_selection_is_aligned_and_reproducible():
+    prepared = _prepare_object_static(_multi_view_sample(), _multi_config())
+    first = _select_prepared_views(prepared, 4, base_seed=19, epoch=3)
+    repeated = _select_prepared_views(prepared, 4, base_seed=19, epoch=3)
+    next_epoch = _select_prepared_views(prepared, 4, base_seed=19, epoch=4)
+
+    for name in ("images", "intrinsics", "extrinsics", "visibility"):
+        assert first.sample[name].shape[0] == 4
+        torch.testing.assert_close(first.sample[name], repeated.sample[name])
+    assert len(first.sample["image_paths"]) == 4
+    assert first.sample["image_paths"] == repeated.sample["image_paths"]
+    selected_ids = first.sample["intrinsics"][:, 0, 1].to(dtype=torch.long)
+    assert first.sample["image_paths"] == [f"view_{index:02d}.png" for index in selected_ids]
+    torch.testing.assert_close(
+        first.sample["extrinsics"][:, 0, 3], selected_ids.to(dtype=torch.float32)
+    )
+    torch.testing.assert_close(
+        first.sample["images"][:, 0, 0, 0], selected_ids.to(dtype=torch.float32) / 20.0
+    )
+    expected_visibility = torch.tensor(
+        [[(int(index) >> bit) & 1 for bit in range(4)] for index in selected_ids],
+        dtype=torch.bool,
+    )
+    assert torch.equal(first.sample["visibility"], expected_visibility)
+    assert first.sample["image_paths"] != next_epoch.sample["image_paths"]
+
+
+@pytest.mark.parametrize(
+    ("input_mode", "zero_images"),
+    [("coarse_only", False), ("coarse_plus_multiview", True)],
+)
+def test_image_free_ablation_does_not_open_lazy_images(
+    tmp_path, monkeypatch, input_mode, zero_images
+):
+    sample = _triangle_sample("image_free")
+    sample.pop("images")
+    sample["image_paths"] = ["missing.png"]
+    sample["source_image_size"] = [1920, 1920]
+    sample["prepared_image_size"] = 1920
+    sample["prepared_storage_format"] = "lazy_image_paths_v1"
+    sample["_dataset_root"] = str(tmp_path)
+    config = _multi_config()
+    config["input_mode"] = input_mode
+    config["data_loading"] = {
+        "num_workers": 0,
+        "pin_memory": False,
+        "persistent_workers": False,
+        "prefetch_factor": 2,
+    }
+    config["multi_object_training"]["epochs"] = 1
+
+    def forbidden_open(*args, **kwargs):
+        raise AssertionError("Image.open must not run for image-free ablations")
+
+    monkeypatch.setattr("mlr.learned_laplacian.sample_io.Image.open", forbidden_open)
+    result = train_multi_object(
+        [sample], None, config, zero_images=zero_images, progress=False
+    )
+
+    assert math.isfinite(result.final_train_loss)
+    assert result.history[0]["decoded_image_bytes"] == 0
+    assert result.history[0]["mean_used_view_count"] == 1
+
+
 def test_manifest_training_uses_static_lazy_load_and_uint8_images(
     tmp_path, monkeypatch
 ):
@@ -691,11 +815,20 @@ def test_manifest_training_uses_static_lazy_load_and_uint8_images(
     train_dataset = PreparedMeshDataset.from_manifest(manifest_path, "train")
     validation_dataset = PreparedMeshDataset.from_manifest(manifest_path, "validation")
     seen_image_dtypes = []
+    moved_image_ranges = []
     original_move = multi_trainer._move_prepared_object_to_device
 
     def checked_move(prepared, *args, **kwargs):
         seen_image_dtypes.append(prepared.sample["images"].dtype)
-        return original_move(prepared, *args, **kwargs)
+        moved = original_move(prepared, *args, **kwargs)
+        moved_image_ranges.append(
+            (
+                moved.sample["images"].dtype,
+                float(moved.sample["images"].min()),
+                float(moved.sample["images"].max()),
+            )
+        )
+        return moved
 
     def forbidden_eager_getitem(self, index):
         raise AssertionError("PreparedMeshDataset.__getitem__ eagerly materialized images")
@@ -703,6 +836,7 @@ def test_manifest_training_uses_static_lazy_load_and_uint8_images(
     monkeypatch.setattr(multi_trainer, "_move_prepared_object_to_device", checked_move)
     monkeypatch.setattr(PreparedMeshDataset, "__getitem__", forbidden_eager_getitem)
     config = _multi_config()
+    config["input_mode"] = "coarse_plus_multiview"
     config["data_loading"] = {
         "num_workers": 1,
         "pin_memory": True,
@@ -711,6 +845,7 @@ def test_manifest_training_uses_static_lazy_load_and_uint8_images(
     }
     config["multi_object_training"]["epochs"] = 1
     config["multi_object_training"]["cache_prepared_samples_on_device"] = False
+    config["multi_object_training"]["profile_training"] = True
 
     result = train_multi_object(
         train_dataset,
@@ -722,3 +857,9 @@ def test_manifest_training_uses_static_lazy_load_and_uint8_images(
     assert math.isfinite(result.final_train_loss)
     assert seen_image_dtypes
     assert set(seen_image_dtypes) == {torch.uint8}
+    assert moved_image_ranges
+    assert all(dtype == torch.float32 for dtype, _, _ in moved_image_ranges)
+    assert all(0.0 <= minimum <= maximum <= 1.0 for _, minimum, maximum in moved_image_ranges)
+    assert result.history[0]["image_decode_resize_seconds"] >= 0.0
+    assert result.history[0]["mean_used_view_count"] == 1.0
+    assert result.history[0]["decoded_image_bytes"] == 3 * 16 * 16

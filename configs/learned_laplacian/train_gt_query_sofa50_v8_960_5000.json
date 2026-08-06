@@ -15,6 +15,15 @@
     "epsilon": 1e-12,
     "clip_max_norm": null
   },
+  "query_training": {
+    "enabled": true,
+    "exact_fraction": 0.2,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "max_offset_h": 0.001,
+    "apply_to_validation": true,
+    "zero_initial_laplacian": true
+  },
   "image_encoder": {
     "feature_dim": 16,
     "normalization": {
@@ -25,7 +34,12 @@
   "model": {
     "hidden_dim": 64,
     "num_graph_layers": 3,
-    "dropout": 0.0
+    "dropout": 0.0,
+    "geometry_mode": "query_fourier",
+    "position_encoding": {
+      "num_frequencies": 6,
+      "include_input": true
+    }
   },
   "training": {
     "learning_rate": 0.001,
@@ -61,11 +75,11 @@
     "gradient_accumulation_meshes": 4,
     "shuffle": true,
     "validation_every_epochs": 5,
-    "checkpoint_every_epochs": 10,
+    "checkpoint_every_epochs": 100,
     "cache_prepared_samples_on_device": false,
     "profile_training": true,
     "early_stopping": {
-      "enabled": true,
+      "enabled": false,
       "patience_validations": 15,
       "min_delta": 0.0001
     }

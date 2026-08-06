@@ -51,7 +51,9 @@
     "num_workers": 4,
     "pin_memory": true,
     "persistent_workers": true,
-    "prefetch_factor": 2
+    "prefetch_factor": 2,
+    "train_views_per_sample": null,
+    "validation_views_per_sample": null
   },
   "multi_object_training": {
     "epochs": 250,

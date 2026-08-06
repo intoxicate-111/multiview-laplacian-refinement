@@ -362,32 +362,45 @@ def load_and_resize_images(
 ) -> tuple[torch.Tensor, tuple[float, float]]:
     if dtype not in (torch.float32, torch.uint8):
         raise ValueError("image dtype must be torch.float32 or torch.uint8.")
-    arrays = []
+    stacked = None
     original_size = None
     target_size = None
-    for path in paths:
-        image = Image.open(path).convert("RGB")
-        if original_size is None:
-            original_size = image.size
-        elif image.size != original_size:
-            raise ValueError("All sample images must have the same dimensions.")
-        if image_size is not None:
-            if image_size < 1:
-                raise ValueError("image_size must be positive.")
-            target_size = (image_size, image_size)
-            if image.size != target_size:
-                image = image.resize(target_size, Image.Resampling.BILINEAR)
-        else:
-            target_size = image.size
-        if dtype == torch.uint8:
-            array = np.asarray(image, dtype=np.uint8)
-        else:
-            array = np.asarray(image, dtype=np.float32) / 255.0
-        arrays.append(array.transpose(2, 0, 1))
-    if not arrays or original_size is None or target_size is None:
+    if image_size is not None and image_size < 1:
+        raise ValueError("image_size must be positive.")
+    for index, path in enumerate(paths):
+        with Image.open(path) as opened:
+            current_original_size = opened.size
+            if original_size is None:
+                original_size = current_original_size
+            elif current_original_size != original_size:
+                raise ValueError("All sample images must have the same dimensions.")
+            rgb = opened.convert("RGB")
+            resized = None
+            try:
+                target_size = (
+                    (image_size, image_size) if image_size is not None else rgb.size
+                )
+                processed = rgb
+                if rgb.size != target_size:
+                    resized = rgb.resize(target_size, Image.Resampling.BILINEAR)
+                    processed = resized
+                if stacked is None:
+                    stacked = np.empty(
+                        (len(paths), 3, target_size[1], target_size[0]),
+                        dtype=np.uint8,
+                    )
+                stacked[index] = np.asarray(processed, dtype=np.uint8).transpose(2, 0, 1)
+            finally:
+                if resized is not None:
+                    resized.close()
+                rgb.close()
+    if stacked is None or original_size is None or target_size is None:
         raise ValueError("Dataset must contain at least one image.")
     scale_xy = (target_size[0] / original_size[0], target_size[1] / original_size[1])
-    return torch.from_numpy(np.stack(arrays)), scale_xy
+    images = torch.from_numpy(stacked)
+    if dtype == torch.float32:
+        images = images.to(dtype=torch.float32).div_(255.0)
+    return images, scale_xy
 
 
 def _camera_tensors(

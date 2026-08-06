@@ -1,13 +1,7 @@
 {
   "seed": 7,
   "device": "cuda",
-  "dataset": {
-    "expected_split_counts": {
-      "train": 40,
-      "validation": 5,
-      "test": 5
-    }
-  },
+  "dataset": {"expected_split_counts": {"train": 40, "validation": 5, "test": 5}},
   "input_mode": "coarse_plus_multiview",
   "target_mode": "edge_scale_normalized_laplacian",
   "target_scaling": {
@@ -15,28 +9,34 @@
     "epsilon": 1e-12,
     "clip_max_norm": null
   },
+  "query_training": {
+    "enabled": true,
+    "exact_fraction": 0.2,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "max_offset_h": 0.001,
+    "apply_to_validation": true,
+    "zero_initial_laplacian": true
+  },
   "image_encoder": {
     "feature_dim": 16,
-    "normalization": {
-      "mean": [0.0, 0.0, 0.0],
-      "std": [1.0, 1.0, 1.0]
-    }
+    "normalization": {"mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0]}
   },
   "model": {
     "hidden_dim": 64,
     "num_graph_layers": 3,
-    "dropout": 0.0
+    "dropout": 0.0,
+    "geometry_mode": "query_fourier",
+    "position_encoding": {"num_frequencies": 6, "include_input": true}
   },
   "training": {
-    "learning_rate": 0.001,
+    "learning_rate": 0.0001,
     "weight_decay": 0.0,
     "loss": "huber",
     "huber_delta": 0.01,
+    "target_magnitude_weight_lambda": 4.0,
     "gradient_clip_norm": 1.0,
-    "amp": {
-      "enabled": true,
-      "dtype": "float16"
-    },
+    "amp": {"enabled": true, "dtype": "float16"},
     "lr_scheduler": {
       "type": "reduce_on_plateau",
       "factor": 0.5,
@@ -56,7 +56,7 @@
     "validation_views_per_sample": null
   },
   "multi_object_training": {
-    "epochs": 5000,
+    "epochs": 250,
     "max_optimizer_steps": 50000,
     "gradient_accumulation_meshes": 4,
     "shuffle": true,

@@ -32,9 +32,35 @@ def main() -> int:
         choices=["coarse_only", "multiview_only", "coarse_plus_multiview"],
     )
     parser.add_argument("--zero-images", action="store_true")
+    parser.add_argument("--train-views-per-sample", type=int)
+    parser.add_argument("--validation-views-per-sample", type=int)
+    parser.add_argument(
+        "--epochs", type=int, help="Override multi_object_training.epochs."
+    )
+    parser.add_argument(
+        "--max-optimizer-steps",
+        type=int,
+        help="Override multi_object_training.max_optimizer_steps.",
+    )
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
+    for argument, key in (
+        (args.train_views_per_sample, "train_views_per_sample"),
+        (args.validation_views_per_sample, "validation_views_per_sample"),
+    ):
+        if argument is not None:
+            if argument < 1:
+                parser.error(f"--{key.replace('_', '-')} must be positive")
+            config.setdefault("data_loading", {})[key] = argument
+    for argument, key in (
+        (args.epochs, "epochs"),
+        (args.max_optimizer_steps, "max_optimizer_steps"),
+    ):
+        if argument is not None:
+            if argument < 1:
+                parser.error(f"--{key.replace('_', '-')} must be positive")
+            config.setdefault("multi_object_training", {})[key] = argument
     _validate_expected_split_counts(args.manifest, config)
     _write_run_metadata(args.output_dir, args.manifest, config)
     train_dataset = PreparedMeshDataset.from_manifest(args.manifest, "train")
@@ -85,6 +111,9 @@ def main() -> int:
         "mean_epoch_data_loading_seconds": result.mean_epoch_data_loading_seconds,
         "mean_epoch_gpu_transfer_seconds": result.mean_epoch_gpu_transfer_seconds,
         "mean_epoch_forward_backward_seconds": result.mean_epoch_forward_backward_seconds,
+        "mean_epoch_image_decode_resize_seconds": result.mean_epoch_image_decode_resize_seconds,
+        "mean_train_views_per_sample": result.mean_train_views_per_sample,
+        "mean_epoch_decoded_image_bytes": result.mean_epoch_decoded_image_bytes,
         "mean_optimizer_step_seconds": result.mean_optimizer_step_seconds,
         "peak_cpu_memory_mb": result.peak_cpu_memory_mb,
         "output_dir": str(args.output_dir),

@@ -11,6 +11,7 @@ def weighted_robust_laplacian_loss(
     loss_type: str = "huber",
     huber_delta: float = 0.01,
     charbonnier_epsilon: float = 1e-3,
+    target_magnitude_weight_lambda: float = 0.0,
 ) -> torch.Tensor:
     if prediction.shape != target.shape or prediction.ndim != 2 or prediction.shape[1] != 3:
         raise ValueError("prediction and target must both have shape [N, 3].")
@@ -24,7 +25,18 @@ def weighted_robust_laplacian_loss(
     else:
         raise ValueError("loss_type must be 'huber' or 'charbonnier'.")
     per_vertex = per_component.mean(dim=-1)
+    if target_magnitude_weight_lambda < 0:
+        raise ValueError("target_magnitude_weight_lambda must be non-negative.")
     weights = confidence.clamp_min(0.0)
+    if target_magnitude_weight_lambda > 0:
+        target_magnitude = torch.linalg.vector_norm(target.float(), dim=-1)
+        weighted_mean_magnitude = (
+            weights * target_magnitude
+        ).sum() / weights.sum().clamp_min(1e-12)
+        magnitude_weights = 1.0 + target_magnitude_weight_lambda * target_magnitude / (
+            weighted_mean_magnitude + 1e-12
+        )
+        weights = weights * magnitude_weights
     return (weights * per_vertex).sum() / weights.sum().clamp_min(1e-12)
 
 

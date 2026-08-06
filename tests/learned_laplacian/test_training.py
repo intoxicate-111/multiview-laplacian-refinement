@@ -2,6 +2,7 @@ import math
 
 import torch
 
+from mlr.learned_laplacian.losses import weighted_robust_laplacian_loss
 from mlr.learned_laplacian.model import LearnedLaplacianModel
 from mlr.learned_laplacian.trainer import load_checkpoint, train_single_object
 
@@ -54,3 +55,36 @@ def test_edge_scale_normalized_target_mode_trains_and_reports_mode(tmp_path):
     assert result.clipped_target_vertices == 0
     assert math.isfinite(result.best_loss)
     assert all(math.isfinite(value) for value in result.prediction_metrics.values())
+
+
+def test_target_magnitude_weighting_emphasizes_large_target_errors():
+    target = torch.tensor([[1.0, 0.0, 0.0], [10.0, 0.0, 0.0]])
+    prediction = target.clone()
+    prediction[1] = 0.0
+    confidence = torch.ones(2)
+    base = weighted_robust_laplacian_loss(
+        prediction, target, confidence, huber_delta=0.01
+    )
+    weighted = weighted_robust_laplacian_loss(
+        prediction,
+        target,
+        confidence,
+        huber_delta=0.01,
+        target_magnitude_weight_lambda=4.0,
+    )
+    assert weighted > base
+
+
+def test_target_magnitude_weighting_rejects_negative_lambda():
+    value = torch.zeros((1, 3))
+    try:
+        weighted_robust_laplacian_loss(
+            value,
+            value,
+            torch.ones(1),
+            target_magnitude_weight_lambda=-1.0,
+        )
+    except ValueError as error:
+        assert "non-negative" in str(error)
+    else:
+        raise AssertionError("negative target magnitude weight must fail")

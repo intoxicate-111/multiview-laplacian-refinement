@@ -9,7 +9,7 @@ from torch import nn
 from .aggregation import masked_mean_aggregate
 from .graph_layers import LaplacianPredictor, faces_to_edge_index
 from .image_encoder import SmallImageEncoder
-from .projection import sample_vertex_features
+from .projection import project_vertices, sample_vertex_features
 from .query_training import QUERY_FOURIER_GEOMETRY_MODE
 from .target_scaling import mean_incident_edge_length
 
@@ -100,28 +100,52 @@ class LearnedLaplacianModel(nn.Module):
         )
 
     def forward(self, sample: Mapping[str, Any]) -> LearnedLaplacianOutput:
-        images = sample["images"]
         query_positions = sample.get("query_positions", sample["vertices"])
-        if self.zero_images or self.input_mode == "coarse_only":
-            feature_height = (images.shape[-2] + 1) // 2
-            feature_height = (feature_height + 1) // 2
-            feature_width = (images.shape[-1] + 1) // 2
-            feature_width = (feature_width + 1) // 2
-            feature_maps = images.new_zeros(
-                (images.shape[0], self.image_feature_dim, feature_height, feature_width)
+        if self.input_mode == "coarse_only":
+            num_views = int(
+                sample.get(
+                    "num_views",
+                    sample["intrinsics"].shape[0] if "intrinsics" in sample else 0,
+                )
             )
+            valid = torch.zeros(
+                (num_views, query_positions.shape[0]),
+                dtype=torch.bool,
+                device=query_positions.device,
+            )
+            aggregated = query_positions.new_zeros(
+                (query_positions.shape[0], self.image_feature_dim)
+            )
+            valid_ratio = query_positions.new_zeros((query_positions.shape[0],))
         else:
-            feature_maps = self.image_encoder(images)
-        height, width = images.shape[-2:]
-        per_view, valid, _ = sample_vertex_features(
-            feature_maps=feature_maps,
-            vertices=query_positions,
-            intrinsics=sample["intrinsics"],
-            extrinsics=sample["extrinsics"],
-            image_size=(height, width),
-            visibility=sample.get("visibility"),
-        )
-        aggregated, valid_ratio = masked_mean_aggregate(per_view, valid)
+            image_size = _sample_image_size(sample)
+            if self.zero_images:
+                projection = project_vertices(
+                    vertices=query_positions,
+                    intrinsics=sample["intrinsics"],
+                    extrinsics=sample["extrinsics"],
+                    image_size=image_size,
+                    visibility=sample.get("visibility"),
+                )
+                valid = projection.valid
+                aggregated = query_positions.new_zeros(
+                    (query_positions.shape[0], self.image_feature_dim)
+                )
+                valid_ratio = valid.to(query_positions.dtype).sum(dim=0) / float(
+                    max(valid.shape[0], 1)
+                )
+            else:
+                images = sample["images"]
+                feature_maps = self.image_encoder(images)
+                per_view, valid, _ = sample_vertex_features(
+                    feature_maps=feature_maps,
+                    vertices=query_positions,
+                    intrinsics=sample["intrinsics"],
+                    extrinsics=sample["extrinsics"],
+                    image_size=image_size,
+                    visibility=sample.get("visibility"),
+                )
+                aggregated, valid_ratio = masked_mean_aggregate(per_view, valid)
 
         edge_index = sample.get("edge_index")
         if edge_index is None:
@@ -168,7 +192,6 @@ class LearnedLaplacianModel(nn.Module):
         if self.input_mode == "multiview_only":
             geometry = torch.zeros_like(geometry)
         if self.input_mode == "coarse_only":
-            aggregated = torch.zeros_like(aggregated)
             ratio_feature = torch.zeros_like(ratio_feature)
         vertex_features = torch.cat((geometry, ratio_feature, aggregated), dim=-1)
         predicted = self.predictor(vertex_features, edge_index)
@@ -210,3 +233,14 @@ def _normalize_query_positions(
     ).reshape(())
     scale = scale.clamp_min(1e-8)
     return (query_positions.float() - center) / scale, scale
+
+
+def _sample_image_size(sample: Mapping[str, Any]) -> tuple[int, int]:
+    images = sample.get("images")
+    if isinstance(images, torch.Tensor):
+        return int(images.shape[-2]), int(images.shape[-1])
+    height = int(sample.get("image_height", 0))
+    width = int(sample.get("image_width", 0))
+    if height < 1 or width < 1:
+        raise ValueError("Samples without image tensors require image_height and image_width.")
+    return height, width

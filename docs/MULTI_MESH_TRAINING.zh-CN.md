@@ -133,6 +133,39 @@ loader 则从每个样本读取 `prepared_image_size`。
 1000-sample 配置会拒绝不是严格 800 train、100 validation、100 test 的
 manifest。Test split 保留用于最终 held-out evaluation，不会进入训练循环。
 
+## 数据加载控制
+
+Lazy sample 进入 DataLoader worker 前会先裁剪。保留 forward 字段、相机 tensor、
+confidence、局部尺度和选定的 training target；GT mesh、faces、target positions、
+重复的 raw/normalized targets、`local_edge_scale` 和 metadata 不再进入 worker IPC
+或 GPU。Raw target 和 face count 只保留在主进程，并仅在 validation 和最终预测指标
+阶段显式关联。
+
+可在 `data_loading` 中配置视角采样：
+
+```json
+{
+  "train_views_per_sample": null,
+  "validation_views_per_sample": null
+}
+```
+
+`null` 保持原有全部视角语义。正整数会使用同一组索引同步选择 image paths、
+intrinsics、extrinsics 和 visibility。训练视角由 seed、sample ID 和 epoch 决定，
+不同 epoch 可变化且可复现；validation 视角固定且可复现。请求数不小于已有视角数
+时使用全部视角。
+CLI 可通过 `--train-views-per-sample 4` 和
+`--validation-views-per-sample 4` 覆盖配置，无需直接修改源配置文件。
+
+`coarse_only` 和 `--zero-images` 都不会打开或 resize 图像。`coarse_only` 还会省略
+相机 tensor，因为该 ablation 的图像特征与 valid-view ratio 都为零；
+`--zero-images` 仍保留相机投影，以维持历史 valid-view-ratio 输入语义。
+
+启用 profiling 后，每个 epoch 会记录 `sample_wait_seconds`、worker 内部
+`image_decode_resize_seconds`、`pin_or_transfer_seconds`、
+`forward_backward_seconds`、平均实际视角数和 uint8 解码字节数。由于 DataLoader
+等待、prefetch 与 IPC 无法可靠拆分，因此不单独伪造 worker-to-main 时间。
+
 ## 输出与监控
 
 训练期间每个 epoch 会输出：
@@ -215,9 +248,9 @@ conda activate test
 PYTHONPATH=src pytest -q
 ```
 
-优化实现通过了 96 项测试，包括 lazy manifest loading、CPU uint8 图像、
-persistent workers、max-step stopping、early stopping、CUDA transfer 路径和
-有限 CUDA AMP loss。
+优化实现通过了 108 项测试，包括 lazy manifest loading、CPU uint8 图像、
+persistent workers、max-step stopping、early stopping、按 epoch 对齐视角采样、
+无图像 ablation、CUDA transfer 路径和有限 CUDA AMP loss。
 
 ## 当前限制
 

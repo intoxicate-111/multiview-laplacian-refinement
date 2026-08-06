@@ -18,9 +18,9 @@
   "query_training": {
     "enabled": true,
     "exact_fraction": 0.2,
-    "normal_std_h": 0.08,
-    "tangent_std_h": 0.08,
-    "max_offset_h": 0.25,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "max_offset_h": 0.001,
     "apply_to_validation": true,
     "zero_initial_laplacian": true
   },
@@ -65,7 +65,9 @@
     "num_workers": 4,
     "pin_memory": true,
     "persistent_workers": true,
-    "prefetch_factor": 2
+    "prefetch_factor": 2,
+    "train_views_per_sample": null,
+    "validation_views_per_sample": null
   },
   "multi_object_training": {
     "epochs": 250,

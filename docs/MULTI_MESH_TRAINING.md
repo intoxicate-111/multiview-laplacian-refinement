@@ -138,6 +138,43 @@ The 1,000-sample config rejects manifests that do not contain exactly 800
 train, 100 validation, and 100 test entries. The test split is reserved for
 held-out evaluation and is not used by the training loop.
 
+## Data loading controls
+
+Lazy samples are pruned before entering DataLoader workers. Forward fields,
+camera tensors, confidence, local scale, and the selected training target are
+retained. GT meshes, faces, target positions, duplicate raw/normalized targets,
+`local_edge_scale`, and metadata stay out of worker IPC and GPU transfer. The
+raw target and face count remain in the main process and are attached only for
+validation and final prediction metrics.
+
+Optional view sampling is configured under `data_loading`:
+
+```json
+{
+  "train_views_per_sample": null,
+  "validation_views_per_sample": null
+}
+```
+
+`null` preserves the original all-view behavior. A positive integer selects
+that many aligned image paths, intrinsics, extrinsics, and visibility rows.
+Training selection changes deterministically by epoch and sample ID;
+validation selection is fixed and reproducible. Values at least as large as
+the available view count use all views.
+The CLI can override these values with `--train-views-per-sample 4` and
+`--validation-views-per-sample 4` without editing the source config.
+
+`coarse_only` and `--zero-images` do not open or resize image files. The former
+also omits camera tensors because image features and valid-view ratio are both
+zero in that ablation. The latter retains camera projection so its historical
+valid-view-ratio input remains unchanged.
+
+With profiling enabled, each epoch records `sample_wait_seconds`, worker-side
+`image_decode_resize_seconds`, `pin_or_transfer_seconds`,
+`forward_backward_seconds`, mean selected views, and decoded uint8 image bytes.
+Worker-to-main IPC time is not reported separately because it cannot be
+isolated reliably from DataLoader waiting and prefetching.
+
 ## Outputs and monitoring
 
 During training, each epoch prints:
@@ -225,9 +262,10 @@ conda activate test
 PYTHONPATH=src pytest -q
 ```
 
-The optimized implementation was validated with 96 passing tests, including
+The optimized implementation was validated with 108 passing tests, including
 lazy manifest loading, uint8 CPU images, persistent workers, max-step stopping,
-early stopping, CUDA transfer paths, and finite CUDA AMP loss.
+early stopping, aligned epoch-aware view sampling, image-free ablations, CUDA
+transfer paths, and finite CUDA AMP loss.
 
 ## Remaining constraints
 

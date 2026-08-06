@@ -18,9 +18,9 @@
   "query_training": {
     "enabled": true,
     "exact_fraction": 0.2,
-    "normal_std_h": 0.08,
-    "tangent_std_h": 0.08,
-    "max_offset_h": 0.25,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "max_offset_h": 0.001,
     "apply_to_validation": true,
     "zero_initial_laplacian": true
   },

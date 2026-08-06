@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import resource
@@ -12,7 +13,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
+from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .dataset import validate_sample
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
@@ -68,6 +69,9 @@ class MultiObjectTrainingResult:
     mean_epoch_gpu_transfer_seconds: float = 0.0
     mean_epoch_forward_backward_seconds: float = 0.0
     mean_optimizer_step_seconds: float = 0.0
+    mean_epoch_image_decode_resize_seconds: float = 0.0
+    mean_train_views_per_sample: float = 0.0
+    mean_epoch_decoded_image_bytes: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,11 @@ class _PreparedObject:
     sample: dict[str, Any]
     training_target: torch.Tensor
     clipped_target_vertices: int
+    raw_target: torch.Tensor | None = None
+    face_count: int = 0
+    image_decode_resize_seconds: float = 0.0
+    decoded_image_bytes: int = 0
+    used_view_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,8 @@ class _DataLoaderSettings:
     pin_memory: bool
     persistent_workers: bool
     prefetch_factor: int
+    train_views_per_sample: int | None
+    validation_views_per_sample: int | None
 
 
 @dataclass(frozen=True)
@@ -95,19 +106,75 @@ class _EarlyStoppingSettings:
 class _MaterializedPreparedDataset(Dataset[dict[str, Any]]):
     """Materialize only the image tensor requested by a DataLoader worker."""
 
-    def __init__(self, items: Sequence[_PreparedObject]) -> None:
+    def __init__(
+        self,
+        items: Sequence[_PreparedObject],
+        *,
+        decode_images: bool,
+        views_per_sample: int | None,
+        base_seed: int,
+        profile_loading: bool,
+    ) -> None:
         self.items = items
+        self.decode_images = decode_images
+        self.views_per_sample = views_per_sample
+        self.base_seed = int(base_seed)
+        self.profile_loading = profile_loading
 
     def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
-        prepared = _materialize_prepared_images(self.items[index], dtype=torch.uint8)
+    def __getitem__(self, key: int | tuple[int, int]) -> dict[str, Any]:
+        index, epoch = key if isinstance(key, tuple) else (key, 0)
+        prepared = _select_prepared_views(
+            self.items[index],
+            self.views_per_sample,
+            base_seed=self.base_seed,
+            epoch=epoch,
+        )
+        if self.decode_images:
+            prepared = _materialize_prepared_images(
+                prepared,
+                dtype=torch.uint8,
+                profile_loading=self.profile_loading,
+            )
         return {
             "sample": prepared.sample,
             "training_target": prepared.training_target,
             "clipped_target_vertices": prepared.clipped_target_vertices,
+            "image_decode_resize_seconds": prepared.image_decode_resize_seconds,
+            "decoded_image_bytes": prepared.decoded_image_bytes,
+            "used_view_count": prepared.used_view_count,
         }
+
+
+class _EpochIndexSampler(Sampler[tuple[int, int]]):
+    """Send the epoch with each index so persistent workers remain reproducible."""
+
+    def __init__(
+        self,
+        size: int,
+        *,
+        shuffle: bool,
+        generator: torch.Generator | None,
+    ) -> None:
+        self.size = int(size)
+        self.shuffle = shuffle
+        self.generator = generator
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __iter__(self):
+        if self.shuffle:
+            indices = torch.randperm(self.size, generator=self.generator).tolist()
+        else:
+            indices = range(self.size)
+        return iter((int(index), self.epoch) for index in indices)
+
+    def __len__(self) -> int:
+        return self.size
 
 
 def train_multi_object(
@@ -138,6 +205,8 @@ def train_multi_object(
             "query_training.enabled=true requires model.geometry_mode='query_fourier'."
         )
     model = _build_model(config, input_mode_override, zero_images).to(device)
+    decode_images = model.input_mode != "coarse_only" and not model.zero_images
+    keep_projection = model.input_mode != "coarse_only"
     training = config.get("training", {})
     multi = config.get("multi_object_training", {})
     epochs = int(multi.get("epochs", 1))
@@ -181,16 +250,26 @@ def train_multi_object(
     start_time = time.perf_counter()
     static_start = time.perf_counter()
     prepared_train = tuple(
-        _prepare_object_static(_static_sample_at(train_samples, index), config)
+        _prepare_object_static(
+            _static_sample_at(train_samples, index),
+            config,
+            keep_image_payload=decode_images,
+            keep_projection=keep_projection,
+        )
         for index in range(len(train_samples))
     )
     prepared_validation = tuple(
-        _prepare_object_static(_static_sample_at(validation_samples, index), config)
+        _prepare_object_static(
+            _static_sample_at(validation_samples, index),
+            config,
+            keep_image_payload=decode_images,
+            keep_projection=keep_projection,
+        )
         for index in range(len(validation_samples))
     )
     static_preparation_seconds = float(time.perf_counter() - static_start)
     device_cache_seconds = 0.0
-    if cache_on_device and any(
+    if cache_on_device and decode_images and any(
         item.sample.get("prepared_storage_format") == "lazy_image_paths_v1"
         for item in (*prepared_train, *prepared_validation)
     ):
@@ -225,12 +304,20 @@ def train_multi_object(
             loader_settings,
             shuffle=bool(multi.get("shuffle", True)),
             generator=train_generator,
+            decode_images=decode_images,
+            views_per_sample=loader_settings.train_views_per_sample,
+            base_seed=seed,
+            profile_loading=profile_training,
         )
         if prepared_validation:
             validation_loader = _build_prepared_loader(
                 prepared_validation,
                 loader_settings,
                 shuffle=False,
+                decode_images=decode_images,
+                views_per_sample=loader_settings.validation_views_per_sample,
+                base_seed=seed,
+                profile_loading=profile_training,
             )
     if progress and profile_training:
         print(f"static preparation: {static_preparation_seconds:.2f}s", flush=True)
@@ -243,7 +330,10 @@ def train_multi_object(
             f"workers={loader_settings.num_workers} "
             f"pin_memory={loader_settings.pin_memory} "
             f"persistent_workers={loader_settings.persistent_workers} "
-            f"prefetch_factor={loader_settings.prefetch_factor}",
+            f"prefetch_factor={loader_settings.prefetch_factor} "
+            f"train_views={loader_settings.train_views_per_sample} "
+            f"validation_views={loader_settings.validation_views_per_sample} "
+            f"decode_images={decode_images}",
             flush=True,
         )
         print(f"AMP: {amp_enabled} ({amp_dtype})", flush=True)
@@ -259,6 +349,9 @@ def train_multi_object(
     epoch_data_loading_seconds: list[float] = []
     epoch_gpu_transfer_seconds: list[float] = []
     epoch_forward_backward_seconds: list[float] = []
+    epoch_image_decode_resize_seconds: list[float] = []
+    epoch_mean_used_view_count: list[float] = []
+    epoch_decoded_image_bytes: list[int] = []
     lr_reduction_count = 0
     early_stopping_best = float("inf")
     early_stopping_bad_validations = 0
@@ -269,6 +362,7 @@ def train_multi_object(
         _synchronize_device(device)
         train_start = time.perf_counter()
         train_generator.manual_seed(seed + epoch)
+        _set_loader_epoch(train_loader, epoch)
         if train_loader is None:
             order = torch.randperm(len(prepared_train), generator=train_generator).tolist()
             if not shuffle:
@@ -284,6 +378,10 @@ def train_multi_object(
         data_loading_seconds = 0.0
         gpu_transfer_seconds = 0.0
         forward_backward_seconds = 0.0
+        image_decode_resize_seconds = 0.0
+        decoded_image_bytes = 0
+        used_view_count = 0
+        loaded_mesh_count = 0
         steps_at_epoch_start = optimizer_steps
         transfer_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
         forward_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
@@ -301,7 +399,19 @@ def train_multi_object(
                     data_loading_seconds += time.perf_counter() - loading_start
                     break
                 data_loading_seconds += time.perf_counter() - loading_start
-                group.append(_prepared_from_loader_item(item))
+                loaded = _prepared_from_loader_item(item)
+                if train_loader is None:
+                    loaded = _select_prepared_views(
+                        loaded,
+                        loader_settings.train_views_per_sample,
+                        base_seed=seed,
+                        epoch=epoch,
+                    )
+                group.append(loaded)
+                image_decode_resize_seconds += loaded.image_decode_resize_seconds
+                decoded_image_bytes += loaded.decoded_image_bytes
+                used_view_count += loaded.used_view_count
+                loaded_mesh_count += 1
             if not group:
                 break
             optimizer.zero_grad(set_to_none=True)
@@ -314,6 +424,7 @@ def train_multi_object(
                     device,
                     cache_on_device,
                     non_blocking=loader_settings.pin_memory,
+                    decode_images=decode_images,
                 )
                 prepared = _with_query_augmentation(
                     prepared,
@@ -372,6 +483,10 @@ def train_multi_object(
         train_loss = float(torch.stack(mesh_loss_tensors).mean().item())
         train_exact_query_loss = _mean_optional_tensors(exact_query_loss_tensors)
         train_perturbed_query_loss = _mean_optional_tensors(perturbed_query_loss_tensors)
+        mean_image_decode_resize_seconds = (
+            image_decode_resize_seconds / loaded_mesh_count if loaded_mesh_count else 0.0
+        )
+        mean_used_view_count = used_view_count / loaded_mesh_count if loaded_mesh_count else 0.0
         _synchronize_device(device)
         if device.type == "cuda":
             gpu_transfer_seconds = _elapsed_cuda_seconds(transfer_events)
@@ -381,6 +496,9 @@ def train_multi_object(
         epoch_data_loading_seconds.append(data_loading_seconds)
         epoch_gpu_transfer_seconds.append(gpu_transfer_seconds)
         epoch_forward_backward_seconds.append(forward_backward_seconds)
+        epoch_image_decode_resize_seconds.append(image_decode_resize_seconds)
+        epoch_mean_used_view_count.append(mean_used_view_count)
+        epoch_decoded_image_bytes.append(decoded_image_bytes)
         should_validate = bool(prepared_validation) and (
             epoch == 1
             or epoch == epochs
@@ -390,6 +508,7 @@ def train_multi_object(
         validation_loss = None
         validation_seconds = 0.0
         if should_validate:
+            _set_loader_epoch(validation_loader, 0)
             _synchronize_device(device)
             validation_start = time.perf_counter()
             validation_loss, validation_epoch_metrics = _evaluate_dataset(
@@ -407,6 +526,7 @@ def train_multi_object(
                 query_epoch=epoch,
                 augment_queries=query_settings.enabled
                 and query_settings.apply_to_validation,
+                views_per_sample=loader_settings.validation_views_per_sample,
             )
             validation_exact_query_loss = _mean_metric(
                 validation_epoch_metrics, "exact_query_loss"
@@ -458,7 +578,13 @@ def train_multi_object(
             "train_seconds": train_seconds,
             "validation_seconds": validation_seconds,
             "data_loading_seconds": data_loading_seconds,
+            "sample_wait_seconds": data_loading_seconds,
+            "image_decode_resize_seconds": image_decode_resize_seconds,
+            "mean_image_decode_resize_seconds_per_mesh": mean_image_decode_resize_seconds,
+            "mean_used_view_count": mean_used_view_count,
+            "decoded_image_bytes": decoded_image_bytes,
             "gpu_transfer_seconds": gpu_transfer_seconds,
+            "pin_or_transfer_seconds": gpu_transfer_seconds,
             "forward_backward_seconds": forward_backward_seconds,
             "total_step_seconds": train_seconds,
             "optimizer_steps_this_epoch": optimizer_steps - steps_at_epoch_start,
@@ -496,10 +622,13 @@ def train_multi_object(
             if profile_training:
                 print(
                     f"timing data={data_loading_seconds:.2f}s "
+                    f"decode={image_decode_resize_seconds:.2f}s "
                     f"transfer={gpu_transfer_seconds:.2f}s "
                     f"forward_backward={forward_backward_seconds:.2f}s "
                     f"steps_total={train_seconds:.2f}s "
-                    f"validation={validation_seconds:.2f}s",
+                    f"validation={validation_seconds:.2f}s "
+                    f"views={mean_used_view_count:.2f} "
+                    f"decoded={decoded_image_bytes / (1024.0 * 1024.0):.2f}MB",
                     flush=True,
                 )
         if output_path is not None and checkpoint_every > 0 and epoch % checkpoint_every == 0:
@@ -534,6 +663,7 @@ def train_multi_object(
     # Reuse persistent training workers for the final metric pass. Metric
     # aggregation is keyed by sample_id, so shuffled evaluation order is safe.
     final_train_loader = train_loader
+    _set_loader_epoch(final_train_loader, 0)
     final_train_loss, train_metrics = _evaluate_dataset(
         model,
         prepared_train,
@@ -549,10 +679,12 @@ def train_multi_object(
         query_seed=seed,
         query_epoch=0,
         augment_queries=query_settings.enabled,
+        views_per_sample=loader_settings.train_views_per_sample,
     )
     final_validation_loss = None
     validation_metrics: dict[str, dict[str, Any]] = {}
     if prepared_validation:
+        _set_loader_epoch(validation_loader, 0)
         final_validation_loss, validation_metrics = _evaluate_dataset(
             model,
             prepared_validation,
@@ -569,6 +701,7 @@ def train_multi_object(
             query_epoch=0,
             augment_queries=query_settings.enabled
             and query_settings.apply_to_validation,
+            views_per_sample=loader_settings.validation_views_per_sample,
         )
     _synchronize_device(device)
     runtime_seconds = float(initial_loading_seconds + time.perf_counter() - start_time)
@@ -581,6 +714,11 @@ def train_multi_object(
     mean_epoch_forward_backward_seconds = float(
         np.mean(epoch_forward_backward_seconds)
     )
+    mean_epoch_image_decode_resize_seconds = float(
+        np.mean(epoch_image_decode_resize_seconds)
+    )
+    mean_train_views_per_sample = float(np.mean(epoch_mean_used_view_count))
+    mean_epoch_decoded_image_bytes = float(np.mean(epoch_decoded_image_bytes))
     mean_optimizer_step_seconds = (
         float(sum(epoch_train_seconds) / optimizer_steps) if optimizer_steps else 0.0
     )
@@ -596,9 +734,12 @@ def train_multi_object(
         print(
             "mean train timing: "
             f"data={mean_epoch_data_loading_seconds:.2f}s "
+            f"decode={mean_epoch_image_decode_resize_seconds:.2f}s "
             f"transfer={mean_epoch_gpu_transfer_seconds:.2f}s "
             f"forward_backward={mean_epoch_forward_backward_seconds:.2f}s "
-            f"per_optimizer_step={mean_optimizer_step_seconds:.2f}s",
+            f"per_optimizer_step={mean_optimizer_step_seconds:.2f}s "
+            f"views={mean_train_views_per_sample:.2f} "
+            f"decoded={mean_epoch_decoded_image_bytes / (1024.0 * 1024.0):.2f}MB",
             flush=True,
         )
         print(f"peak CPU memory: {peak_cpu_memory_mb:.2f} MB", flush=True)
@@ -637,6 +778,9 @@ def train_multi_object(
             "mean_epoch_data_loading_seconds": mean_epoch_data_loading_seconds,
             "mean_epoch_gpu_transfer_seconds": mean_epoch_gpu_transfer_seconds,
             "mean_epoch_forward_backward_seconds": mean_epoch_forward_backward_seconds,
+            "mean_epoch_image_decode_resize_seconds": mean_epoch_image_decode_resize_seconds,
+            "mean_train_views_per_sample": mean_train_views_per_sample,
+            "mean_epoch_decoded_image_bytes": mean_epoch_decoded_image_bytes,
             "mean_optimizer_step_seconds": mean_optimizer_step_seconds,
             "peak_cpu_memory_mb": peak_cpu_memory_mb,
             "peak_gpu_memory_mb": peak_gpu_memory_mb,
@@ -676,6 +820,9 @@ def train_multi_object(
         mean_epoch_gpu_transfer_seconds=mean_epoch_gpu_transfer_seconds,
         mean_epoch_forward_backward_seconds=mean_epoch_forward_backward_seconds,
         mean_optimizer_step_seconds=mean_optimizer_step_seconds,
+        mean_epoch_image_decode_resize_seconds=mean_epoch_image_decode_resize_seconds,
+        mean_train_views_per_sample=mean_train_views_per_sample,
+        mean_epoch_decoded_image_bytes=mean_epoch_decoded_image_bytes,
     )
 
 
@@ -759,7 +906,11 @@ def _build_lr_scheduler(
 
 
 def _prepare_object_static(
-    sample: Mapping[str, Any], config: Mapping[str, Any]
+    sample: Mapping[str, Any],
+    config: Mapping[str, Any],
+    *,
+    keep_image_payload: bool = True,
+    keep_projection: bool = True,
 ) -> _PreparedObject:
     static_sample = (
         dict(sample) if sample.get("_static_prepared") is True else validate_sample(sample)
@@ -792,9 +943,79 @@ def _prepare_object_static(
         clipped_count = int(clipped.sum().item())
         factors = (clip_max_norm / magnitudes.clamp_min(1e-12)).clamp_max(1.0)
         target = target * factors.unsqueeze(-1)
+    raw_target = static_sample["raw_laplacian_target"]
+    face_count = int(static_sample["faces"].shape[0])
     if static_sample.get("prepared_storage_format") == "lazy_image_paths_v1":
         static_sample.pop("images", None)
-    return _PreparedObject(static_sample, target, clipped_count)
+    static_sample = _prune_sample_for_training(
+        static_sample,
+        keep_image_payload=keep_image_payload,
+        keep_projection=keep_projection,
+    )
+    return _PreparedObject(
+        sample=static_sample,
+        training_target=target,
+        clipped_target_vertices=clipped_count,
+        raw_target=raw_target,
+        face_count=face_count,
+        used_view_count=int(static_sample["num_views"]),
+    )
+
+
+def _prune_sample_for_training(
+    sample: Mapping[str, Any],
+    *,
+    keep_image_payload: bool,
+    keep_projection: bool,
+) -> dict[str, Any]:
+    """Keep only tensors consumed by forward, loss, augmentation, or metrics."""
+
+    fields = {
+        "sample_id",
+        "vertices",
+        "vertex_normals",
+        "initial_laplacian",
+        "edge_index",
+        "vertex_degree",
+        "target_confidence",
+        "local_edge_length",
+        "valid_scale_mask",
+        "query_positions",
+        "query_is_exact",
+        "position_normalization_center",
+        "position_normalization_scale",
+    }
+    if keep_projection:
+        fields.update({"intrinsics", "extrinsics", "visibility"})
+    if keep_image_payload:
+        fields.update(
+            {
+                "images",
+                "image_paths",
+                "prepared_image_size",
+                "source_image_size",
+                "prepared_storage_format",
+                "_dataset_root",
+            }
+        )
+    result = {name: sample[name] for name in fields if name in sample}
+    images = sample.get("images")
+    if isinstance(images, torch.Tensor):
+        num_views, _, image_height, image_width = images.shape
+    else:
+        num_views = int(sample["intrinsics"].shape[0])
+        prepared_size = int(sample.get("prepared_image_size", 0))
+        if prepared_size < 1:
+            source_size = sample.get("source_image_size")
+            if not isinstance(source_size, (list, tuple)) or len(source_size) != 2:
+                raise ValueError("Samples without images require prepared or source image size.")
+            image_width, image_height = (int(source_size[0]), int(source_size[1]))
+        else:
+            image_height = image_width = prepared_size
+    result["image_height"] = int(image_height)
+    result["image_width"] = int(image_width)
+    result["num_views"] = int(num_views)
+    return result
 
 
 def _static_sample_at(samples: Sequence[Mapping[str, Any]], index: int) -> Mapping[str, Any]:
@@ -825,14 +1046,15 @@ def _move_prepared_object_to_device(
     if "images" in moved_sample:
         moved_sample["images"] = _normalize_images(moved_sample["images"], config)
     moved_target = prepared.training_target.to(device, non_blocking=non_blocking)
-    for name in ("raw_laplacian_target", "normalized_laplacian_target"):
-        if prepared.training_target is prepared.sample.get(name):
-            moved_target = moved_sample[name]
-            break
     return _PreparedObject(
         sample=moved_sample,
         training_target=moved_target,
         clipped_target_vertices=prepared.clipped_target_vertices,
+        raw_target=prepared.raw_target,
+        face_count=prepared.face_count,
+        image_decode_resize_seconds=prepared.image_decode_resize_seconds,
+        decoded_image_bytes=prepared.decoded_image_bytes,
+        used_view_count=prepared.used_view_count,
     )
 
 
@@ -859,10 +1081,13 @@ def _prepare_item_for_use(
     device: torch.device,
     cache_on_device: bool,
     non_blocking: bool = False,
+    decode_images: bool = True,
 ) -> _PreparedObject:
     prepared = item if isinstance(item, _PreparedObject) else _prepare_object_static(item, config)
-    if "images" not in prepared.sample and prepared.sample.get("image_paths"):
-        prepared = _materialize_prepared_images(prepared, dtype=torch.uint8)
+    if decode_images and "images" not in prepared.sample and prepared.sample.get("image_paths"):
+        prepared = _materialize_prepared_images(
+            prepared, dtype=torch.uint8, profile_loading=False
+        )
     return _prepared_for_use(
         prepared,
         device,
@@ -876,6 +1101,7 @@ def _materialize_prepared_images(
     prepared: _PreparedObject,
     *,
     dtype: torch.dtype,
+    profile_loading: bool = False,
 ) -> _PreparedObject:
     if "images" in prepared.sample or not prepared.sample.get("image_paths"):
         return prepared
@@ -884,6 +1110,7 @@ def _materialize_prepared_images(
         Path(value) if Path(value).is_absolute() else dataset_root / value
         for value in prepared.sample["image_paths"]
     ]
+    decode_start = time.perf_counter() if profile_loading else 0.0
     images, _ = load_and_resize_images(
         image_paths,
         int(prepared.sample["prepared_image_size"]),
@@ -892,9 +1119,76 @@ def _materialize_prepared_images(
     materialized_sample = dict(prepared.sample)
     materialized_sample["images"] = images
     return _PreparedObject(
-        materialized_sample,
-        prepared.training_target,
-        prepared.clipped_target_vertices,
+        sample=materialized_sample,
+        training_target=prepared.training_target,
+        clipped_target_vertices=prepared.clipped_target_vertices,
+        raw_target=prepared.raw_target,
+        face_count=prepared.face_count,
+        image_decode_resize_seconds=(
+            time.perf_counter() - decode_start if profile_loading else 0.0
+        ),
+        decoded_image_bytes=images.numel() * images.element_size(),
+        used_view_count=int(images.shape[0]),
+    )
+
+
+def _select_prepared_views(
+    prepared: _PreparedObject,
+    views_per_sample: int | None,
+    *,
+    base_seed: int,
+    epoch: int,
+) -> _PreparedObject:
+    sample = prepared.sample
+    total_views = int(sample["num_views"])
+    if views_per_sample is None or views_per_sample >= total_views:
+        if prepared.used_view_count == total_views:
+            return prepared
+        return _replace_prepared(prepared, used_view_count=total_views)
+    digest = hashlib.sha256(str(sample["sample_id"]).encode("utf-8")).digest()
+    sample_seed = int.from_bytes(digest[:8], "little", signed=False)
+    generator = torch.Generator().manual_seed(
+        (sample_seed + int(base_seed) + 1_000_003 * int(epoch)) % (2**63 - 1)
+    )
+    indices = torch.randperm(total_views, generator=generator)[:views_per_sample]
+    selected = dict(sample)
+    if "image_paths" in selected:
+        selected["image_paths"] = [selected["image_paths"][int(i)] for i in indices]
+    for name in ("images", "intrinsics", "extrinsics", "visibility"):
+        value = selected.get(name)
+        if isinstance(value, torch.Tensor):
+            selected[name] = value.index_select(0, indices.to(value.device))
+    selected["num_views"] = int(views_per_sample)
+    return _PreparedObject(
+        sample=selected,
+        training_target=prepared.training_target,
+        clipped_target_vertices=prepared.clipped_target_vertices,
+        raw_target=prepared.raw_target,
+        face_count=prepared.face_count,
+        image_decode_resize_seconds=prepared.image_decode_resize_seconds,
+        decoded_image_bytes=prepared.decoded_image_bytes,
+        used_view_count=int(views_per_sample),
+    )
+
+
+def _replace_prepared(
+    prepared: _PreparedObject,
+    *,
+    raw_target: torch.Tensor | None = None,
+    face_count: int | None = None,
+    used_view_count: int | None = None,
+) -> _PreparedObject:
+    return _PreparedObject(
+        sample=prepared.sample,
+        training_target=prepared.training_target,
+        clipped_target_vertices=prepared.clipped_target_vertices,
+        raw_target=prepared.raw_target if raw_target is None else raw_target,
+        face_count=prepared.face_count if face_count is None else face_count,
+        image_decode_resize_seconds=prepared.image_decode_resize_seconds,
+        decoded_image_bytes=prepared.decoded_image_bytes,
+        used_view_count=(
+            prepared.used_view_count if used_view_count is None else used_view_count
+        ),
     )
 
 
@@ -908,9 +1202,12 @@ def _prepared_from_loader_item(item: Any) -> _PreparedObject:
     if not isinstance(sample, Mapping) or not isinstance(training_target, torch.Tensor):
         raise TypeError("Prepared DataLoader items require sample and training_target.")
     return _PreparedObject(
-        dict(sample),
-        training_target,
-        int(item.get("clipped_target_vertices", 0)),
+        sample=dict(sample),
+        training_target=training_target,
+        clipped_target_vertices=int(item.get("clipped_target_vertices", 0)),
+        image_decode_resize_seconds=float(item.get("image_decode_resize_seconds", 0.0)),
+        decoded_image_bytes=int(item.get("decoded_image_bytes", 0)),
+        used_view_count=int(item.get("used_view_count", sample.get("num_views", 0))),
     )
 
 
@@ -920,12 +1217,29 @@ def _build_prepared_loader(
     *,
     shuffle: bool,
     generator: torch.Generator | None = None,
+    decode_images: bool = True,
+    views_per_sample: int | None = None,
+    base_seed: int = 7,
+    profile_loading: bool = False,
 ) -> DataLoader:
-    dataset = _MaterializedPreparedDataset(items)
-    sampler = (
-        RandomSampler(dataset, generator=generator)
-        if shuffle
-        else SequentialSampler(dataset)
+    worker_items = tuple(
+        _PreparedObject(
+            sample=item.sample,
+            training_target=item.training_target,
+            clipped_target_vertices=item.clipped_target_vertices,
+            used_view_count=item.used_view_count,
+        )
+        for item in items
+    )
+    dataset = _MaterializedPreparedDataset(
+        worker_items,
+        decode_images=decode_images,
+        views_per_sample=views_per_sample,
+        base_seed=base_seed,
+        profile_loading=profile_loading,
+    )
+    sampler = _EpochIndexSampler(
+        len(dataset), shuffle=shuffle, generator=generator
     )
     kwargs: dict[str, Any] = {
         "dataset": dataset,
@@ -938,6 +1252,11 @@ def _build_prepared_loader(
     if settings.num_workers > 0:
         kwargs["prefetch_factor"] = settings.prefetch_factor
     return DataLoader(**kwargs)
+
+
+def _set_loader_epoch(loader: DataLoader | None, epoch: int) -> None:
+    if loader is not None and isinstance(loader.sampler, _EpochIndexSampler):
+        loader.sampler.set_epoch(epoch)
 
 
 def _normalize_images(images: torch.Tensor, config: Mapping[str, Any]) -> torch.Tensor:
@@ -961,6 +1280,13 @@ def _data_loader_settings(config: Mapping[str, Any]) -> _DataLoaderSettings:
     prefetch_factor = int(loading.get("prefetch_factor", 2))
     pin_memory = bool(loading.get("pin_memory", False))
     persistent_workers = bool(loading.get("persistent_workers", False))
+    train_views_per_sample = _optional_positive_int(
+        loading.get("train_views_per_sample"), "data_loading.train_views_per_sample"
+    )
+    validation_views_per_sample = _optional_positive_int(
+        loading.get("validation_views_per_sample"),
+        "data_loading.validation_views_per_sample",
+    )
     if num_workers < 0:
         raise ValueError("data_loading.num_workers must be non-negative.")
     if prefetch_factor < 1:
@@ -974,7 +1300,18 @@ def _data_loader_settings(config: Mapping[str, Any]) -> _DataLoaderSettings:
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
+        train_views_per_sample=train_views_per_sample,
+        validation_views_per_sample=validation_views_per_sample,
     )
+
+
+def _optional_positive_int(value: Any, name: str) -> int | None:
+    if value is None:
+        return None
+    result = int(value)
+    if result < 1:
+        raise ValueError(f"{name} must be null or a positive integer.")
+    return result
 
 
 def _early_stopping_settings(
@@ -1053,6 +1390,9 @@ def _loss_kwargs(training: Mapping[str, Any]) -> dict[str, Any]:
         "loss_type": str(training.get("loss", "huber")),
         "huber_delta": float(training.get("huber_delta", 0.01)),
         "charbonnier_epsilon": float(training.get("charbonnier_epsilon", 1e-3)),
+        "target_magnitude_weight_lambda": float(
+            training.get("target_magnitude_weight_lambda", 0.0)
+        ),
     }
 
 
@@ -1085,6 +1425,11 @@ def _with_query_augmentation(
         ),
         training_target=prepared.training_target,
         clipped_target_vertices=prepared.clipped_target_vertices,
+        raw_target=prepared.raw_target,
+        face_count=prepared.face_count,
+        image_decode_resize_seconds=prepared.image_decode_resize_seconds,
+        decoded_image_bytes=prepared.decoded_image_bytes,
+        used_view_count=prepared.used_view_count,
     )
 
 
@@ -1133,22 +1478,45 @@ def _evaluate_dataset(
     query_seed: int = 7,
     query_epoch: int = 0,
     augment_queries: bool = False,
+    views_per_sample: int | None = None,
 ) -> tuple[float, dict[str, dict[str, Any]]]:
     model.eval()
+    decode_images = model.input_mode != "coarse_only" and not model.zero_images
     target_mode, _ = _target_settings(config)
     losses = []
     metrics: dict[str, dict[str, Any]] = {}
     if prediction_dir is not None:
         prediction_dir.mkdir(parents=True, exist_ok=True)
     items = samples if data_loader is None else data_loader
+    source_by_id = {
+        str(item.sample["sample_id"]): item
+        for item in samples
+        if isinstance(item, _PreparedObject)
+    }
     non_blocking = _data_loader_settings(config).pin_memory
     for item in items:
+        cpu_prepared = _prepared_from_loader_item(item)
+        if data_loader is None:
+            cpu_prepared = _select_prepared_views(
+                cpu_prepared,
+                views_per_sample,
+                base_seed=query_seed,
+                epoch=0,
+            )
+        source = source_by_id.get(str(cpu_prepared.sample["sample_id"]))
+        if cpu_prepared.raw_target is None and source is not None:
+            cpu_prepared = _replace_prepared(
+                cpu_prepared,
+                raw_target=source.raw_target,
+                face_count=source.face_count,
+            )
         prepared = _prepare_item_for_use(
-            _prepared_from_loader_item(item),
+            cpu_prepared,
             config,
             device,
             cache_on_device,
             non_blocking=non_blocking,
+            decode_images=decode_images,
         )
         if query_settings is not None:
             prepared = _with_query_augmentation(
@@ -1190,11 +1558,14 @@ def _evaluate_dataset(
             )
         else:
             raw_prediction = prediction
+        if prepared.raw_target is None:
+            raise ValueError("Evaluation requires an explicit raw Laplacian target.")
         raw_metrics = laplacian_prediction_metrics(
             raw_prediction,
-            prepared.sample["raw_laplacian_target"],
+            prepared.raw_target.to(device=raw_prediction.device),
             valid_mask=valid_mask,
         )
+        raw_prediction_cpu = raw_prediction.detach().cpu()
         sample_id = str(prepared.sample["sample_id"])
         if sample_id in metrics:
             raise ValueError(f"Duplicate sample_id {sample_id!r} in one dataset split.")
@@ -1204,9 +1575,12 @@ def _evaluate_dataset(
             "perturbed_query_loss": (
                 None if perturbed_loss is None else float(perturbed_loss.item())
             ),
+            "query_perturbation": prepared.sample.get(
+                "query_perturbation_diagnostics"
+            ),
             "vertex_count": int(prepared.sample["vertices"].shape[0]),
-            "face_count": int(prepared.sample["faces"].shape[0]),
-            "view_count": int(prepared.sample["images"].shape[0]),
+            "face_count": prepared.face_count,
+            "view_count": int(prepared.sample["num_views"]),
             "clipped_target_vertices": prepared.clipped_target_vertices,
             "target_space": target_metrics,
             "recovered_raw_space": raw_metrics,
@@ -1219,7 +1593,7 @@ def _evaluate_dataset(
             )
             np.save(
                 prediction_dir / f"{safe_id}_raw_delta.npy",
-                raw_prediction.detach().cpu().numpy(),
+                raw_prediction_cpu.numpy(),
             )
     if not losses:
         raise ValueError("Cannot evaluate an empty dataset split.")

@@ -9,6 +9,7 @@ from mlr.learned_laplacian.multi_trainer import train_multi_object
 from mlr.learned_laplacian.query_training import (
     QueryAugmentationSettings,
     apply_query_augmentation,
+    query_augmentation_settings,
     validate_gt_query_contract,
 )
 from mlr.learned_laplacian.sample_io import prepare_gt_query_sample_from_prepared
@@ -30,9 +31,9 @@ def _settings(**overrides) -> QueryAugmentationSettings:
     values = {
         "enabled": True,
         "exact_fraction": 0.25,
-        "normal_std_h": 0.1,
-        "tangent_std_h": 0.1,
-        "max_offset_h": 0.25,
+        "normal_std_h": 0.0003,
+        "tangent_std_h": 0.0003,
+        "max_offset_h": 0.001,
         "apply_to_validation": True,
         "zero_initial_laplacian": True,
     }
@@ -50,9 +51,9 @@ def _config() -> dict:
         "query_training": {
             "enabled": True,
             "exact_fraction": 0.25,
-            "normal_std_h": 0.1,
-            "tangent_std_h": 0.1,
-            "max_offset_h": 0.25,
+            "normal_std_h": 0.0003,
+            "tangent_std_h": 0.0003,
+            "max_offset_h": 0.001,
             "apply_to_validation": True,
             "zero_initial_laplacian": True,
         },
@@ -107,35 +108,58 @@ def test_query_training_rejects_unconverted_coarse_sample():
         train_multi_object([tiny_sample()], None, _config(), progress=False)
 
 
+def test_query_perturbation_defaults_enforce_local_one_tenth_percent_bound():
+    settings = query_augmentation_settings({"query_training": {"enabled": True}})
+    assert settings.normal_std_h == 0.0003
+    assert settings.tangent_std_h == 0.0003
+    assert settings.max_offset_h == 0.001
+
+    with pytest.raises(ValueError, match="must not exceed 0.001"):
+        query_augmentation_settings(
+            {"query_training": {"enabled": True, "max_offset_h": 0.0011}}
+        )
+
+
 def test_query_perturbation_is_deterministic_bounded_and_preserves_target():
     sample = _gt_query_sample()
+    raw_target_before = sample["raw_laplacian_target"].clone()
     target_before = sample["normalized_laplacian_target"].clone()
     first = apply_query_augmentation(sample, _settings(), base_seed=9, epoch=3)
     second = apply_query_augmentation(sample, _settings(), base_seed=9, epoch=3)
+    different_seed = apply_query_augmentation(sample, _settings(), base_seed=10, epoch=3)
 
     torch.testing.assert_close(first["query_positions"], second["query_positions"])
+    assert not torch.equal(first["query_positions"], different_seed["query_positions"])
+    torch.testing.assert_close(first["raw_laplacian_target"], raw_target_before)
     torch.testing.assert_close(first["normalized_laplacian_target"], target_before)
+    assert first["query_positions"].shape == sample["vertices"].shape
+    assert first["query_positions"].dtype == sample["vertices"].dtype
+    assert first["query_positions"].device == sample["vertices"].device
     assert int(first["query_is_exact"].sum()) == 1
     offsets = first["query_positions"] - sample["vertices"]
     assert torch.count_nonzero(offsets[first["query_is_exact"]]) == 0
     assert torch.count_nonzero(offsets[~first["query_is_exact"]]) > 0
     assert torch.all(
         torch.linalg.vector_norm(offsets, dim=-1)
-        <= 0.25 * sample["local_edge_length"] + 1e-7
+        <= 0.001 * sample["local_edge_length"] + 1e-7
     )
+    diagnostics = first["query_perturbation_diagnostics"]
+    assert diagnostics["max_offset_norm_over_h"] <= 0.001 + 1e-7
+    assert diagnostics["bound_violations"] == 0
+    assert diagnostics["invalid_or_zero_h_nonzero_offsets"] == 0
 
 
 def test_normal_and_tangent_query_components_follow_vertex_frame():
     sample = _gt_query_sample()
     normal_only = apply_query_augmentation(
         sample,
-        _settings(normal_std_h=0.1, tangent_std_h=0.0, exact_fraction=0.25),
+        _settings(normal_std_h=0.0003, tangent_std_h=0.0, exact_fraction=0.25),
         base_seed=3,
         epoch=1,
     )
     tangent_only = apply_query_augmentation(
         sample,
-        _settings(normal_std_h=0.0, tangent_std_h=0.1, exact_fraction=0.25),
+        _settings(normal_std_h=0.0, tangent_std_h=0.0003, exact_fraction=0.25),
         base_seed=3,
         epoch=1,
     )
@@ -149,6 +173,101 @@ def test_normal_and_tangent_query_components_follow_vertex_frame():
         < 1e-6
     )
     assert torch.abs((tangent_offsets * normals).sum(dim=-1)).max() < 1e-6
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_combined_query_offset_uses_local_limits_and_zeros_isolated_vertices(dtype):
+    vertices = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [8.0, 8.0, 8.0],
+        ],
+        dtype=dtype,
+    )
+    local_h = torch.tensor([1.0, 1.0, 2.0, 2.0, 0.0], dtype=dtype)
+    target = torch.arange(15, dtype=dtype).reshape(5, 3)
+    sample = {
+        "sample_id": "local_scales",
+        "vertices": vertices,
+        "vertex_normals": torch.tensor(
+            [[0.0, 0.0, 1.0]] * 5, dtype=dtype
+        ),
+        "local_edge_length": local_h,
+        "valid_scale_mask": torch.tensor([True, True, True, True, False]),
+        "initial_laplacian": torch.ones_like(vertices),
+        "raw_laplacian_target": target,
+        "normalized_laplacian_target": target.square(),
+    }
+    augmented = apply_query_augmentation(
+        sample,
+        _settings(normal_std_h=1.0, tangent_std_h=1.0),
+        base_seed=17,
+        epoch=4,
+    )
+
+    offsets = augmented["query_positions"] - vertices
+    norms = torch.linalg.vector_norm(offsets, dim=-1)
+    perturbed = ~augmented["query_is_exact"]
+    valid_perturbed = perturbed & sample["valid_scale_mask"]
+    assert augmented["query_positions"].shape == vertices.shape
+    assert augmented["query_positions"].dtype == dtype
+    assert augmented["query_positions"].device == vertices.device
+    assert torch.all(norms <= 0.001 * local_h + 1e-7)
+    torch.testing.assert_close(
+        norms[valid_perturbed] / local_h[valid_perturbed],
+        torch.full_like(norms[valid_perturbed], 0.001),
+        rtol=2e-4,
+        atol=1e-7,
+    )
+    assert torch.count_nonzero(offsets[-1]).item() == 0
+    assert augmented["query_perturbation_diagnostics"]["invalid_or_zero_h_vertices"] == 1
+    assert (
+        augmented["query_perturbation_diagnostics"][
+            "invalid_or_zero_h_nonzero_offsets"
+        ]
+        == 0
+    )
+    torch.testing.assert_close(augmented["raw_laplacian_target"], target)
+    torch.testing.assert_close(
+        augmented["normalized_laplacian_target"], target.square()
+    )
+
+
+def test_float32_rounding_cannot_push_realised_offset_outside_local_bound():
+    vertices = torch.tensor(
+        [
+            [1.0, 1.0, 1.0],
+            [1.0001, 1.0, 1.0],
+            [1.0, 1.0001, 1.0],
+            [1.0001, 1.0001, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    local_h = torch.full((4,), 1e-4, dtype=torch.float32)
+    sample = {
+        "sample_id": "float32_rounding",
+        "vertices": vertices,
+        "vertex_normals": torch.tensor([[0.0, 0.0, 1.0]] * 4),
+        "local_edge_length": local_h,
+        "valid_scale_mask": torch.ones(4, dtype=torch.bool),
+        "initial_laplacian": torch.zeros_like(vertices),
+    }
+
+    augmented = apply_query_augmentation(
+        sample,
+        _settings(normal_std_h=1.0, tangent_std_h=1.0),
+        base_seed=23,
+        epoch=1,
+    )
+    realised_norm = torch.linalg.vector_norm(
+        augmented["query_positions"] - vertices, dim=-1
+    )
+
+    assert torch.all(realised_norm / local_h <= 0.001 + 1e-7)
+    assert augmented["query_perturbation_diagnostics"]["bound_violations"] == 0
 
 
 def test_fourier_position_encoding_has_expected_dimension_and_finite_values():
@@ -210,3 +329,8 @@ def test_query_training_records_exact_and_perturbed_losses(tmp_path):
         assert math.isfinite(record[name])
     assert result.per_object_metrics["validation"]["validation_gt"]["exact_query_loss"] >= 0
     assert result.per_object_metrics["validation"]["validation_gt"]["perturbed_query_loss"] >= 0
+    diagnostics = result.per_object_metrics["validation"]["validation_gt"][
+        "query_perturbation"
+    ]
+    assert diagnostics["max_offset_norm_over_h"] <= 0.001 + 1e-7
+    assert diagnostics["bound_violations"] == 0
