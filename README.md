@@ -1,5 +1,7 @@
 # Multi-View GT Laplacian Learning
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Training guides: [English](docs/MULTI_MESH_TRAINING.md) |
 [简体中文](docs/MULTI_MESH_TRAINING.zh-CN.md)
 
