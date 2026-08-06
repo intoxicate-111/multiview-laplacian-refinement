@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import copy
 import json
-import random
 import re
+import resource
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
+from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
 
-from .dataset import move_sample_to_device, validate_sample
+from .dataset import validate_sample
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
 from .model import LearnedLaplacianModel
+from .sample_io import load_and_resize_images
 from .target_scaling import (
     EDGE_SCALE_DEFINITION,
     EDGE_SCALE_NORMALIZED_LAPLACIAN,
@@ -49,6 +52,15 @@ class MultiObjectTrainingResult:
     final_learning_rate: float = 0.0
     lr_scheduler_type: str = "none"
     lr_reduction_count: int = 0
+    completed_epochs: int = 0
+    stopped_early: bool = False
+    stop_reason: str = "max_epochs"
+    amp_enabled: bool = False
+    peak_cpu_memory_mb: float = 0.0
+    mean_epoch_data_loading_seconds: float = 0.0
+    mean_epoch_gpu_transfer_seconds: float = 0.0
+    mean_epoch_forward_backward_seconds: float = 0.0
+    mean_optimizer_step_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,39 @@ class _PreparedObject:
     sample: dict[str, Any]
     training_target: torch.Tensor
     clipped_target_vertices: int
+
+
+@dataclass(frozen=True)
+class _DataLoaderSettings:
+    num_workers: int
+    pin_memory: bool
+    persistent_workers: bool
+    prefetch_factor: int
+
+
+@dataclass(frozen=True)
+class _EarlyStoppingSettings:
+    enabled: bool
+    patience_validations: int
+    min_delta: float
+
+
+class _MaterializedPreparedDataset(Dataset[dict[str, Any]]):
+    """Materialize only the image tensor requested by a DataLoader worker."""
+
+    def __init__(self, items: Sequence[_PreparedObject]) -> None:
+        self.items = items
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        prepared = _materialize_prepared_images(self.items[index], dtype=torch.uint8)
+        return {
+            "sample": prepared.sample,
+            "training_target": prepared.training_target,
+            "clipped_target_vertices": prepared.clipped_target_vertices,
+        }
 
 
 def train_multi_object(
@@ -85,12 +130,22 @@ def train_multi_object(
     accumulation_meshes = int(multi.get("gradient_accumulation_meshes", 1))
     validation_every = int(multi.get("validation_every_epochs", 1))
     checkpoint_every = int(multi.get("checkpoint_every_epochs", 0))
+    max_optimizer_steps_value = multi.get("max_optimizer_steps")
+    max_optimizer_steps = (
+        None if max_optimizer_steps_value is None else int(max_optimizer_steps_value)
+    )
     cache_on_device = bool(multi.get("cache_prepared_samples_on_device", False))
     profile_training = bool(multi.get("profile_training", False))
+    early_stopping = _early_stopping_settings(multi)
+    loader_settings = _data_loader_settings(config)
+    if early_stopping.enabled and not validation_samples:
+        raise ValueError("Early stopping requires at least one validation sample.")
     if epochs < 1 or accumulation_meshes < 1 or validation_every < 1:
         raise ValueError(
             "epochs, gradient_accumulation_meshes, and validation_every_epochs must be positive."
         )
+    if max_optimizer_steps is not None and max_optimizer_steps < 1:
+        raise ValueError("max_optimizer_steps must be positive when provided.")
     initial_learning_rate = float(training.get("learning_rate", 1e-4))
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -99,6 +154,8 @@ def train_multi_object(
     )
     scheduler = _build_lr_scheduler(optimizer, training)
     lr_scheduler_type = "none" if scheduler is None else "reduce_on_plateau"
+    amp_enabled, amp_dtype = _amp_settings(training, device)
+    scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     gradient_clip = float(training.get("gradient_clip_norm", 0.0))
     loss_kwargs = _loss_kwargs(training)
     output_path = None if output_dir is None else Path(output_dir)
@@ -130,10 +187,12 @@ def train_multi_object(
         cache_start = time.perf_counter()
         try:
             prepared_train = tuple(
-                _move_prepared_object_to_device(item, device) for item in prepared_train
+                _move_prepared_object_to_device(item, device, config=config)
+                for item in prepared_train
             )
             prepared_validation = tuple(
-                _move_prepared_object_to_device(item, device) for item in prepared_validation
+                _move_prepared_object_to_device(item, device, config=config)
+                for item in prepared_validation
             )
             _synchronize_device(device)
         except torch.cuda.OutOfMemoryError as error:
@@ -143,12 +202,37 @@ def train_multi_object(
                 "to keep the static cache on CPU."
             ) from error
         device_cache_seconds = float(time.perf_counter() - cache_start)
+    train_generator = torch.Generator()
+    train_loader = None
+    validation_loader = None
+    if not cache_on_device:
+        train_loader = _build_prepared_loader(
+            prepared_train,
+            loader_settings,
+            shuffle=bool(multi.get("shuffle", True)),
+            generator=train_generator,
+        )
+        if prepared_validation:
+            validation_loader = _build_prepared_loader(
+                prepared_validation,
+                loader_settings,
+                shuffle=False,
+            )
     if progress and profile_training:
         print(f"static preparation: {static_preparation_seconds:.2f}s", flush=True)
         print(f"device cache: {device_cache_seconds:.2f}s", flush=True)
         print(f"prepared train meshes: {len(prepared_train)}", flush=True)
         print(f"prepared validation meshes: {len(prepared_validation)}", flush=True)
         print(f"device: {device}", flush=True)
+        print(
+            "data loader: "
+            f"workers={loader_settings.num_workers} "
+            f"pin_memory={loader_settings.pin_memory} "
+            f"persistent_workers={loader_settings.persistent_workers} "
+            f"prefetch_factor={loader_settings.prefetch_factor}",
+            flush=True,
+        )
+        print(f"AMP: {amp_enabled} ({amp_dtype})", flush=True)
 
     history: list[dict[str, float | int | None]] = []
     best_epoch = 0
@@ -158,28 +242,79 @@ def train_multi_object(
     shuffle = bool(multi.get("shuffle", True))
     epoch_train_seconds: list[float] = []
     epoch_validation_seconds: list[float] = []
+    epoch_data_loading_seconds: list[float] = []
+    epoch_gpu_transfer_seconds: list[float] = []
+    epoch_forward_backward_seconds: list[float] = []
     lr_reduction_count = 0
+    early_stopping_best = float("inf")
+    early_stopping_bad_validations = 0
+    stopped_early = False
+    stop_reason = "max_epochs"
 
     for epoch in range(1, epochs + 1):
         _synchronize_device(device)
         train_start = time.perf_counter()
-        order = list(range(len(prepared_train)))
-        if shuffle:
-            random.Random(seed + epoch).shuffle(order)
+        train_generator.manual_seed(seed + epoch)
+        if train_loader is None:
+            order = torch.randperm(len(prepared_train), generator=train_generator).tolist()
+            if not shuffle:
+                order = list(range(len(prepared_train)))
+            epoch_items: Iterable[Any] = (prepared_train[index] for index in order)
+        else:
+            epoch_items = train_loader
+        item_iterator = iter(epoch_items)
         model.train()
         mesh_loss_tensors: list[torch.Tensor] = []
-        for group_start in range(0, len(order), accumulation_meshes):
-            group = order[group_start : group_start + accumulation_meshes]
+        data_loading_seconds = 0.0
+        gpu_transfer_seconds = 0.0
+        forward_backward_seconds = 0.0
+        steps_at_epoch_start = optimizer_steps
+        transfer_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        forward_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
+        reached_max_steps = False
+        while True:
+            if max_optimizer_steps is not None and optimizer_steps >= max_optimizer_steps:
+                reached_max_steps = True
+                break
+            group: list[_PreparedObject] = []
+            for _ in range(accumulation_meshes):
+                loading_start = time.perf_counter()
+                try:
+                    item = next(item_iterator)
+                except StopIteration:
+                    data_loading_seconds += time.perf_counter() - loading_start
+                    break
+                data_loading_seconds += time.perf_counter() - loading_start
+                group.append(_prepared_from_loader_item(item))
+            if not group:
+                break
             optimizer.zero_grad(set_to_none=True)
-            for sample_index in group:
+            for cpu_prepared in group:
+                transfer_start = time.perf_counter()
+                transfer_event = _start_cuda_timing(device)
                 prepared = _prepare_item_for_use(
-                    prepared_train[sample_index], config, device, cache_on_device
+                    cpu_prepared,
+                    config,
+                    device,
+                    cache_on_device,
+                    non_blocking=loader_settings.pin_memory,
                 )
-                prediction = model(prepared.sample).predicted_laplacian
+                transfer_events.append(_finish_cuda_timing(device, transfer_event))
+                if device.type != "cuda":
+                    gpu_transfer_seconds += time.perf_counter() - transfer_start
+                forward_start = time.perf_counter()
+                forward_event = _start_cuda_timing(device)
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=amp_dtype,
+                    enabled=amp_enabled,
+                ):
+                    prediction = model(prepared.sample).predicted_laplacian
+                prediction_fp32 = prediction.float()
                 loss = weighted_robust_laplacian_loss(
-                    prediction,
-                    prepared.training_target,
-                    prepared.sample["target_confidence"],
+                    prediction_fp32,
+                    prepared.training_target.float(),
+                    prepared.sample["target_confidence"].float(),
                     **loss_kwargs,
                 )
                 if not torch.isfinite(loss):
@@ -187,19 +322,33 @@ def train_multi_object(
                     raise FloatingPointError(
                         f"Training produced a non-finite loss for {sample_id!r} at epoch {epoch}."
                     )
-                (loss / len(group)).backward()
+                scaler.scale(loss / len(group)).backward()
+                forward_events.append(_finish_cuda_timing(device, forward_event))
+                if device.type != "cuda":
+                    forward_backward_seconds += time.perf_counter() - forward_start
                 mesh_loss_tensors.append(loss.detach())
             if gradient_clip > 0:
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             optimizer_steps += 1
 
         train_loss = float(torch.stack(mesh_loss_tensors).mean().item())
         _synchronize_device(device)
+        if device.type == "cuda":
+            gpu_transfer_seconds = _elapsed_cuda_seconds(transfer_events)
+            forward_backward_seconds = _elapsed_cuda_seconds(forward_events)
         train_seconds = float(time.perf_counter() - train_start)
         epoch_train_seconds.append(train_seconds)
+        epoch_data_loading_seconds.append(data_loading_seconds)
+        epoch_gpu_transfer_seconds.append(gpu_transfer_seconds)
+        epoch_forward_backward_seconds.append(forward_backward_seconds)
         should_validate = bool(prepared_validation) and (
-            epoch == 1 or epoch == epochs or epoch % validation_every == 0
+            epoch == 1
+            or epoch == epochs
+            or epoch % validation_every == 0
+            or reached_max_steps
         )
         validation_loss = None
         validation_seconds = 0.0
@@ -213,6 +362,9 @@ def train_multi_object(
                 device,
                 loss_kwargs,
                 cache_on_device=cache_on_device,
+                data_loader=validation_loader,
+                amp_enabled=amp_enabled,
+                amp_dtype=amp_dtype,
             )
             _synchronize_device(device)
             validation_seconds = float(time.perf_counter() - validation_start)
@@ -234,6 +386,15 @@ def train_multi_object(
                     len(prepared_train),
                     len(prepared_validation),
                 )
+        if validation_loss is not None and early_stopping.enabled:
+            if validation_loss < early_stopping_best - early_stopping.min_delta:
+                early_stopping_best = validation_loss
+                early_stopping_bad_validations = 0
+            else:
+                early_stopping_bad_validations += 1
+                if early_stopping_bad_validations >= early_stopping.patience_validations:
+                    stopped_early = True
+                    stop_reason = "early_stopping"
         lr_before_scheduler = float(optimizer.param_groups[0]["lr"])
         if scheduler is not None and validation_loss is not None:
             scheduler.step(validation_loss)
@@ -248,6 +409,11 @@ def train_multi_object(
             "optimizer_steps": optimizer_steps,
             "train_seconds": train_seconds,
             "validation_seconds": validation_seconds,
+            "data_loading_seconds": data_loading_seconds,
+            "gpu_transfer_seconds": gpu_transfer_seconds,
+            "forward_backward_seconds": forward_backward_seconds,
+            "total_step_seconds": train_seconds,
+            "optimizer_steps_this_epoch": optimizer_steps - steps_at_epoch_start,
             "learning_rate": current_lr,
         }
         history.append(record)
@@ -266,7 +432,11 @@ def train_multi_object(
                 )
             if profile_training:
                 print(
-                    f"timing train={train_seconds:.2f}s validation={validation_seconds:.2f}s",
+                    f"timing data={data_loading_seconds:.2f}s "
+                    f"transfer={gpu_transfer_seconds:.2f}s "
+                    f"forward_backward={forward_backward_seconds:.2f}s "
+                    f"steps_total={train_seconds:.2f}s "
+                    f"validation={validation_seconds:.2f}s",
                     flush=True,
                 )
         if output_path is not None and checkpoint_every > 0 and epoch % checkpoint_every == 0:
@@ -281,10 +451,26 @@ def train_multi_object(
                 len(prepared_train),
                 len(prepared_validation),
             )
+        if stopped_early:
+            if progress:
+                print(
+                    "early stopping: "
+                    f"{early_stopping_bad_validations} validations without sufficient improvement",
+                    flush=True,
+                )
+            break
+        if reached_max_steps:
+            stop_reason = "max_optimizer_steps"
+            if progress:
+                print(f"reached max optimizer steps: {optimizer_steps}", flush=True)
+            break
 
     model.load_state_dict(best_state)
     model.eval()
     predictions_path = None if output_path is None else output_path / "predictions"
+    # Reuse persistent training workers for the final metric pass. Metric
+    # aggregation is keyed by sample_id, so shuffled evaluation order is safe.
+    final_train_loader = train_loader
     final_train_loss, train_metrics = _evaluate_dataset(
         model,
         prepared_train,
@@ -293,6 +479,9 @@ def train_multi_object(
         loss_kwargs,
         None if predictions_path is None else predictions_path / "train",
         cache_on_device=cache_on_device,
+        data_loader=final_train_loader,
+        amp_enabled=amp_enabled,
+        amp_dtype=amp_dtype,
     )
     final_validation_loss = None
     validation_metrics: dict[str, dict[str, Any]] = {}
@@ -305,6 +494,9 @@ def train_multi_object(
             loss_kwargs,
             None if predictions_path is None else predictions_path / "validation",
             cache_on_device=cache_on_device,
+            data_loader=validation_loader,
+            amp_enabled=amp_enabled,
+            amp_dtype=amp_dtype,
         )
     _synchronize_device(device)
     runtime_seconds = float(initial_loading_seconds + time.perf_counter() - start_time)
@@ -312,7 +504,16 @@ def train_multi_object(
     mean_validation_seconds = (
         float(np.mean(epoch_validation_seconds)) if epoch_validation_seconds else 0.0
     )
+    mean_epoch_data_loading_seconds = float(np.mean(epoch_data_loading_seconds))
+    mean_epoch_gpu_transfer_seconds = float(np.mean(epoch_gpu_transfer_seconds))
+    mean_epoch_forward_backward_seconds = float(
+        np.mean(epoch_forward_backward_seconds)
+    )
+    mean_optimizer_step_seconds = (
+        float(sum(epoch_train_seconds) / optimizer_steps) if optimizer_steps else 0.0
+    )
     final_learning_rate = float(optimizer.param_groups[0]["lr"])
+    peak_cpu_memory_mb = _peak_cpu_memory_mb()
     peak_gpu_memory_mb = None
     if device.type == "cuda":
         peak_gpu_memory_mb = torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)
@@ -320,6 +521,15 @@ def train_multi_object(
         peak_text = "n/a" if peak_gpu_memory_mb is None else f"{peak_gpu_memory_mb:.2f} MB"
         print(f"mean train epoch time: {mean_epoch_train_seconds:.2f}s", flush=True)
         print(f"mean validation time: {mean_validation_seconds:.2f}s", flush=True)
+        print(
+            "mean train timing: "
+            f"data={mean_epoch_data_loading_seconds:.2f}s "
+            f"transfer={mean_epoch_gpu_transfer_seconds:.2f}s "
+            f"forward_backward={mean_epoch_forward_backward_seconds:.2f}s "
+            f"per_optimizer_step={mean_optimizer_step_seconds:.2f}s",
+            flush=True,
+        )
+        print(f"peak CPU memory: {peak_cpu_memory_mb:.2f} MB", flush=True)
         print(f"peak GPU memory: {peak_text}", flush=True)
         print(f"total runtime: {runtime_seconds:.2f}s", flush=True)
     per_object_metrics = {"train": train_metrics, "validation": validation_metrics}
@@ -348,6 +558,15 @@ def train_multi_object(
             "final_learning_rate": final_learning_rate,
             "lr_scheduler_type": lr_scheduler_type,
             "lr_reduction_count": lr_reduction_count,
+            "completed_epochs": len(history),
+            "stopped_early": stopped_early,
+            "stop_reason": stop_reason,
+            "amp_enabled": amp_enabled,
+            "mean_epoch_data_loading_seconds": mean_epoch_data_loading_seconds,
+            "mean_epoch_gpu_transfer_seconds": mean_epoch_gpu_transfer_seconds,
+            "mean_epoch_forward_backward_seconds": mean_epoch_forward_backward_seconds,
+            "mean_optimizer_step_seconds": mean_optimizer_step_seconds,
+            "peak_cpu_memory_mb": peak_cpu_memory_mb,
             "peak_gpu_memory_mb": peak_gpu_memory_mb,
             "per_object_metrics": per_object_metrics,
         }
@@ -376,6 +595,15 @@ def train_multi_object(
         final_learning_rate=final_learning_rate,
         lr_scheduler_type=lr_scheduler_type,
         lr_reduction_count=lr_reduction_count,
+        completed_epochs=len(history),
+        stopped_early=stopped_early,
+        stop_reason=stop_reason,
+        amp_enabled=amp_enabled,
+        peak_cpu_memory_mb=peak_cpu_memory_mb,
+        mean_epoch_data_loading_seconds=mean_epoch_data_loading_seconds,
+        mean_epoch_gpu_transfer_seconds=mean_epoch_gpu_transfer_seconds,
+        mean_epoch_forward_backward_seconds=mean_epoch_forward_backward_seconds,
+        mean_optimizer_step_seconds=mean_optimizer_step_seconds,
     )
 
 
@@ -495,10 +723,28 @@ def _static_sample_at(samples: Sequence[Mapping[str, Any]], index: int) -> Mappi
 
 
 def _move_prepared_object_to_device(
-    prepared: _PreparedObject, device: torch.device
+    prepared: _PreparedObject,
+    device: torch.device,
+    *,
+    config: Mapping[str, Any],
+    non_blocking: bool = False,
 ) -> _PreparedObject:
-    moved_sample = move_sample_to_device(prepared.sample, device)
-    moved_target = prepared.training_target.to(device)
+    moved_sample: dict[str, Any] = {}
+    for name, value in prepared.sample.items():
+        if not isinstance(value, torch.Tensor):
+            moved_sample[name] = value
+            continue
+        if name == "images" and value.dtype == torch.uint8:
+            moved_sample[name] = value.to(
+                device=device,
+                dtype=torch.float32,
+                non_blocking=non_blocking,
+            ).div_(255.0)
+        else:
+            moved_sample[name] = value.to(device, non_blocking=non_blocking)
+    if "images" in moved_sample:
+        moved_sample["images"] = _normalize_images(moved_sample["images"], config)
+    moved_target = prepared.training_target.to(device, non_blocking=non_blocking)
     for name in ("raw_laplacian_target", "normalized_laplacian_target"):
         if prepared.training_target is prepared.sample.get(name):
             moved_target = moved_sample[name]
@@ -511,11 +757,20 @@ def _move_prepared_object_to_device(
 
 
 def _prepared_for_use(
-    prepared: _PreparedObject, device: torch.device, cache_on_device: bool
+    prepared: _PreparedObject,
+    device: torch.device,
+    cache_on_device: bool,
+    config: Mapping[str, Any],
+    non_blocking: bool,
 ) -> _PreparedObject:
     if cache_on_device:
         return prepared
-    return _move_prepared_object_to_device(prepared, device)
+    return _move_prepared_object_to_device(
+        prepared,
+        device,
+        config=config,
+        non_blocking=non_blocking,
+    )
 
 
 def _prepare_item_for_use(
@@ -523,27 +778,189 @@ def _prepare_item_for_use(
     config: Mapping[str, Any],
     device: torch.device,
     cache_on_device: bool,
+    non_blocking: bool = False,
 ) -> _PreparedObject:
     prepared = item if isinstance(item, _PreparedObject) else _prepare_object_static(item, config)
     if "images" not in prepared.sample and prepared.sample.get("image_paths"):
-        from .sample_io import load_and_resize_images
+        prepared = _materialize_prepared_images(prepared, dtype=torch.uint8)
+    return _prepared_for_use(
+        prepared,
+        device,
+        cache_on_device,
+        config,
+        non_blocking,
+    )
 
-        dataset_root = Path(str(prepared.sample["_dataset_root"]))
-        image_paths = [
-            Path(value) if Path(value).is_absolute() else dataset_root / value
-            for value in prepared.sample["image_paths"]
-        ]
-        images, _ = load_and_resize_images(
-            image_paths, int(prepared.sample["prepared_image_size"])
+
+def _materialize_prepared_images(
+    prepared: _PreparedObject,
+    *,
+    dtype: torch.dtype,
+) -> _PreparedObject:
+    if "images" in prepared.sample or not prepared.sample.get("image_paths"):
+        return prepared
+    dataset_root = Path(str(prepared.sample["_dataset_root"]))
+    image_paths = [
+        Path(value) if Path(value).is_absolute() else dataset_root / value
+        for value in prepared.sample["image_paths"]
+    ]
+    images, _ = load_and_resize_images(
+        image_paths,
+        int(prepared.sample["prepared_image_size"]),
+        dtype=dtype,
+    )
+    materialized_sample = dict(prepared.sample)
+    materialized_sample["images"] = images
+    return _PreparedObject(
+        materialized_sample,
+        prepared.training_target,
+        prepared.clipped_target_vertices,
+    )
+
+
+def _prepared_from_loader_item(item: Any) -> _PreparedObject:
+    if isinstance(item, _PreparedObject):
+        return item
+    if not isinstance(item, Mapping):
+        raise TypeError("Prepared DataLoader items must be mappings.")
+    sample = item.get("sample")
+    training_target = item.get("training_target")
+    if not isinstance(sample, Mapping) or not isinstance(training_target, torch.Tensor):
+        raise TypeError("Prepared DataLoader items require sample and training_target.")
+    return _PreparedObject(
+        dict(sample),
+        training_target,
+        int(item.get("clipped_target_vertices", 0)),
+    )
+
+
+def _build_prepared_loader(
+    items: Sequence[_PreparedObject],
+    settings: _DataLoaderSettings,
+    *,
+    shuffle: bool,
+    generator: torch.Generator | None = None,
+) -> DataLoader:
+    dataset = _MaterializedPreparedDataset(items)
+    sampler = (
+        RandomSampler(dataset, generator=generator)
+        if shuffle
+        else SequentialSampler(dataset)
+    )
+    kwargs: dict[str, Any] = {
+        "dataset": dataset,
+        "batch_size": None,
+        "sampler": sampler,
+        "num_workers": settings.num_workers,
+        "pin_memory": settings.pin_memory,
+        "persistent_workers": settings.persistent_workers,
+    }
+    if settings.num_workers > 0:
+        kwargs["prefetch_factor"] = settings.prefetch_factor
+    return DataLoader(**kwargs)
+
+
+def _normalize_images(images: torch.Tensor, config: Mapping[str, Any]) -> torch.Tensor:
+    if not images.is_floating_point():
+        raise TypeError("Images must be floating point after device transfer.")
+    normalization = config.get("image_encoder", {}).get("normalization", {})
+    mean_values = normalization.get("mean", [0.0, 0.0, 0.0])
+    std_values = normalization.get("std", [1.0, 1.0, 1.0])
+    if len(mean_values) != 3 or len(std_values) != 3:
+        raise ValueError("image normalization mean and std must contain three values.")
+    if any(float(value) <= 0 for value in std_values):
+        raise ValueError("image normalization std values must be positive.")
+    mean = images.new_tensor(mean_values).view(1, 3, 1, 1)
+    std = images.new_tensor(std_values).view(1, 3, 1, 1)
+    return (images - mean) / std
+
+
+def _data_loader_settings(config: Mapping[str, Any]) -> _DataLoaderSettings:
+    loading = config.get("data_loading", {})
+    num_workers = int(loading.get("num_workers", 0))
+    prefetch_factor = int(loading.get("prefetch_factor", 2))
+    pin_memory = bool(loading.get("pin_memory", False))
+    persistent_workers = bool(loading.get("persistent_workers", False))
+    if num_workers < 0:
+        raise ValueError("data_loading.num_workers must be non-negative.")
+    if prefetch_factor < 1:
+        raise ValueError("data_loading.prefetch_factor must be positive.")
+    if persistent_workers and num_workers == 0:
+        raise ValueError(
+            "data_loading.persistent_workers requires data_loading.num_workers > 0."
         )
-        materialized_sample = dict(prepared.sample)
-        materialized_sample["images"] = images
-        prepared = _PreparedObject(
-            materialized_sample,
-            prepared.training_target,
-            prepared.clipped_target_vertices,
+    return _DataLoaderSettings(
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+        prefetch_factor=prefetch_factor,
+    )
+
+
+def _early_stopping_settings(
+    multi_config: Mapping[str, Any],
+) -> _EarlyStoppingSettings:
+    raw = multi_config.get("early_stopping", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("multi_object_training.early_stopping must be an object.")
+    enabled = bool(raw.get("enabled", False))
+    patience = int(raw.get("patience_validations", 10))
+    min_delta = float(raw.get("min_delta", 0.0))
+    if patience < 1:
+        raise ValueError("early_stopping.patience_validations must be positive.")
+    if min_delta < 0:
+        raise ValueError("early_stopping.min_delta must be non-negative.")
+    return _EarlyStoppingSettings(enabled, patience, min_delta)
+
+
+def _amp_settings(
+    training_config: Mapping[str, Any], device: torch.device
+) -> tuple[bool, torch.dtype]:
+    raw = training_config.get("amp", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("training.amp must be an object.")
+    requested = bool(raw.get("enabled", False))
+    dtype_name = str(raw.get("dtype", "float16"))
+    dtypes = {"float16": torch.float16, "bfloat16": torch.bfloat16}
+    if dtype_name not in dtypes:
+        raise ValueError("training.amp.dtype must be 'float16' or 'bfloat16'.")
+    return requested and device.type == "cuda", dtypes[dtype_name]
+
+
+def _start_cuda_timing(device: torch.device) -> torch.cuda.Event | None:
+    if device.type != "cuda":
+        return None
+    event = torch.cuda.Event(enable_timing=True)
+    event.record()
+    return event
+
+
+def _finish_cuda_timing(
+    device: torch.device, start: torch.cuda.Event | None
+) -> tuple[torch.cuda.Event | None, torch.cuda.Event | None]:
+    if device.type != "cuda" or start is None:
+        return None, None
+    end = torch.cuda.Event(enable_timing=True)
+    end.record()
+    return start, end
+
+
+def _elapsed_cuda_seconds(
+    events: Iterable[tuple[torch.cuda.Event | None, torch.cuda.Event | None]],
+) -> float:
+    return float(
+        sum(
+            start.elapsed_time(end)
+            for start, end in events
+            if start is not None and end is not None
         )
-    return _prepared_for_use(prepared, device, cache_on_device)
+        / 1000.0
+    )
+
+
+def _peak_cpu_memory_mb() -> float:
+    peak = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return peak / (1024.0 * 1024.0) if sys.platform == "darwin" else peak / 1024.0
 
 
 def _synchronize_device(device: torch.device) -> None:
@@ -568,6 +985,9 @@ def _evaluate_dataset(
     loss_kwargs: Mapping[str, Any],
     prediction_dir: Path | None = None,
     cache_on_device: bool = True,
+    data_loader: Iterable[Any] | None = None,
+    amp_enabled: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> tuple[float, dict[str, dict[str, Any]]]:
     model.eval()
     target_mode, _ = _target_settings(config)
@@ -575,20 +995,34 @@ def _evaluate_dataset(
     metrics: dict[str, dict[str, Any]] = {}
     if prediction_dir is not None:
         prediction_dir.mkdir(parents=True, exist_ok=True)
-    for item in samples:
-        prepared = _prepare_item_for_use(item, config, device, cache_on_device)
-        prediction = model(prepared.sample).predicted_laplacian
+    items = samples if data_loader is None else data_loader
+    non_blocking = _data_loader_settings(config).pin_memory
+    for item in items:
+        prepared = _prepare_item_for_use(
+            _prepared_from_loader_item(item),
+            config,
+            device,
+            cache_on_device,
+            non_blocking=non_blocking,
+        )
+        with torch.autocast(
+            device_type=device.type,
+            dtype=amp_dtype,
+            enabled=amp_enabled,
+        ):
+            prediction = model(prepared.sample).predicted_laplacian
+        prediction = prediction.float()
         loss = weighted_robust_laplacian_loss(
             prediction,
-            prepared.training_target,
-            prepared.sample["target_confidence"],
+            prepared.training_target.float(),
+            prepared.sample["target_confidence"].float(),
             **loss_kwargs,
         )
         loss_value = float(loss.item())
         losses.append(loss_value)
         valid_mask = prepared.sample["valid_scale_mask"]
         target_metrics = laplacian_prediction_metrics(
-            prediction, prepared.training_target, valid_mask=valid_mask
+            prediction, prepared.training_target.float(), valid_mask=valid_mask
         )
         if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
             raw_prediction = denormalize_laplacian_by_edge_scale(

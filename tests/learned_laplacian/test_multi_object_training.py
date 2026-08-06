@@ -145,12 +145,12 @@ def test_manifest_dataset_loads_each_file_only_once(tmp_path, monkeypatch):
 
     monkeypatch.setattr(multi_dataset_module, "load_prepared_sample", counted_load)
     validate_disjoint_splits(train_dataset, validation_dataset)
-    train_samples = tuple(train_dataset)
-    validation_samples = tuple(validation_dataset)
+    train_sample = train_dataset[0]
+    validation_sample = validation_dataset[0]
 
     assert len(loaded_paths) == 2
-    assert train_samples[0] is train_dataset[0]
-    assert validation_samples[0] is validation_dataset[0]
+    assert train_sample is train_dataset[0]
+    assert validation_sample is validation_dataset[0]
 
 
 def test_manifest_rejects_train_validation_path_leakage(tmp_path):
@@ -316,8 +316,23 @@ def test_validation_schedule_and_timing_metrics(tmp_path):
     assert result.device_cache_seconds >= 0
     assert result.mean_epoch_train_seconds >= 0
     assert result.mean_validation_seconds >= 0
+    assert result.mean_epoch_data_loading_seconds >= 0
+    assert result.mean_epoch_gpu_transfer_seconds >= 0
+    assert result.mean_epoch_forward_backward_seconds >= 0
+    assert result.mean_optimizer_step_seconds >= 0
+    assert result.peak_cpu_memory_mb > 0
     metrics = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["mean_epoch_train_seconds"] == result.mean_epoch_train_seconds
+    assert metrics["peak_cpu_memory_mb"] == result.peak_cpu_memory_mb
+    assert all(
+        key in result.history[0]
+        for key in (
+            "data_loading_seconds",
+            "gpu_transfer_seconds",
+            "forward_backward_seconds",
+            "total_step_seconds",
+        )
+    )
     checkpoint = torch.load(tmp_path / "best.pt", weights_only=False)
     assert set(checkpoint) == {
         "epoch",
@@ -347,6 +362,29 @@ def test_cuda_device_cache_paths(cache_on_device):
 
     assert result.device == "cuda"
     assert math.isfinite(result.final_train_loss)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
+def test_cuda_amp_keeps_training_loss_finite():
+    config = _multi_config()
+    config["device"] = "cuda"
+    config["input_mode"] = "coarse_plus_multiview"
+    config["training"]["amp"] = {"enabled": True, "dtype": "float16"}
+    config["multi_object_training"].update(
+        {"epochs": 1, "cache_prepared_samples_on_device": False}
+    )
+
+    result = train_multi_object(
+        [_triangle_sample("train")],
+        [_triangle_sample("validation")],
+        config,
+        progress=False,
+    )
+
+    assert result.device == "cuda"
+    assert result.amp_enabled
+    assert math.isfinite(result.final_train_loss)
+    assert math.isfinite(result.final_validation_loss)
 
 
 def _use_constant_validation(monkeypatch, loss=1.0):
@@ -562,3 +600,125 @@ def test_scheduler_history_metrics_and_reduction_log(tmp_path, monkeypatch, caps
     assert metrics["lr_scheduler_type"] == "reduce_on_plateau"
     assert metrics["lr_reduction_count"] == 2
     assert result.lr_reduction_count == 2
+
+
+def test_max_optimizer_steps_can_stop_mid_epoch():
+    config = _multi_config()
+    config["multi_object_training"].update(
+        {
+            "epochs": 10,
+            "gradient_accumulation_meshes": 1,
+            "max_optimizer_steps": 3,
+        }
+    )
+
+    result = train_multi_object(
+        [_triangle_sample("train_a"), _triangle_sample("train_b")],
+        [_triangle_sample("validation")],
+        config,
+        progress=False,
+    )
+
+    assert result.optimizer_steps == 3
+    assert result.completed_epochs == 2
+    assert result.stop_reason == "max_optimizer_steps"
+    assert result.history[-1]["optimizer_steps_this_epoch"] == 1
+
+
+def test_early_stopping_counts_validation_events(monkeypatch):
+    _use_constant_validation(monkeypatch, loss=1.0)
+    config = _multi_config()
+    config["multi_object_training"].update(
+        {
+            "epochs": 10,
+            "validation_every_epochs": 1,
+            "early_stopping": {
+                "enabled": True,
+                "patience_validations": 2,
+                "min_delta": 0.0,
+            },
+        }
+    )
+
+    result = train_multi_object(
+        [_triangle_sample("train")],
+        [_triangle_sample("validation")],
+        config,
+        progress=False,
+    )
+
+    assert result.completed_epochs == 3
+    assert result.stopped_early
+    assert result.stop_reason == "early_stopping"
+
+
+def test_manifest_training_uses_static_lazy_load_and_uint8_images(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "dataset"
+    prepared_dir = root / "prepared"
+    image_dir = root / "images"
+    prepared_dir.mkdir(parents=True)
+    image_dir.mkdir()
+    image_path = image_dir / "view.png"
+    from PIL import Image
+
+    Image.fromarray(np.full((16, 16, 3), 127, dtype=np.uint8)).save(image_path)
+
+    def write_lazy_sample(sample_id, split):
+        sample = _triangle_sample(sample_id)
+        sample.pop("images")
+        sample["image_paths"] = ["images/view.png"]
+        sample["source_image_size"] = [16, 16]
+        sample["prepared_image_size"] = 16
+        sample["prepared_storage_format"] = "lazy_image_paths_v1"
+        path = prepared_dir / f"{sample_id}.pt"
+        save_prepared_sample(sample, path)
+        return {"sample_id": sample_id, "path": f"prepared/{path.name}", "split": split}
+
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "samples": [
+                    write_lazy_sample("train", "train"),
+                    write_lazy_sample("validation", "validation"),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    train_dataset = PreparedMeshDataset.from_manifest(manifest_path, "train")
+    validation_dataset = PreparedMeshDataset.from_manifest(manifest_path, "validation")
+    seen_image_dtypes = []
+    original_move = multi_trainer._move_prepared_object_to_device
+
+    def checked_move(prepared, *args, **kwargs):
+        seen_image_dtypes.append(prepared.sample["images"].dtype)
+        return original_move(prepared, *args, **kwargs)
+
+    def forbidden_eager_getitem(self, index):
+        raise AssertionError("PreparedMeshDataset.__getitem__ eagerly materialized images")
+
+    monkeypatch.setattr(multi_trainer, "_move_prepared_object_to_device", checked_move)
+    monkeypatch.setattr(PreparedMeshDataset, "__getitem__", forbidden_eager_getitem)
+    config = _multi_config()
+    config["data_loading"] = {
+        "num_workers": 1,
+        "pin_memory": True,
+        "persistent_workers": True,
+        "prefetch_factor": 2,
+    }
+    config["multi_object_training"]["epochs"] = 1
+    config["multi_object_training"]["cache_prepared_samples_on_device"] = False
+
+    result = train_multi_object(
+        train_dataset,
+        validation_dataset,
+        config,
+        progress=False,
+    )
+
+    assert math.isfinite(result.final_train_loss)
+    assert seen_image_dtypes
+    assert set(seen_image_dtypes) == {torch.uint8}

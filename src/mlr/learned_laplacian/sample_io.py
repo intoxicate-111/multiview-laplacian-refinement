@@ -226,8 +226,13 @@ def prepare_same_topology_sample(
 
 
 def load_and_resize_images(
-    paths: list[Path], image_size: int | None
+    paths: list[Path],
+    image_size: int | None,
+    *,
+    dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, tuple[float, float]]:
+    if dtype not in (torch.float32, torch.uint8):
+        raise ValueError("image dtype must be torch.float32 or torch.uint8.")
     arrays = []
     original_size = None
     target_size = None
@@ -241,10 +246,14 @@ def load_and_resize_images(
             if image_size < 1:
                 raise ValueError("image_size must be positive.")
             target_size = (image_size, image_size)
-            image = image.resize(target_size, Image.Resampling.BILINEAR)
+            if image.size != target_size:
+                image = image.resize(target_size, Image.Resampling.BILINEAR)
         else:
             target_size = image.size
-        array = np.asarray(image, dtype=np.float32) / 255.0
+        if dtype == torch.uint8:
+            array = np.asarray(image, dtype=np.uint8)
+        else:
+            array = np.asarray(image, dtype=np.float32) / 255.0
         arrays.append(array.transpose(2, 0, 1))
     if not arrays or original_size is None or target_size is None:
         raise ValueError("Dataset must contain at least one image.")

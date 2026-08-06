@@ -83,6 +83,24 @@ def test_lazy_image_paths_save_without_images_and_load_compatibly(tmp_path):
     assert torch.all((loaded["images"] >= 0) & (loaded["images"] <= 1))
 
 
+def test_lazy_image_loader_can_preserve_uint8_until_device_transfer(tmp_path):
+    from mlr.learned_laplacian.sample_io import load_and_resize_images
+
+    image_path = tmp_path / "view.png"
+    pixels = np.full((8, 8, 3), 127, dtype=np.uint8)
+    Image.fromarray(pixels).save(image_path)
+
+    images, _ = load_and_resize_images(
+        [image_path],
+        8,
+        dtype=torch.uint8,
+    )
+
+    assert images.dtype == torch.uint8
+    assert images.shape == (1, 3, 8, 8)
+    assert torch.all(images == 127)
+
+
 def test_lazy_manifest_paths_resolve_from_manifest_root_across_working_directories(tmp_path):
     root = tmp_path / "dataset"
     prepared_dir = root / "artifacts" / "prepared"
