@@ -1,5 +1,8 @@
 # Multi-View Laplacian Refinement
 
+Multi-mesh training guides: [English](docs/MULTI_MESH_TRAINING.md) |
+[简体中文](docs/MULTI_MESH_TRAINING.zh-CN.md)
+
 This repository is a staged experiment scaffold for multi-view mesh reconstruction/refinement.
 The goal is not to train a reconstruction network from scratch, but to:
 
@@ -658,10 +661,20 @@ different sampling resolutions or subdivision levels.
 
 The multi-mesh path trains one shared CNN/GNN over prepared samples with
 different vertex counts, face counts, graph connectivity, view counts, and
-image sizes. Meshes are loaded and statically prepared once, then forwarded one at a time; gradients
-are divided by the number of meshes in each accumulation group before the
-optimizer step. This gives every mesh equal weight regardless of its vertex
-count and avoids padding large ragged graphs.
+image sizes. Static mesh tensors and graph metadata are prepared once, while
+lazy image-path samples are decoded as `uint8` only when requested by a
+`DataLoader` worker. Images are pinned, transferred to CUDA non-blockingly,
+converted to FP32, scaled to `[0,1]`, and normalised on the GPU. Meshes are
+forwarded one at a time; gradients are divided by the number of meshes in each
+accumulation group before the optimizer step. This gives every mesh equal
+weight regardless of its vertex count and avoids padding large ragged graphs.
+
+The CUDA path supports AMP for the CNN and graph-network forward pass. Target
+normalisation, Laplacian/geometry losses, and reported metrics remain FP32.
+Training can stop at the first of maximum epochs, maximum optimizer steps, or
+validation-based early stopping. Per-epoch records include DataLoader wait,
+GPU transfer, forward/backward, total step, validation, and CPU/GPU peak-memory
+statistics.
 
 Create a JSON manifest whose paths are relative to the manifest file unless
 absolute paths are used:
@@ -704,6 +717,36 @@ python scripts/train_multi_mesh_laplacian.py \
   --device cuda
 ```
 
+For the prepared 40/5/5, 14-view, 960-pixel dataset used by the current local
+experiment, the checked production launcher activates the `test` Conda
+environment, verifies CUDA, validates the manifest split, refuses to overwrite
+a non-empty run directory, and records the console log:
+
+```bash
+bash scripts/train_thingi10k50_960_full.sh
+```
+
+It uses
+`configs/learned_laplacian/train_multi_mesh_edge_normalized_50_960.json` and
+writes to `runs/learned_laplacian/thingi10k50_960_full/`. The profile enables
+four persistent workers, pinned memory, prefetch factor two, CUDA FP16 AMP,
+gradient accumulation over four meshes, validation every five epochs,
+validation-based early stopping, and a hard limit of 50,000 optimizer steps.
+Use `--check` to validate files, JSON, and CUDA without starting training:
+
+```bash
+bash scripts/train_thingi10k50_960_full.sh --check
+```
+
+The corresponding one-epoch smoke profiles are
+`train_multi_mesh_edge_normalized_960_epoch1.json` and
+`train_multi_mesh_edge_normalized_1920_epoch1.json`. The 1,000-sample profile
+`train_multi_mesh_edge_normalized_1000_1920.json` requires exactly 800 train,
+100 validation, and 100 test manifest records, caps training at 250 epochs and
+50,000 optimizer steps, and enables the same early-stopping/data-loading/AMP
+path. Image resolution is read from each prepared sample; configuration names
+document the intended dataset profile.
+
 The example configuration uses four meshes per gradient accumulation group.
 `validation_every_epochs` controls validation frequency;
 only validation epochs can replace the best checkpoint when a validation split
@@ -719,11 +762,21 @@ failures on a small mesh cannot be hidden by averaging with a large mesh.
 
 This is gradient accumulation, not simultaneous packed-graph batching: it
 trades some throughput for simple, memory-bounded support of ragged meshes.
+For lazy samples, decoded images are not retained across the whole dataset or
+between epochs. With four workers and prefetch factor two, CPU/shared-memory
+use includes several prefetched `uint8` samples; choose worker count according
+to image resolution and `/dev/shm` capacity. `peak_cpu_memory_mb` currently
+reports the main process rather than a strict sum across all workers.
 Prepared samples are still expected to use consistent coordinate conventions,
 and scale normalisation does not remove global-scale dependence. A meaningful
 first dataset should contain multiple deterministic corruptions and multiple
 Bunny sampling resolutions, with graph resolutions represented in both train
 and held-out validation splits.
+
+See the dedicated [English training guide](docs/MULTI_MESH_TRAINING.md) or
+[Chinese training guide](docs/MULTI_MESH_TRAINING.zh-CN.md) for configuration,
+monitoring, measured 960/1920 performance, stopping behaviour, and operational
+caveats.
 
 ## Saved Prediction Visualization
 
