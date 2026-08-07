@@ -1,5 +1,10 @@
 # 多视图 GT Laplacian 学习
 
+正式的 Sofa50 方法统一定义在[Canonical Sofa50 learned-Laplacian
+pipeline](docs/CANONICAL_SOFA50_PIPELINE.md) 中。模型预测绝对 GT `h^2` 归一化微分
+目标，并且在可见性/置信度感知恢复前，只进行一次基于当前 expanded graph 的反归一化。
+仓库中的旧 residual、displacement、oracle 和 5,000-epoch 内容仅作为历史实验记录保留。
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 训练指南：[English](docs/MULTI_MESH_TRAINING.md) |
@@ -137,29 +142,30 @@ coordinate frame，不能依赖隐藏的 GT mesh。
 
 不要把 expanded inference manifest 传给训练循环。
 
-## 完整训练
+## Canonical Sofa50 训练
 
 安装 package 和训练依赖后运行：
 
 ```bash
 pip install -e ".[train]"
-bash scripts/train_sofa50_v8_960_5000.sh
+bash scripts/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.sh
 ```
 
 启动脚本使用：
 
 ```text
-configs/learned_laplacian/train_gt_query_sofa50_v8_960_5000.json
+configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json
 ```
 
 该配置使用 CUDA AMP、4 个 lazy DataLoader workers、pinned memory、non-blocking
 transfer、跨 4 个 meshes 的 gradient accumulation、每 5 epochs validation，以及
-周期 checkpoint。训练上限为 5,000 epochs 和 50,000 optimizer steps。
+周期 checkpoint。受控实验严格训练 2,000 epochs、20,000 optimizer steps，并使用
+最小置信度预测头。
 
 当前完整输出目录为：
 
 ```text
-runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full
+runs/learned_laplacian/sofa50_50mesh_2000epoch_absolute_h2_confidence
 ```
 
 ## 什么才算有效证据

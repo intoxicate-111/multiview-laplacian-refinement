@@ -31,6 +31,9 @@ def reconstruct_and_evaluate(
     edge_scale_epsilon: float = 1e-12,
     laplacian_weight: torch.Tensor | np.ndarray | None = None,
     unseen_anchor_weight: float = 0.0,
+    evaluate_laplacian_prediction: bool = True,
+    evaluate_initial_geometry: bool = True,
+    solver_confidence: torch.Tensor | np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Run the existing non-differentiable solver for prediction and oracle evaluation."""
 
@@ -39,7 +42,11 @@ def reconstruct_and_evaluate(
     vertices = _numpy(sample["vertices"])
     faces = _numpy(sample["faces"]).astype(np.int64)
     target = _numpy(sample.get("raw_laplacian_target", sample["laplacian_target"]))
-    confidence = _numpy(sample["target_confidence"])
+    confidence = _numpy(
+        sample["target_confidence"] if solver_confidence is None else solver_confidence
+    )
+    if confidence.shape != (vertices.shape[0],):
+        raise ValueError("solver_confidence must have shape [N].")
     prediction = _numpy(predicted_laplacian)
     recovery_weight = (
         np.ones(vertices.shape[0], dtype=np.float64)
@@ -64,14 +71,16 @@ def reconstruct_and_evaluate(
         vertices_t = torch.as_tensor(vertices)
         edge_index = faces_to_edge_index(torch.as_tensor(faces, dtype=torch.long))
         local_edge_length_t = mean_incident_edge_length(vertices_t, edge_index).cpu()
-    normalized_target_t = normalize_laplacian_by_edge_scale(
-        torch.as_tensor(target),
-        local_edge_length_t,
-        eps=edge_scale_epsilon,
-        valid_scale_mask=torch.as_tensor(
-            sample.get("valid_scale_mask", local_edge_length_t > 0), dtype=torch.bool
-        ),
-    )
+    normalized_target_t = None
+    if evaluate_laplacian_prediction:
+        normalized_target_t = normalize_laplacian_by_edge_scale(
+            torch.as_tensor(target),
+            local_edge_length_t,
+            eps=edge_scale_epsilon,
+            valid_scale_mask=torch.as_tensor(
+                sample.get("valid_scale_mask", local_edge_length_t > 0), dtype=torch.bool
+            ),
+        )
     if normalized_prediction is None:
         normalized_prediction_t = normalize_laplacian_by_edge_scale(
             torch.as_tensor(prediction),
@@ -83,7 +92,7 @@ def reconstruct_and_evaluate(
         )
     else:
         normalized_prediction_t = torch.as_tensor(normalized_prediction).detach().cpu()
-    if tuple(normalized_prediction_t.shape) != tuple(normalized_target_t.shape):
+    if tuple(normalized_prediction_t.shape) != tuple(vertices.shape):
         raise ValueError("normalized_prediction must have shape [N, 3].")
 
     coarse = Mesh(vertices.copy(), faces.copy()).ensure_normals()
@@ -115,17 +124,28 @@ def reconstruct_and_evaluate(
             coarse, target, confidence, refinement, dense_vertex_limit
         )
 
-    np.save(output_dir / "delta_target.npy", target)
-    np.save(output_dir / "delta_pred.npy", prediction)
-    np.save(output_dir / "delta_hat_target.npy", normalized_target_t.numpy())
-    np.save(output_dir / "delta_hat_pred.npy", normalized_prediction_t.numpy())
-    np.save(output_dir / "local_edge_length.npy", local_edge_length_t.numpy())
-    np.save(output_dir / "local_edge_scale.npy", local_edge_length_t.square().numpy())
-    np.save(output_dir / "laplacian_error.npy", np.linalg.norm(prediction - target, axis=1))
+    np.save(output_dir / "delta_pred_raw.npy", prediction)
     np.save(
-        output_dir / "normalized_laplacian_error.npy",
-        torch.linalg.vector_norm(normalized_prediction_t - normalized_target_t, dim=-1).numpy(),
+        output_dir / "delta_hat_prediction.npy", normalized_prediction_t.numpy()
     )
+    np.save(output_dir / "h_current.npy", local_edge_length_t.numpy())
+    np.save(output_dir / "h_current_squared.npy", local_edge_length_t.square().numpy())
+    if bool(reconstruction_config.get("write_legacy_prediction_names", True)):
+        np.save(output_dir / "delta_pred.npy", prediction)
+        np.save(output_dir / "delta_hat_pred.npy", normalized_prediction_t.numpy())
+        np.save(output_dir / "local_edge_length.npy", local_edge_length_t.numpy())
+        np.save(output_dir / "local_edge_scale.npy", local_edge_length_t.square().numpy())
+    if evaluate_laplacian_prediction:
+        assert normalized_target_t is not None
+        np.save(output_dir / "delta_target.npy", target)
+        np.save(output_dir / "delta_hat_target.npy", normalized_target_t.numpy())
+        np.save(output_dir / "laplacian_error.npy", np.linalg.norm(prediction - target, axis=1))
+        np.save(
+            output_dir / "normalized_laplacian_error.npy",
+            torch.linalg.vector_norm(
+                normalized_prediction_t - normalized_target_t, dim=-1
+            ).numpy(),
+        )
     save_mesh(coarse, output_dir / "coarse.obj")
     save_mesh(predicted_result.mesh, output_dir / "predicted_refined.obj")
     if oracle_result is not None:
@@ -134,12 +154,20 @@ def reconstruct_and_evaluate(
     valid_scale_mask_t = torch.as_tensor(
         sample.get("valid_scale_mask", local_edge_length_t > 0), dtype=torch.bool
     )
-    raw_prediction_metrics = laplacian_prediction_metrics(
-        torch.as_tensor(prediction), torch.as_tensor(target), valid_mask=valid_scale_mask_t
-    )
-    normalized_prediction_metrics = laplacian_prediction_metrics(
-        normalized_prediction_t, normalized_target_t, valid_mask=valid_scale_mask_t
-    )
+    raw_prediction_metrics = None
+    normalized_prediction_metrics = None
+    if evaluate_laplacian_prediction:
+        assert normalized_target_t is not None
+        raw_prediction_metrics = laplacian_prediction_metrics(
+            torch.as_tensor(prediction),
+            torch.as_tensor(target),
+            valid_mask=valid_scale_mask_t,
+        )
+        normalized_prediction_metrics = laplacian_prediction_metrics(
+            normalized_prediction_t,
+            normalized_target_t,
+            valid_mask=valid_scale_mask_t,
+        )
     geometry = {
         "coarse": _mesh_quality_metrics(coarse, coarse),
         "predicted": _mesh_quality_metrics(predicted_result.mesh, coarse),
@@ -149,7 +177,9 @@ def reconstruct_and_evaluate(
     target_positions = sample.get("target_positions")
     if target_positions is not None:
         target_positions_np = _numpy(target_positions)
-        evaluated_meshes = [("coarse", coarse), ("predicted", predicted_result.mesh)]
+        evaluated_meshes = [("predicted", predicted_result.mesh)]
+        if evaluate_initial_geometry:
+            evaluated_meshes.insert(0, ("coarse", coarse))
         if oracle_result is not None:
             evaluated_meshes.append(("oracle", oracle_result.mesh))
         for name, mesh in evaluated_meshes:
@@ -168,7 +198,9 @@ def reconstruct_and_evaluate(
         ).ensure_normals()
         chamfer_samples = int(reconstruction_config.get("chamfer_samples", 1000))
         metric_seed = int(reconstruction_config.get("metric_seed", 7))
-        evaluated_meshes = [("coarse", coarse), ("predicted", predicted_result.mesh)]
+        evaluated_meshes = [("predicted", predicted_result.mesh)]
+        if evaluate_initial_geometry:
+            evaluated_meshes.insert(0, ("coarse", coarse))
         if oracle_result is not None:
             evaluated_meshes.append(("oracle", oracle_result.mesh))
         for name, mesh in evaluated_meshes:
@@ -225,6 +257,9 @@ def reconstruct_and_evaluate(
                 np.count_nonzero(recovery_weight <= 0)
             ),
             "unseen_anchor_weight": float(unseen_anchor_weight),
+            "laplacian_prediction_evaluated": bool(evaluate_laplacian_prediction),
+            "initial_geometry_evaluated": bool(evaluate_initial_geometry),
+            "predicted_final_terms": dict(predicted_result.history[-1]),
         },
     }
 

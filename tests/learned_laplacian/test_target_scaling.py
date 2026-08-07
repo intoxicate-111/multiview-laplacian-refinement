@@ -1,14 +1,19 @@
 import math
 
+import pytest
 import torch
 
 from mlr.learned_laplacian.graph_layers import faces_to_edge_index
 from mlr.learned_laplacian.target_scaling import (
+    EDGE_SCALE_NORMALIZED_LAPLACIAN,
+    RAW_LAPLACIAN,
     denormalize_laplacian_by_edge_scale,
     graph_structure_statistics,
     incident_edge_length_and_valid_mask,
     mean_incident_edge_length,
     normalize_laplacian_by_edge_scale,
+    prediction_to_raw_laplacian,
+    require_matching_laplacian_representations,
 )
 from mlr.laplacian import compute_laplacian_coordinates
 
@@ -55,12 +60,43 @@ def test_invalid_scale_is_zeroed_instead_of_divided_by_epsilon():
     assert torch.isfinite(normalized).all()
 
 
-def test_normalize_then_denormalize_round_trips_when_epsilon_is_negligible():
-    delta = torch.tensor([[0.2, -0.1, 0.3], [-0.5, 0.4, 0.1]])
-    h = torch.tensor([0.5, 2.0])
-    normalized = normalize_laplacian_by_edge_scale(delta, h, eps=1e-12)
-    recovered = denormalize_laplacian_by_edge_scale(normalized, h)
-    torch.testing.assert_close(recovered, delta, rtol=1e-5, atol=1e-7)
+def test_normalize_then_denormalize_round_trips_with_exact_epsilon_convention():
+    delta = torch.tensor([[0.2, -0.1, 0.3], [-0.5, 0.4, 0.1]], dtype=torch.float64)
+    h = torch.tensor([0.5, 2.0], dtype=torch.float64)
+    epsilon = 1e-4
+    normalized = normalize_laplacian_by_edge_scale(delta, h, eps=epsilon)
+    recovered = denormalize_laplacian_by_edge_scale(normalized, h, eps=epsilon)
+    torch.testing.assert_close(recovered, delta, rtol=1e-14, atol=1e-14)
+
+
+def test_prediction_conversion_is_applied_exactly_once_for_normalized_output():
+    prediction = torch.tensor([[2.0, -1.0, 0.5]], dtype=torch.float64)
+    h = torch.tensor([0.25], dtype=torch.float64)
+    epsilon = 1e-3
+    raw = prediction_to_raw_laplacian(
+        prediction,
+        h,
+        input_representation=EDGE_SCALE_NORMALIZED_LAPLACIAN,
+        eps=epsilon,
+    )
+    torch.testing.assert_close(raw, prediction * (h.square() + epsilon).unsqueeze(-1))
+
+
+def test_raw_prediction_is_not_multiplied_by_h2():
+    prediction = torch.tensor([[2.0, -1.0, 0.5]])
+    h = torch.tensor([0.25])
+    raw = prediction_to_raw_laplacian(
+        prediction, h, input_representation=RAW_LAPLACIAN
+    )
+    assert raw is prediction
+
+
+def test_representation_mismatch_is_rejected_before_metrics():
+    require_matching_laplacian_representations(RAW_LAPLACIAN, RAW_LAPLACIAN)
+    with pytest.raises(ValueError, match="representation mismatch"):
+        require_matching_laplacian_representations(
+            EDGE_SCALE_NORMALIZED_LAPLACIAN, RAW_LAPLACIAN
+        )
 
 
 def test_global_scaling_laws_are_h_a_h2_a2_delta_a_and_delta_hat_inverse_a():

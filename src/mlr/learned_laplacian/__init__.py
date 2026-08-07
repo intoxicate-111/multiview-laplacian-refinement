@@ -3,7 +3,16 @@
 from .aggregation import masked_mean_aggregate
 from .dataset import load_prepared_sample, save_prepared_sample, validate_sample
 from .graph_layers import LaplacianPredictor, faces_to_edge_index
-from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
+from .canonical_pipeline import (
+    CanonicalRecoveryInputs,
+    canonical_current_graph_recovery_inputs,
+)
+from .losses import (
+    confidence_calibration_metrics,
+    confidence_reliability_loss,
+    laplacian_prediction_metrics,
+    weighted_robust_laplacian_loss,
+)
 from .model import FourierPositionEncoding, LearnedLaplacianModel, LearnedLaplacianOutput
 from .multi_dataset import (
     PreparedMeshDataset,
@@ -19,6 +28,7 @@ from .renderer_visibility import (
 )
 from .visibility_recovery import (
     HardVisibilityRecoveryMask,
+    confidence_aware_recovery_weight,
     hard_any_view_recovery_mask,
     visibility_coverage_diagnostics,
 )
@@ -47,6 +57,8 @@ from .target_scaling import (
     incident_edge_length_and_valid_mask,
     mean_incident_edge_length,
     normalize_laplacian_by_edge_scale,
+    prediction_to_raw_laplacian,
+    require_matching_laplacian_representations,
 )
 
 __all__ = [
@@ -60,6 +72,7 @@ __all__ = [
     "ProjectionResult",
     "RendererVisibilityResult",
     "HardVisibilityRecoveryMask",
+    "CanonicalRecoveryInputs",
     "PredictionRecord",
     "RunMetadata",
     "TrainingResult",
@@ -82,11 +95,17 @@ __all__ = [
     "compute_renderer_visibility",
     "normalize_laplacian_by_edge_scale",
     "denormalize_laplacian_by_edge_scale",
+    "prediction_to_raw_laplacian",
+    "require_matching_laplacian_representations",
     "graph_structure_statistics",
     "incident_edge_length_and_valid_mask",
     "sample_vertex_features",
     "vertex_visibility_from_face_id_buffer",
     "hard_any_view_recovery_mask",
+    "confidence_aware_recovery_weight",
+    "canonical_current_graph_recovery_inputs",
+    "confidence_reliability_loss",
+    "confidence_calibration_metrics",
     "visibility_coverage_diagnostics",
     "save_prepared_sample",
     "load_checkpoint",

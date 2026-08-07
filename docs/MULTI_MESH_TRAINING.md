@@ -101,32 +101,32 @@ Use this manifest only for downstream inference evaluation:
 The expanded manifest's schema-required target is not GT supervision. Passing
 that manifest to the training loop would violate the project objective.
 
-## Full launch
+## Canonical Sofa50 launch
 
 The production launcher is:
 
 ```bash
-bash scripts/train_sofa50_v8_960_5000.sh
+bash scripts/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.sh
 ```
 
 It uses:
 
 ```text
-configs/learned_laplacian/train_gt_query_sofa50_v8_960_5000.json
+configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json
 ```
 
 The full run writes to:
 
 ```text
-runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full
+runs/learned_laplacian/sofa50_50mesh_2000epoch_absolute_h2_confidence
 ```
 
 The current long-run policy is:
 
 | Setting | Value |
 |---|---:|
-| Maximum epochs | 5,000 |
-| Maximum optimizer steps | 50,000 |
+| Maximum epochs | 2,000 |
+| Maximum optimizer steps | 20,000 |
 | Gradient accumulation | 4 meshes |
 | Optimizer steps per full epoch | 10 |
 | Validation interval | 5 epochs |
@@ -236,7 +236,7 @@ The run directory contains:
 Follow the current run with:
 
 ```bash
-tail -f runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full/training.log
+tail -f runs/learned_laplacian/sofa50_50mesh_2000epoch_absolute_h2_confidence/training.log
 ```
 
 The trainer reports data wait, image decode, GPU transfer,

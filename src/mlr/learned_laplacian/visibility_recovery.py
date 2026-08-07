@@ -16,6 +16,31 @@ class HardVisibilityRecoveryMask:
     num_views: int
 
 
+def confidence_aware_recovery_weight(
+    visibility: torch.Tensor,
+    confidence_prediction: torch.Tensor,
+    *,
+    num_vertices: int,
+) -> torch.Tensor:
+    """Return the canonical recovery weight ``visible * confidence``.
+
+    Renderer visibility is always the strict gate: an invisible query receives
+    exactly zero weight irrespective of the learned confidence value.
+    """
+
+    hard = hard_any_view_recovery_mask(visibility, num_vertices=num_vertices)
+    confidence = torch.as_tensor(
+        confidence_prediction,
+        dtype=torch.float32,
+        device=hard.laplacian_weight.device,
+    )
+    if tuple(confidence.shape) != (num_vertices,):
+        raise ValueError("confidence_prediction must have shape [N].")
+    if not torch.isfinite(confidence).all():
+        raise ValueError("confidence_prediction must be finite.")
+    return hard.laplacian_weight * confidence.clamp(0.0, 1.0)
+
+
 def hard_any_view_recovery_mask(
     visibility: torch.Tensor, *, num_vertices: int
 ) -> HardVisibilityRecoveryMask:

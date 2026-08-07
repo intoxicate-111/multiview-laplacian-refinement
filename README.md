@@ -1,5 +1,12 @@
 # Multi-View GT Laplacian Learning
 
+The production Sofa50 method is defined in one place: [Canonical Sofa50
+learned-Laplacian pipeline](docs/CANONICAL_SOFA50_PIPELINE.md). It predicts an
+absolute GT `h^2`-normalized differential target and performs exactly one
+current-expanded-graph denormalization before visibility/confidence-aware
+recovery. Older residual, displacement, oracle, and 5000-epoch material elsewhere
+is retained only as legacy experimental context.
+
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 Training guides: [English](docs/MULTI_MESH_TRAINING.md) |
@@ -145,30 +152,31 @@ Inference-only expanded manifest:
 
 Never pass the expanded inference manifest to the training loop.
 
-## Full training
+## Canonical Sofa50 training
 
 Install the package and training dependencies, then run:
 
 ```bash
 pip install -e ".[train]"
-bash scripts/train_sofa50_v8_960_5000.sh
+bash scripts/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.sh
 ```
 
 The launcher uses:
 
 ```text
-configs/learned_laplacian/train_gt_query_sofa50_v8_960_5000.json
+configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json
 ```
 
 The profile uses CUDA AMP, four lazy DataLoader workers, pinned memory,
 non-blocking transfer, gradient accumulation over four meshes, validation every
-five epochs and periodic checkpoints. It is capped at 5,000 epochs and 50,000
-optimizer steps.
+five epochs and periodic checkpoints. The controlled experiment is exactly
+2,000 epochs and 20,000 optimizer steps and includes the minimal confidence
+head.
 
 The current full output directory is:
 
 ```text
-runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full
+runs/learned_laplacian/sofa50_50mesh_2000epoch_absolute_h2_confidence
 ```
 
 ## What constitutes evidence

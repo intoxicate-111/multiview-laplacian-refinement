@@ -48,10 +48,17 @@ class FourierPositionEncoding(nn.Module):
 @dataclass(frozen=True)
 class LearnedLaplacianOutput:
     predicted_laplacian: torch.Tensor
+    confidence_prediction: torch.Tensor | None
     vertex_features: torch.Tensor
     aggregated_image_features: torch.Tensor
     valid_view_ratio: torch.Tensor
     valid_views: torch.Tensor
+
+    @property
+    def delta_hat_prediction(self) -> torch.Tensor:
+        """Explicit canonical name for the absolute normalized model output."""
+
+        return self.predicted_laplacian
 
 
 class LearnedLaplacianModel(nn.Module):
@@ -70,6 +77,7 @@ class LearnedLaplacianModel(nn.Module):
         geometry_mode: str = "legacy",
         position_num_frequencies: int = 6,
         position_include_input: bool = True,
+        predict_confidence: bool = False,
     ) -> None:
         super().__init__()
         if input_mode not in INPUT_MODES:
@@ -82,6 +90,7 @@ class LearnedLaplacianModel(nn.Module):
         self.input_mode = input_mode
         self.zero_images = zero_images
         self.geometry_mode = geometry_mode
+        self.predict_confidence = bool(predict_confidence)
         self.position_encoder = FourierPositionEncoding(
             num_frequencies=position_num_frequencies,
             include_input=position_include_input,
@@ -97,6 +106,17 @@ class LearnedLaplacianModel(nn.Module):
             hidden_dim=hidden_dim,
             num_graph_layers=num_graph_layers,
             dropout=dropout,
+        )
+        # Confidence is deliberately a small side head.  The differential target
+        # backbone and its three-vector output remain unchanged.
+        self.confidence_head = (
+            nn.Sequential(
+                nn.Linear(geometry_dim + 1 + image_feature_dim, hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, 1),
+            )
+            if self.predict_confidence
+            else None
         )
 
     def forward(self, sample: Mapping[str, Any]) -> LearnedLaplacianOutput:
@@ -195,8 +215,14 @@ class LearnedLaplacianModel(nn.Module):
             ratio_feature = torch.zeros_like(ratio_feature)
         vertex_features = torch.cat((geometry, ratio_feature, aggregated), dim=-1)
         predicted = self.predictor(vertex_features, edge_index)
+        confidence_prediction = (
+            None
+            if self.confidence_head is None
+            else torch.sigmoid(self.confidence_head(vertex_features)).squeeze(-1)
+        )
         return LearnedLaplacianOutput(
             predicted_laplacian=predicted,
+            confidence_prediction=confidence_prediction,
             vertex_features=vertex_features,
             aggregated_image_features=aggregated,
             valid_view_ratio=valid_ratio,
@@ -215,6 +241,7 @@ class LearnedLaplacianModel(nn.Module):
             "geometry_mode": self.geometry_mode,
             "position_num_frequencies": self.position_encoder.num_frequencies,
             "position_include_input": self.position_encoder.include_input,
+            "predict_confidence": self.predict_confidence,
         }
 
 

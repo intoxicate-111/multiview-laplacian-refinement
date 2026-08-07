@@ -119,14 +119,48 @@ def normalize_laplacian_by_edge_scale(
 def denormalize_laplacian_by_edge_scale(
     normalized_laplacian: torch.Tensor,
     local_edge_length: torch.Tensor,
+    eps: float = 1e-12,
 ) -> torch.Tensor:
-    """Compute graph-specific delta_i = delta_hat_i * h_i^2."""
+    """Compute graph-specific delta_i = delta_hat_i * (h_i^2 + eps)."""
 
-    if normalized_laplacian.ndim != 2 or normalized_laplacian.shape[1] != 3:
-        raise ValueError("normalized_laplacian must have shape [N, 3].")
-    if tuple(local_edge_length.shape) != (normalized_laplacian.shape[0],):
-        raise ValueError("local_edge_length must have shape [N].")
-    return normalized_laplacian * local_edge_length.square().unsqueeze(-1)
+    _validate_transform_inputs(normalized_laplacian, local_edge_length, eps)
+    return normalized_laplacian * (
+        local_edge_length.square() + eps
+    ).unsqueeze(-1)
+
+
+def prediction_to_raw_laplacian(
+    prediction: torch.Tensor,
+    local_edge_length: torch.Tensor,
+    *,
+    input_representation: str,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """Convert one explicitly labelled prediction to raw recovery units once."""
+
+    if input_representation == RAW_LAPLACIAN:
+        _validate_transform_inputs(prediction, local_edge_length, eps)
+        return prediction
+    if input_representation == EDGE_SCALE_NORMALIZED_LAPLACIAN:
+        return denormalize_laplacian_by_edge_scale(
+            prediction, local_edge_length, eps=eps
+        )
+    raise ValueError(f"Unsupported Laplacian representation: {input_representation!r}.")
+
+
+def require_matching_laplacian_representations(
+    left_representation: str, right_representation: str
+) -> None:
+    """Reject metric comparisons that silently mix normalized and raw tensors."""
+
+    if left_representation not in TARGET_MODES:
+        raise ValueError(f"Unsupported left representation: {left_representation!r}.")
+    if right_representation not in TARGET_MODES:
+        raise ValueError(f"Unsupported right representation: {right_representation!r}.")
+    if left_representation != right_representation:
+        raise ValueError(
+            "Laplacian representation mismatch: explicitly convert before comparison."
+        )
 
 
 def edge_scale_statistics(local_edge_length: torch.Tensor) -> dict[str, float | int]:

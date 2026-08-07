@@ -42,6 +42,11 @@ def main() -> int:
         type=int,
         help="Override multi_object_training.max_optimizer_steps.",
     )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        help="Resume a canonical checkpoint_latest.pt or optimizer-step checkpoint.",
+    )
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -82,6 +87,7 @@ def main() -> int:
         input_mode_override=args.input_mode,
         zero_images=args.zero_images,
         initial_loading_seconds=loading_seconds,
+        resume_checkpoint=args.resume_checkpoint,
     )
     summary = {
         "train_meshes": len(train_dataset),

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 import resource
 import sys
@@ -16,7 +17,12 @@ import torch
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .dataset import validate_sample
-from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
+from .losses import (
+    confidence_calibration_metrics,
+    confidence_reliability_loss,
+    laplacian_prediction_metrics,
+    weighted_robust_laplacian_loss,
+)
 from .model import LearnedLaplacianModel
 from .query_training import (
     QUERY_FOURIER_GEOMETRY_MODE,
@@ -187,6 +193,7 @@ def train_multi_object(
     zero_images: bool = False,
     progress: bool = True,
     initial_loading_seconds: float = 0.0,
+    resume_checkpoint: str | Path | None = None,
 ) -> MultiObjectTrainingResult:
     """Train one shared model over ragged mesh samples, one mesh forward at a time."""
 
@@ -213,6 +220,9 @@ def train_multi_object(
     accumulation_meshes = int(multi.get("gradient_accumulation_meshes", 1))
     validation_every = int(multi.get("validation_every_epochs", 1))
     checkpoint_every = int(multi.get("checkpoint_every_epochs", 0))
+    checkpoint_optimizer_steps = tuple(
+        sorted({int(value) for value in multi.get("checkpoint_optimizer_steps", ())})
+    )
     max_optimizer_steps_value = multi.get("max_optimizer_steps")
     max_optimizer_steps = (
         None if max_optimizer_steps_value is None else int(max_optimizer_steps_value)
@@ -229,6 +239,16 @@ def train_multi_object(
         )
     if max_optimizer_steps is not None and max_optimizer_steps < 1:
         raise ValueError("max_optimizer_steps must be positive when provided.")
+    if checkpoint_optimizer_steps and checkpoint_optimizer_steps[0] < 0:
+        raise ValueError("checkpoint_optimizer_steps cannot contain negative values.")
+    if (
+        max_optimizer_steps is not None
+        and checkpoint_optimizer_steps
+        and checkpoint_optimizer_steps[-1] > max_optimizer_steps
+    ):
+        raise ValueError(
+            "checkpoint_optimizer_steps cannot exceed max_optimizer_steps."
+        )
     initial_learning_rate = float(training.get("learning_rate", 1e-4))
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -241,11 +261,29 @@ def train_multi_object(
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     gradient_clip = float(training.get("gradient_clip_norm", 0.0))
     loss_kwargs = _loss_kwargs(training)
+    confidence_settings = _confidence_settings(config)
     output_path = None if output_dir is None else Path(output_dir)
     if output_path is not None:
         output_path.mkdir(parents=True, exist_ok=True)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
+
+    resume_payload: dict[str, Any] | None = None
+    if resume_checkpoint is not None:
+        resume_path = Path(resume_checkpoint)
+        resume_payload = torch.load(
+            resume_path, map_location=device, weights_only=False
+        )
+        if resume_payload.get("optimizer_steps") is None:
+            raise ValueError(
+                "resume_checkpoint is not an optimizer-step checkpoint."
+            )
+        model.load_state_dict(resume_payload["model_state_dict"])
+        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+        if scheduler is not None and resume_payload.get("scheduler_state_dict") is not None:
+            scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
+        if resume_payload.get("scaler_state_dict") is not None:
+            scaler.load_state_dict(resume_payload["scaler_state_dict"])
 
     start_time = time.perf_counter()
     static_start = time.perf_counter()
@@ -338,11 +376,27 @@ def train_multi_object(
         )
         print(f"AMP: {amp_enabled} ({amp_dtype})", flush=True)
 
-    history: list[dict[str, float | int | None]] = []
-    best_epoch = 0
-    best_selection_loss = float("inf")
-    best_state = copy.deepcopy(model.state_dict())
-    optimizer_steps = 0
+    resume_state = {} if resume_payload is None else dict(
+        resume_payload.get("training_state", {})
+    )
+    history: list[dict[str, float | int | None]] = list(
+        resume_state.get("history", [])
+    )
+    best_epoch = int(resume_state.get("best_epoch", 0))
+    best_selection_loss = float(resume_state.get("best_selection_loss", float("inf")))
+    stored_best_state = resume_state.get("best_model_state_dict")
+    best_state = (
+        copy.deepcopy(model.state_dict())
+        if stored_best_state is None
+        else stored_best_state
+    )
+    optimizer_steps = int(
+        0 if resume_payload is None else resume_payload["optimizer_steps"]
+    )
+    start_epoch = int(resume_state.get("next_epoch", 1))
+    resume_groups_completed = int(
+        resume_state.get("groups_completed_in_epoch", 0)
+    )
     shuffle = bool(multi.get("shuffle", True))
     epoch_train_seconds: list[float] = []
     epoch_validation_seconds: list[float] = []
@@ -352,13 +406,43 @@ def train_multi_object(
     epoch_image_decode_resize_seconds: list[float] = []
     epoch_mean_used_view_count: list[float] = []
     epoch_decoded_image_bytes: list[int] = []
-    lr_reduction_count = 0
-    early_stopping_best = float("inf")
-    early_stopping_bad_validations = 0
+    lr_reduction_count = int(resume_state.get("lr_reduction_count", 0))
+    early_stopping_best = float(
+        resume_state.get("early_stopping_best", float("inf"))
+    )
+    early_stopping_bad_validations = int(
+        resume_state.get("early_stopping_bad_validations", 0)
+    )
     stopped_early = False
     stop_reason = "max_epochs"
 
-    for epoch in range(1, epochs + 1):
+    groups_per_epoch = math.ceil(len(prepared_train) / accumulation_meshes)
+    if output_path is not None and 0 in checkpoint_optimizer_steps and optimizer_steps == 0:
+        _save_optimizer_step_checkpoint(
+            output_path,
+            model,
+            optimizer,
+            scheduler,
+            scaler,
+            epoch=0,
+            optimizer_steps=0,
+            train_loss=None,
+            validation_loss=None,
+            config=config,
+            train_meshes=len(prepared_train),
+            validation_meshes=len(prepared_validation),
+            next_epoch=1,
+            groups_completed_in_epoch=0,
+            history=history,
+            best_epoch=best_epoch,
+            best_selection_loss=best_selection_loss,
+            best_state=best_state,
+            lr_reduction_count=lr_reduction_count,
+            early_stopping_best=early_stopping_best,
+            early_stopping_bad_validations=early_stopping_bad_validations,
+        )
+
+    for epoch in range(start_epoch, epochs + 1):
         _synchronize_device(device)
         train_start = time.perf_counter()
         train_generator.manual_seed(seed + epoch)
@@ -371,8 +455,23 @@ def train_multi_object(
         else:
             epoch_items = train_loader
         item_iterator = iter(epoch_items)
+        groups_completed_in_epoch = (
+            resume_groups_completed if epoch == start_epoch else 0
+        )
+        items_to_skip = groups_completed_in_epoch * accumulation_meshes
+        for _ in range(items_to_skip):
+            try:
+                next(item_iterator)
+            except StopIteration as error:
+                raise ValueError(
+                    "Resume checkpoint groups_completed_in_epoch exceeds the "
+                    "deterministic epoch length."
+                ) from error
         model.train()
         mesh_loss_tensors: list[torch.Tensor] = []
+        objective_tensors: list[torch.Tensor] = []
+        confidence_loss_tensors: list[torch.Tensor] = []
+        confidence_value_tensors: list[torch.Tensor] = []
         exact_query_loss_tensors: list[torch.Tensor] = []
         perturbed_query_loss_tensors: list[torch.Tensor] = []
         data_loading_seconds = 0.0
@@ -382,10 +481,13 @@ def train_multi_object(
         decoded_image_bytes = 0
         used_view_count = 0
         loaded_mesh_count = 0
+        visible_query_count = 0
+        invisible_query_count = 0
         steps_at_epoch_start = optimizer_steps
         transfer_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
         forward_events: list[tuple[torch.cuda.Event, torch.cuda.Event]] = []
         reached_max_steps = False
+        boundary_checkpoint_step: int | None = None
         while True:
             if max_optimizer_steps is not None and optimizer_steps >= max_optimizer_steps:
                 reached_max_steps = True
@@ -443,24 +545,52 @@ def train_multi_object(
                     dtype=amp_dtype,
                     enabled=amp_enabled,
                 ):
-                    prediction = model(prepared.sample).predicted_laplacian
-                prediction_fp32 = prediction.float()
-                loss = weighted_robust_laplacian_loss(
+                    model_output = model(prepared.sample)
+                prediction_fp32 = model_output.predicted_laplacian.float()
+                prediction_loss = weighted_robust_laplacian_loss(
                     prediction_fp32,
                     prepared.training_target.float(),
                     prepared.sample["target_confidence"].float(),
                     **loss_kwargs,
                 )
-                if not torch.isfinite(loss):
+                confidence_loss = None
+                objective = prediction_loss
+                if confidence_settings["enabled"]:
+                    if model_output.confidence_prediction is None:
+                        raise RuntimeError(
+                            "confidence.enabled requires a model confidence head."
+                        )
+                    confidence_prediction = model_output.confidence_prediction.float()
+                    confidence_loss = confidence_reliability_loss(
+                        confidence_prediction,
+                        prediction_fp32,
+                        prepared.training_target.float(),
+                        prepared.sample["target_confidence"].float(),
+                        regularizer=confidence_settings["regularizer"],
+                        minimum_confidence=confidence_settings["minimum_confidence"],
+                        loss_type=str(loss_kwargs["loss_type"]),
+                        huber_delta=float(loss_kwargs["huber_delta"]),
+                        charbonnier_epsilon=float(
+                            loss_kwargs["charbonnier_epsilon"]
+                        ),
+                    )
+                    objective = prediction_loss + confidence_settings["loss_weight"] * confidence_loss
+                    confidence_loss_tensors.append(confidence_loss.detach())
+                    confidence_value_tensors.append(confidence_prediction.detach())
+                if not torch.isfinite(objective):
                     sample_id = prepared.sample["sample_id"]
                     raise FloatingPointError(
                         f"Training produced a non-finite loss for {sample_id!r} at epoch {epoch}."
                     )
-                scaler.scale(loss / len(group)).backward()
+                scaler.scale(objective / len(group)).backward()
                 forward_events.append(_finish_cuda_timing(device, forward_event))
                 if device.type != "cuda":
                     forward_backward_seconds += time.perf_counter() - forward_start
-                mesh_loss_tensors.append(loss.detach())
+                mesh_loss_tensors.append(prediction_loss.detach())
+                objective_tensors.append(objective.detach())
+                visible = model_output.valid_views.any(dim=0)
+                visible_query_count += int(visible.sum().item())
+                invisible_query_count += int((~visible).sum().item())
                 with torch.no_grad():
                     exact_loss, perturbed_loss = _query_subset_losses(
                         prediction_fp32,
@@ -479,8 +609,46 @@ def train_multi_object(
             scaler.step(optimizer)
             scaler.update()
             optimizer_steps += 1
+            groups_completed_in_epoch += 1
+            if (
+                output_path is not None
+                and optimizer_steps in checkpoint_optimizer_steps
+            ):
+                if groups_completed_in_epoch >= groups_per_epoch:
+                    boundary_checkpoint_step = optimizer_steps
+                else:
+                    _save_optimizer_step_checkpoint(
+                        output_path,
+                        model,
+                        optimizer,
+                        scheduler,
+                        scaler,
+                        epoch=epoch,
+                        optimizer_steps=optimizer_steps,
+                        train_loss=float(torch.stack(mesh_loss_tensors).mean().item()),
+                        validation_loss=None,
+                        config=config,
+                        train_meshes=len(prepared_train),
+                        validation_meshes=len(prepared_validation),
+                        next_epoch=epoch,
+                        groups_completed_in_epoch=groups_completed_in_epoch,
+                        history=history,
+                        best_epoch=best_epoch,
+                        best_selection_loss=best_selection_loss,
+                        best_state=best_state,
+                        lr_reduction_count=lr_reduction_count,
+                        early_stopping_best=early_stopping_best,
+                        early_stopping_bad_validations=early_stopping_bad_validations,
+                    )
 
         train_loss = float(torch.stack(mesh_loss_tensors).mean().item())
+        train_objective = float(torch.stack(objective_tensors).mean().item())
+        train_confidence_loss = _mean_optional_tensors(confidence_loss_tensors)
+        train_mean_confidence = (
+            float(torch.cat(confidence_value_tensors).mean().item())
+            if confidence_value_tensors
+            else None
+        )
         train_exact_query_loss = _mean_optional_tensors(exact_query_loss_tensors)
         train_perturbed_query_loss = _mean_optional_tensors(perturbed_query_loss_tensors)
         mean_image_decode_resize_seconds = (
@@ -534,6 +702,25 @@ def train_multi_object(
             validation_perturbed_query_loss = _mean_metric(
                 validation_epoch_metrics, "perturbed_query_loss"
             )
+            validation_global_cosine = _mean_nested_metric(
+                validation_epoch_metrics, "target_space", "global_cosine"
+            )
+            validation_high10_cosine = _mean_nested_metric(
+                validation_epoch_metrics, "target_space", "top_10_percent_cosine"
+            )
+            validation_norm_ratio = _mean_nested_metric(
+                validation_epoch_metrics,
+                "target_space",
+                "prediction_to_target_norm_ratio",
+            )
+            validation_mean_confidence = _mean_nested_metric(
+                validation_epoch_metrics, "confidence", "mean"
+            )
+            validation_confidence_error_correlation = _mean_nested_metric(
+                validation_epoch_metrics,
+                "confidence",
+                "correlation_with_negative_error",
+            )
             _synchronize_device(device)
             validation_seconds = float(time.perf_counter() - validation_start)
             epoch_validation_seconds.append(validation_seconds)
@@ -543,17 +730,18 @@ def train_multi_object(
             best_epoch = epoch
             best_state = copy.deepcopy(model.state_dict())
             if output_path is not None:
-                _save_multi_checkpoint(
-                    output_path / "best.pt",
-                    model,
-                    optimizer,
-                    epoch,
-                    train_loss,
-                    validation_loss,
-                    config,
-                    len(prepared_train),
-                    len(prepared_validation),
-                )
+                for best_name in ("best.pt", "checkpoint_best.pt"):
+                    _save_multi_checkpoint(
+                        output_path / best_name,
+                        model,
+                        optimizer,
+                        epoch,
+                        train_loss,
+                        validation_loss,
+                        config,
+                        len(prepared_train),
+                        len(prepared_validation),
+                    )
         if validation_loss is not None and early_stopping.enabled:
             if validation_loss < early_stopping_best - early_stopping.min_delta:
                 early_stopping_best = validation_loss
@@ -573,7 +761,12 @@ def train_multi_object(
         record: dict[str, float | int | None] = {
             "epoch": epoch,
             "train_loss": train_loss,
+            "train_normalized_laplacian_loss": train_loss,
+            "train_objective": train_objective,
+            "train_confidence_loss": train_confidence_loss,
+            "train_mean_confidence": train_mean_confidence,
             "validation_loss": validation_loss,
+            "validation_normalized_laplacian_loss": validation_loss,
             "optimizer_steps": optimizer_steps,
             "train_seconds": train_seconds,
             "validation_seconds": validation_seconds,
@@ -597,8 +790,49 @@ def train_multi_object(
             "validation_perturbed_query_loss": (
                 validation_perturbed_query_loss if should_validate else None
             ),
+            "validation_global_cosine": (
+                validation_global_cosine if should_validate else None
+            ),
+            "validation_high_10_percent_cosine": (
+                validation_high10_cosine if should_validate else None
+            ),
+            "validation_prediction_to_gt_norm_ratio": (
+                validation_norm_ratio if should_validate else None
+            ),
+            "validation_mean_confidence": (
+                validation_mean_confidence if should_validate else None
+            ),
+            "validation_confidence_negative_error_correlation": (
+                validation_confidence_error_correlation if should_validate else None
+            ),
+            "visible_query_count": visible_query_count,
+            "invisible_query_count": invisible_query_count,
         }
         history.append(record)
+        if boundary_checkpoint_step is not None and output_path is not None:
+            _save_optimizer_step_checkpoint(
+                output_path,
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                epoch=epoch,
+                optimizer_steps=boundary_checkpoint_step,
+                train_loss=train_loss,
+                validation_loss=validation_loss,
+                config=config,
+                train_meshes=len(prepared_train),
+                validation_meshes=len(prepared_validation),
+                next_epoch=epoch + 1,
+                groups_completed_in_epoch=0,
+                history=history,
+                best_epoch=best_epoch,
+                best_selection_loss=best_selection_loss,
+                best_state=best_state,
+                lr_reduction_count=lr_reduction_count,
+                early_stopping_best=early_stopping_best,
+                early_stopping_bad_validations=early_stopping_bad_validations,
+            )
         if progress:
             val_text = "n/a" if validation_loss is None else f"{validation_loss:.8f}"
             print(
@@ -611,6 +845,14 @@ def train_multi_object(
                     "query loss "
                     f"exact={train_exact_query_loss:.8f} "
                     f"perturbed={train_perturbed_query_loss:.8f}",
+                    flush=True,
+                )
+            if train_mean_confidence is not None:
+                print(
+                    "confidence "
+                    f"mean={train_mean_confidence:.6f} "
+                    f"loss={train_confidence_loss:.8f} "
+                    f"visible={visible_query_count} invisible={invisible_query_count}",
                     flush=True,
                 )
             if lr_was_reduced:
@@ -631,7 +873,35 @@ def train_multi_object(
                     f"decoded={decoded_image_bytes / (1024.0 * 1024.0):.2f}MB",
                     flush=True,
                 )
-        if output_path is not None and checkpoint_every > 0 and epoch % checkpoint_every == 0:
+        checkpoint_epochs = {
+            int(value) for value in multi.get("checkpoint_epochs", ())
+        }
+        if output_path is not None:
+            _save_resumable_checkpoint(
+                output_path / "checkpoint_latest.pt",
+                model,
+                optimizer,
+                scheduler,
+                scaler,
+                epoch=epoch,
+                optimizer_steps=optimizer_steps,
+                train_loss=train_loss,
+                validation_loss=validation_loss,
+                config=config,
+                train_meshes=len(prepared_train),
+                validation_meshes=len(prepared_validation),
+                history=history,
+                best_epoch=best_epoch,
+                best_selection_loss=best_selection_loss,
+                best_state=best_state,
+                lr_reduction_count=lr_reduction_count,
+                early_stopping_best=early_stopping_best,
+                early_stopping_bad_validations=early_stopping_bad_validations,
+            )
+        if output_path is not None and (
+            (checkpoint_every > 0 and epoch % checkpoint_every == 0)
+            or epoch in checkpoint_epochs
+        ):
             _save_multi_checkpoint(
                 output_path / f"checkpoint_epoch_{epoch:06d}.pt",
                 model,
@@ -844,7 +1114,30 @@ def _build_model(
         geometry_mode=str(model_config.get("geometry_mode", "legacy")),
         position_num_frequencies=int(position_config.get("num_frequencies", 6)),
         position_include_input=bool(position_config.get("include_input", True)),
+        predict_confidence=bool(config.get("confidence", {}).get("enabled", False)),
     )
+
+
+def _confidence_settings(config: Mapping[str, Any]) -> dict[str, Any]:
+    settings = config.get("confidence", {})
+    if not isinstance(settings, Mapping):
+        raise ValueError("confidence must be an object.")
+    result = {
+        "enabled": bool(settings.get("enabled", False)),
+        "loss_weight": float(settings.get("loss_weight", 1.0)),
+        "regularizer": float(settings.get("regularizer", 0.01)),
+        "minimum_confidence": float(settings.get("minimum_confidence", 1e-4)),
+        "quantile_bins": int(settings.get("quantile_bins", 5)),
+    }
+    if result["loss_weight"] < 0:
+        raise ValueError("confidence.loss_weight must be non-negative.")
+    if result["regularizer"] <= 0:
+        raise ValueError("confidence.regularizer must be positive.")
+    if not 0 < result["minimum_confidence"] < 1:
+        raise ValueError("confidence.minimum_confidence must be between zero and one.")
+    if result["quantile_bins"] < 2:
+        raise ValueError("confidence.quantile_bins must be at least two.")
+    return result
 
 
 def _target_settings(config: Mapping[str, Any]) -> tuple[str, float]:
@@ -1500,6 +1793,17 @@ def _mean_metric(metrics: Mapping[str, Mapping[str, Any]], name: str) -> float |
     return float(np.mean(values)) if values else None
 
 
+def _mean_nested_metric(
+    metrics: Mapping[str, Mapping[str, Any]], group: str, name: str
+) -> float | None:
+    values = []
+    for item in metrics.values():
+        nested = item.get(group)
+        if isinstance(nested, Mapping) and nested.get(name) is not None:
+            values.append(float(nested[name]))
+    return float(np.mean(values)) if values else None
+
+
 @torch.no_grad()
 def _evaluate_dataset(
     model: LearnedLaplacianModel,
@@ -1520,7 +1824,8 @@ def _evaluate_dataset(
 ) -> tuple[float, dict[str, dict[str, Any]]]:
     model.eval()
     decode_images = model.input_mode != "coarse_only" and not model.zero_images
-    target_mode, _ = _target_settings(config)
+    target_mode, epsilon = _target_settings(config)
+    confidence_settings = _confidence_settings(config)
     losses = []
     metrics: dict[str, dict[str, Any]] = {}
     if prediction_dir is not None:
@@ -1569,8 +1874,8 @@ def _evaluate_dataset(
             dtype=amp_dtype,
             enabled=amp_enabled,
         ):
-            prediction = model(prepared.sample).predicted_laplacian
-        prediction = prediction.float()
+            model_output = model(prepared.sample)
+        prediction = model_output.predicted_laplacian.float()
         loss = weighted_robust_laplacian_loss(
             prediction,
             prepared.training_target.float(),
@@ -1592,7 +1897,7 @@ def _evaluate_dataset(
         )
         if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
             raw_prediction = denormalize_laplacian_by_edge_scale(
-                prediction, prepared.sample["local_edge_length"]
+                prediction, prepared.sample["local_edge_length"], eps=epsilon
             )
         else:
             raw_prediction = prediction
@@ -1607,6 +1912,19 @@ def _evaluate_dataset(
         sample_id = str(prepared.sample["sample_id"])
         if sample_id in metrics:
             raise ValueError(f"Duplicate sample_id {sample_id!r} in one dataset split.")
+        confidence_metrics = None
+        confidence_prediction_cpu = None
+        if model_output.confidence_prediction is not None:
+            confidence_prediction = model_output.confidence_prediction.float()
+            confidence_metrics = confidence_calibration_metrics(
+                confidence_prediction,
+                prediction,
+                prepared.training_target.float(),
+                valid_mask=valid_mask,
+                quantile_bins=confidence_settings["quantile_bins"],
+            )
+            confidence_prediction_cpu = confidence_prediction.detach().cpu()
+        visible = model_output.valid_views.any(dim=0)
         metrics[sample_id] = {
             "loss": loss_value,
             "exact_query_loss": None if exact_loss is None else float(exact_loss.item()),
@@ -1622,6 +1940,9 @@ def _evaluate_dataset(
             "clipped_target_vertices": prepared.clipped_target_vertices,
             "target_space": target_metrics,
             "recovered_raw_space": raw_metrics,
+            "confidence": confidence_metrics,
+            "visible_query_count": int(visible.sum().item()),
+            "invisible_query_count": int((~visible).sum().item()),
         }
         if prediction_dir is not None:
             safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", sample_id).strip("._") or "sample"
@@ -1633,6 +1954,11 @@ def _evaluate_dataset(
                 prediction_dir / f"{safe_id}_raw_delta.npy",
                 raw_prediction_cpu.numpy(),
             )
+            if confidence_prediction_cpu is not None:
+                np.save(
+                    prediction_dir / f"{safe_id}_confidence.npy",
+                    confidence_prediction_cpu.numpy(),
+                )
     if not losses:
         raise ValueError("Cannot evaluate an empty dataset split.")
     return float(np.mean(losses)), metrics
@@ -1643,23 +1969,147 @@ def _save_multi_checkpoint(
     model: LearnedLaplacianModel,
     optimizer: torch.optim.Optimizer,
     epoch: int,
-    train_loss: float,
+    train_loss: float | None,
     validation_loss: float | None,
     config: Mapping[str, Any],
     train_meshes: int,
     validation_meshes: int,
+    *,
+    optimizer_steps: int | None = None,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None = None,
+    scaler: torch.amp.GradScaler | None = None,
+    training_state: Mapping[str, Any] | None = None,
 ) -> None:
-    torch.save(
-        {
-            "epoch": epoch,
-            "train_loss": train_loss,
-            "validation_loss": validation_loss,
-            "model_config": model.architecture_config(),
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "experiment_config": dict(config),
-            "train_meshes": train_meshes,
-            "validation_meshes": validation_meshes,
-        },
+    payload = {
+        "epoch": epoch,
+        "train_loss": train_loss,
+        "validation_loss": validation_loss,
+        "model_config": model.architecture_config(),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "experiment_config": dict(config),
+        "train_meshes": train_meshes,
+        "validation_meshes": validation_meshes,
+    }
+    if optimizer_steps is not None:
+        payload.update(
+            {
+                "optimizer_steps": optimizer_steps,
+                "scheduler_state_dict": (
+                    None if scheduler is None else scheduler.state_dict()
+                ),
+                "scaler_state_dict": None if scaler is None else scaler.state_dict(),
+                "training_state": (
+                    None if training_state is None else dict(training_state)
+                ),
+            }
+        )
+    torch.save(payload, path)
+
+
+def _save_optimizer_step_checkpoint(
+    output_path: Path,
+    model: LearnedLaplacianModel,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None,
+    scaler: torch.amp.GradScaler,
+    *,
+    epoch: int,
+    optimizer_steps: int,
+    train_loss: float | None,
+    validation_loss: float | None,
+    config: Mapping[str, Any],
+    train_meshes: int,
+    validation_meshes: int,
+    next_epoch: int,
+    groups_completed_in_epoch: int,
+    history: Sequence[Mapping[str, Any]],
+    best_epoch: int,
+    best_selection_loss: float,
+    best_state: Mapping[str, torch.Tensor],
+    lr_reduction_count: int,
+    early_stopping_best: float,
+    early_stopping_bad_validations: int,
+) -> Path:
+    checkpoint_dir = output_path / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    path = checkpoint_dir / f"checkpoint_step_{optimizer_steps:06d}.pt"
+    _save_multi_checkpoint(
         path,
+        model,
+        optimizer,
+        epoch,
+        train_loss,
+        validation_loss,
+        config,
+        train_meshes,
+        validation_meshes,
+        optimizer_steps=optimizer_steps,
+        scheduler=scheduler,
+        scaler=scaler,
+        training_state={
+            "next_epoch": int(next_epoch),
+            "groups_completed_in_epoch": int(groups_completed_in_epoch),
+            "history": [dict(row) for row in history],
+            "best_epoch": int(best_epoch),
+            "best_selection_loss": float(best_selection_loss),
+            "best_model_state_dict": copy.deepcopy(dict(best_state)),
+            "lr_reduction_count": int(lr_reduction_count),
+            "early_stopping_best": float(early_stopping_best),
+            "early_stopping_bad_validations": int(
+                early_stopping_bad_validations
+            ),
+        },
+    )
+    return path
+
+
+def _save_resumable_checkpoint(
+    path: Path,
+    model: LearnedLaplacianModel,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None,
+    scaler: torch.amp.GradScaler,
+    *,
+    epoch: int,
+    optimizer_steps: int,
+    train_loss: float | None,
+    validation_loss: float | None,
+    config: Mapping[str, Any],
+    train_meshes: int,
+    validation_meshes: int,
+    history: Sequence[Mapping[str, Any]],
+    best_epoch: int,
+    best_selection_loss: float,
+    best_state: Mapping[str, torch.Tensor],
+    lr_reduction_count: int,
+    early_stopping_best: float,
+    early_stopping_bad_validations: int,
+) -> None:
+    _save_multi_checkpoint(
+        path,
+        model,
+        optimizer,
+        epoch,
+        train_loss,
+        validation_loss,
+        config,
+        train_meshes,
+        validation_meshes,
+        optimizer_steps=optimizer_steps,
+        scheduler=scheduler,
+        scaler=scaler,
+        training_state={
+            "next_epoch": int(epoch + 1),
+            "groups_completed_in_epoch": 0,
+            "history": [dict(row) for row in history],
+            "best_epoch": int(best_epoch),
+            "best_selection_loss": float(best_selection_loss),
+            "best_model_state_dict": copy.deepcopy(dict(best_state)),
+            "lr_reduction_count": int(lr_reduction_count),
+            "early_stopping_best": float(early_stopping_best),
+            "early_stopping_bad_validations": int(
+                early_stopping_bad_validations
+            ),
+        },
     )
