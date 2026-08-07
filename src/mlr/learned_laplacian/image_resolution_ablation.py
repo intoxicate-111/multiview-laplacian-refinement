@@ -19,9 +19,10 @@ GROUPS = ("all", "smooth_bottom_90", "high_top_10", "high_top_1")
 
 
 def analyze_image_resolution_ablation(
-    output_root: str | Path, *, device: str = "cuda"
+    output_root: str | Path, manifest_path: str | Path, *, device: str = "cuda"
 ) -> dict[str, Any]:
     output_root = Path(output_root).resolve()
+    manifest_path = Path(manifest_path).resolve()
     arm_dirs = {name: output_root / "arms" / arm for name, arm in ARM_LAYOUT.items()}
     resolved_device = torch.device(device)
     if resolved_device.type == "cuda" and not torch.cuda.is_available():
@@ -33,7 +34,7 @@ def analyze_image_resolution_ablation(
     for arm, arm_dir in arm_dirs.items():
         config = _read_json(arm_dir / "config.json")
         dataset = PreparedMeshDataset.from_manifest(
-            arm_dir / "dataset_manifest.json", "validation"
+            manifest_path, "validation"
         )
         result = _evaluate_original_and_zero(
             arm_dir, config, dataset, resolved_device

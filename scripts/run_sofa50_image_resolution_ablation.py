@@ -22,7 +22,13 @@ def main() -> int:
     parser.add_argument("--analyze", action="store_true")
     args = parser.parse_args()
     if args.analyze:
-        analyze_image_resolution_ablation(args.output_root, device=args.device)
+        if args.manifest is None:
+            parser.error("--manifest is required with --analyze")
+        analyze_image_resolution_ablation(
+            args.output_root,
+            manifest_path=args.manifest,
+            device=args.device,
+        )
         return 0
     if args.arm is None or args.manifest is None or args.base_config is None:
         parser.error("--arm, --manifest and --base-config are required unless --analyze is used")
