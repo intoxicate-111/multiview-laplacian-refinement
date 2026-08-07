@@ -1133,6 +1133,7 @@ def _build_model(
         raise ValueError("model.oracle_residual_expert must be an object.")
     return LearnedLaplacianModel(
         image_feature_dim=int(image_config.get("feature_dim", 32)),
+        image_first_stride=int(image_config.get("first_stride", 2)),
         image_second_stride=int(image_config.get("second_stride", 2)),
         hidden_dim=int(model_config.get("hidden_dim", 128)),
         num_graph_layers=int(model_config.get("num_graph_layers", 3)),

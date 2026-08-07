@@ -14,7 +14,7 @@ from .multi_trainer import _amp_settings, _build_model, _prepare_item_for_use, _
 from .trainer import _seed_everything, load_checkpoint
 
 
-ARM_LAYOUT = {"F0_240": "image_resolution_f0", "F1_480": "image_resolution_f1"}
+ARM_LAYOUT = {"F0_240": "image_resolution_f0", "F1_480": "image_resolution_f1", "F2_960": "image_resolution_f2",}
 GROUPS = ("all", "smooth_bottom_90", "high_top_10", "high_top_1")
 
 

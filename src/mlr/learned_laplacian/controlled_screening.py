@@ -39,7 +39,11 @@ ARM_ORDER = (
 )
 GEOMETRY_AWARE_EXTRA_ARMS = ("strong_importance_0001", "smooth_importance_0001")
 ORACLE_RESIDUAL_ARMS = ("oracle_expert_e0", "oracle_expert_e1")
-IMAGE_RESOLUTION_ARMS = ("image_resolution_f0", "image_resolution_f1")
+IMAGE_RESOLUTION_ARMS = (
+    "image_resolution_f0",
+    "image_resolution_f1",
+    "image_resolution_f2",
+)
 ARM_CHOICES = (
     ARM_ORDER + GEOMETRY_AWARE_EXTRA_ARMS + ORACLE_RESIDUAL_ARMS + IMAGE_RESOLUTION_ARMS
 )
@@ -88,6 +92,7 @@ def arm_config(
         "oracle_expert_e1": 0.001,
         "image_resolution_f0": 0.001,
         "image_resolution_f1": 0.001,
+        "image_resolution_f2": 0.001,
     }
     support = support_by_arm[arm]
     result["query_training"]["enabled"] = support > 0
@@ -133,9 +138,17 @@ def arm_config(
     else:
         result.setdefault("model", {}).pop("oracle_residual_expert", None)
     if arm in IMAGE_RESOLUTION_ARMS:
-        result.setdefault("image_encoder", {})["second_stride"] = (
-            2 if arm == "image_resolution_f0" else 1
-        )
+        strides = {
+            "image_resolution_f0": (2, 2),  # 240
+            "image_resolution_f1": (2, 1),  # 480
+            "image_resolution_f2": (1, 1),  # 960
+        }
+
+        first_stride, second_stride = strides[arm]
+
+        image_encoder = result.setdefault("image_encoder", {})
+        image_encoder["first_stride"] = first_stride
+        image_encoder["second_stride"] = second_stride
     result["screening"] = {
         "arm": arm,
         "train_query_support_h": support,

@@ -8,7 +8,11 @@ from mlr.learned_laplacian.controlled_screening import run_screening_arm
 from mlr.learned_laplacian.image_resolution_ablation import analyze_image_resolution_ablation
 
 
-ARM_MAP = {"F0": "image_resolution_f0", "F1": "image_resolution_f1"}
+ARM_MAP = {
+    "F0": "image_resolution_f0",
+    "F1": "image_resolution_f1",
+    "F2": "image_resolution_f2",
+}
 
 
 def main() -> int:
