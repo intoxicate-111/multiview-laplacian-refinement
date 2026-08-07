@@ -39,7 +39,10 @@ ARM_ORDER = (
 )
 GEOMETRY_AWARE_EXTRA_ARMS = ("strong_importance_0001", "smooth_importance_0001")
 ORACLE_RESIDUAL_ARMS = ("oracle_expert_e0", "oracle_expert_e1")
-ARM_CHOICES = ARM_ORDER + GEOMETRY_AWARE_EXTRA_ARMS + ORACLE_RESIDUAL_ARMS
+IMAGE_RESOLUTION_ARMS = ("image_resolution_f0", "image_resolution_f1")
+ARM_CHOICES = (
+    ARM_ORDER + GEOMETRY_AWARE_EXTRA_ARMS + ORACLE_RESIDUAL_ARMS + IMAGE_RESOLUTION_ARMS
+)
 QUERY_SETS = (
     "exact",
     "near_0001",
@@ -83,6 +86,8 @@ def arm_config(
         "smooth_importance_0001": 0.001,
         "oracle_expert_e0": 0.001,
         "oracle_expert_e1": 0.001,
+        "image_resolution_f0": 0.001,
+        "image_resolution_f1": 0.001,
     }
     support = support_by_arm[arm]
     result["query_training"]["enabled"] = support > 0
@@ -127,6 +132,10 @@ def arm_config(
         }
     else:
         result.setdefault("model", {}).pop("oracle_residual_expert", None)
+    if arm in IMAGE_RESOLUTION_ARMS:
+        result.setdefault("image_encoder", {})["second_stride"] = (
+            2 if arm == "image_resolution_f0" else 1
+        )
     result["screening"] = {
         "arm": arm,
         "train_query_support_h": support,

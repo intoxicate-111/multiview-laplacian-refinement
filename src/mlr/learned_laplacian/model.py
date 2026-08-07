@@ -70,6 +70,7 @@ class LearnedLaplacianModel(nn.Module):
     def __init__(
         self,
         image_feature_dim: int = 32,
+        image_second_stride: int = 2,
         hidden_dim: int = 128,
         num_graph_layers: int = 3,
         dropout: float = 0.0,
@@ -90,6 +91,7 @@ class LearnedLaplacianModel(nn.Module):
                 f"geometry_mode must be one of {sorted(GEOMETRY_MODES)}, got {geometry_mode!r}."
             )
         self.image_feature_dim = image_feature_dim
+        self.image_second_stride = int(image_second_stride)
         self.input_mode = input_mode
         self.zero_images = zero_images
         self.geometry_mode = geometry_mode
@@ -102,7 +104,9 @@ class LearnedLaplacianModel(nn.Module):
             num_frequencies=position_num_frequencies,
             include_input=position_include_input,
         )
-        self.image_encoder = SmallImageEncoder(image_feature_dim)
+        self.image_encoder = SmallImageEncoder(
+            image_feature_dim, second_stride=self.image_second_stride
+        )
         geometry_dim = (
             self.GEOMETRY_DIM
             if geometry_mode == "legacy"
@@ -274,6 +278,7 @@ class LearnedLaplacianModel(nn.Module):
         first_linear = self.predictor.input_mlp[0]
         return {
             "image_feature_dim": self.image_feature_dim,
+            "image_second_stride": self.image_second_stride,
             "hidden_dim": first_linear.out_features,
             "num_graph_layers": len(self.predictor.blocks),
             "dropout": float(self.predictor.blocks[0].update[2].p),

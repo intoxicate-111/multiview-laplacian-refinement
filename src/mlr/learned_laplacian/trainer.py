@@ -105,6 +105,7 @@ def train_single_object(
     input_mode = input_mode_override or str(config.get("input_mode", "coarse_plus_multiview"))
     model = LearnedLaplacianModel(
         image_feature_dim=int(image_config.get("feature_dim", 32)),
+        image_second_stride=int(image_config.get("second_stride", 2)),
         hidden_dim=int(model_config.get("hidden_dim", 128)),
         num_graph_layers=int(model_config.get("num_graph_layers", 3)),
         dropout=float(model_config.get("dropout", 0.0)),
