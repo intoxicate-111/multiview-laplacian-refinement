@@ -1,0 +1,14 @@
+{
+  "experiment": "sofa50_oracle_residual_expert_1000step",
+  "manifest": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960/gt_query_manifest.json",
+  "base_config": "configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json",
+  "output_root": "runs/learned_laplacian/sofa50_oracle_residual_expert_1000step",
+  "max_optimizer_steps": 1000,
+  "shared_seed": 7,
+  "arms": {
+    "E0": "canonical model, full uniform vertex loss",
+    "E1": "canonical model + zero-initialized 64-32-3 residual MLP gated by per-mesh clean-GT top10 mask"
+  },
+  "validation": "all vertices, exact GT queries, clean GT targets",
+  "recovery": false
+}

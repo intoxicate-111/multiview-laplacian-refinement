@@ -61,7 +61,7 @@ def canonical_current_graph_recovery_inputs(
         eps=epsilon,
     )
     delta_current_raw = torch.as_tensor(
-        _current_uniform_laplacian(vertices, faces),
+        current_uniform_laplacian_raw(vertices, faces),
         dtype=vertices.dtype,
         device=vertices.device,
     )
@@ -91,9 +91,11 @@ def canonical_current_graph_recovery_inputs(
     )
 
 
-def _current_uniform_laplacian(
+def current_uniform_laplacian_raw(
     vertices: torch.Tensor, faces: torch.Tensor
 ) -> np.ndarray:
+    """Compute ``L_current @ X0`` from the supplied current graph only."""
+
     positions = vertices.detach().cpu().numpy().astype(np.float64, copy=False)
     triangles = faces.detach().cpu().numpy().astype(np.int64, copy=False)
     operator = build_uniform_laplacian_data(triangles, len(positions))

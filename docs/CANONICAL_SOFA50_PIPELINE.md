@@ -34,8 +34,10 @@ weight = renderer_visible_any * confidence_prediction
 With confidence disabled, `weight = renderer_visible_any`. The strict renderer
 gate means an all-view-invisible vertex always has exactly zero learned-target
 weight. Recovery minimizes the weighted current-graph Laplacian mismatch plus
-the established position anchor to `X0`; no GT scale, GT differential vector,
-or expanded placeholder target enters inference.
+the established global position anchor to `X0` (`lambda_anchor=0.01`). The
+canonical baseline uses `unseen_anchor_weight=0.0`; the historical value `1.0`
+is retained only in legacy/ablation configurations. No GT scale, GT
+differential vector, or expanded placeholder target enters inference.
 
 The explicit reference implementation is
 `mlr.learned_laplacian.canonical_pipeline.canonical_current_graph_recovery_inputs`.
@@ -65,3 +67,13 @@ bash scripts/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.sh
 The run writes `checkpoint_latest.pt`, `checkpoint_best.pt`, requested periodic
 epoch checkpoints, normalized prediction metrics, confidence diagnostics, and
 the complete final report/artifact tables.
+
+## Smooth-region diagnostic convention
+
+Small `||delta_hat||` is used only as a relative smooth/low-local-variation
+grouping for error analysis. The canonical diagnostic compares magnitude
+percentiles (for example, smooth bottom 90% against high-curvature top 10%)
+rather than assigning an arbitrary absolute flatness threshold. A near-zero
+uniform-Laplacian magnitude is not a strict plane detector because it remains
+sensitive to graph connectivity, sampling irregularity, and discretization.
+This grouping does not change training loss, confidence, or recovery weights.

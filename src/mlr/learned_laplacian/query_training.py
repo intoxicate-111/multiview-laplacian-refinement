@@ -11,7 +11,8 @@ GT_QUERY_TRAINING_MODE = "gt_vertex_perturbation_v1"
 QUERY_FOURIER_GEOMETRY_MODE = "query_fourier"
 DEFAULT_NORMAL_STD_H = 0.0003
 DEFAULT_TANGENT_STD_H = 0.0003
-MAX_QUERY_OFFSET_H = 0.001
+DEFAULT_MAX_QUERY_OFFSET_H = 0.001
+MAX_QUERY_OFFSET_H = 0.1
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,7 @@ def query_augmentation_settings(config: Mapping[str, Any]) -> QueryAugmentationS
         exact_fraction=float(raw.get("exact_fraction", 0.2)),
         normal_std_h=float(raw.get("normal_std_h", DEFAULT_NORMAL_STD_H)),
         tangent_std_h=float(raw.get("tangent_std_h", DEFAULT_TANGENT_STD_H)),
-        max_offset_h=float(raw.get("max_offset_h", MAX_QUERY_OFFSET_H)),
+        max_offset_h=float(raw.get("max_offset_h", DEFAULT_MAX_QUERY_OFFSET_H)),
         apply_to_validation=bool(raw.get("apply_to_validation", True)),
         zero_initial_laplacian=bool(raw.get("zero_initial_laplacian", True)),
     )
@@ -172,7 +173,8 @@ def apply_query_augmentation(
         realised_norm = torch.linalg.vector_norm(
             (query_positions - vertices).float(), dim=-1, keepdim=True
         )
-        rounded_outside = realised_norm > allowed_ratio * local_h
+        realised_ratio = realised_norm / local_h.clamp_min(1e-12)
+        rounded_outside = valid_local_h & (realised_ratio > allowed_ratio)
         typed_offsets = torch.where(
             rounded_outside, typed_offsets * 0.5, typed_offsets
         )
@@ -180,7 +182,8 @@ def apply_query_augmentation(
     realised_norm = torch.linalg.vector_norm(
         (query_positions - vertices).float(), dim=-1, keepdim=True
     )
-    rounded_outside = realised_norm > allowed_ratio * local_h
+    realised_ratio = realised_norm / local_h.clamp_min(1e-12)
+    rounded_outside = valid_local_h & (realised_ratio > allowed_ratio)
     query_positions = torch.where(rounded_outside, vertices, query_positions)
     typed_offsets = torch.where(
         rounded_outside, torch.zeros_like(typed_offsets), typed_offsets

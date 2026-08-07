@@ -53,6 +53,7 @@ class LearnedLaplacianOutput:
     aggregated_image_features: torch.Tensor
     valid_view_ratio: torch.Tensor
     valid_views: torch.Tensor
+    oracle_residual_prediction: torch.Tensor | None = None
 
     @property
     def delta_hat_prediction(self) -> torch.Tensor:
@@ -78,6 +79,8 @@ class LearnedLaplacianModel(nn.Module):
         position_num_frequencies: int = 6,
         position_include_input: bool = True,
         predict_confidence: bool = False,
+        oracle_residual_expert_enabled: bool = False,
+        oracle_residual_expert_hidden_dim: int = 32,
     ) -> None:
         super().__init__()
         if input_mode not in INPUT_MODES:
@@ -91,6 +94,10 @@ class LearnedLaplacianModel(nn.Module):
         self.zero_images = zero_images
         self.geometry_mode = geometry_mode
         self.predict_confidence = bool(predict_confidence)
+        self.oracle_residual_expert_enabled = bool(oracle_residual_expert_enabled)
+        self.oracle_residual_expert_hidden_dim = int(oracle_residual_expert_hidden_dim)
+        if self.oracle_residual_expert_hidden_dim < 1:
+            raise ValueError("oracle_residual_expert_hidden_dim must be positive.")
         self.position_encoder = FourierPositionEncoding(
             num_frequencies=position_num_frequencies,
             include_input=position_include_input,
@@ -118,6 +125,23 @@ class LearnedLaplacianModel(nn.Module):
             if self.predict_confidence
             else None
         )
+        # Construct the oracle diagnostic branch after every canonical module so
+        # enabling it cannot change initialization of the general predictor or
+        # confidence head. Its zero-initialized output also makes E0/E1 initial
+        # predictions identical.
+        self.oracle_residual_expert = (
+            nn.Sequential(
+                nn.Linear(hidden_dim, self.oracle_residual_expert_hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.oracle_residual_expert_hidden_dim, 3),
+            )
+            if self.oracle_residual_expert_enabled
+            else None
+        )
+        if self.oracle_residual_expert is not None:
+            final = self.oracle_residual_expert[-1]
+            nn.init.zeros_(final.weight)
+            nn.init.zeros_(final.bias)
 
     def forward(self, sample: Mapping[str, Any]) -> LearnedLaplacianOutput:
         query_positions = sample.get("query_positions", sample["vertices"])
@@ -214,7 +238,23 @@ class LearnedLaplacianModel(nn.Module):
         if self.input_mode == "coarse_only":
             ratio_feature = torch.zeros_like(ratio_feature)
         vertex_features = torch.cat((geometry, ratio_feature, aggregated), dim=-1)
-        predicted = self.predictor(vertex_features, edge_index)
+        shared_features, predicted = self.predictor.forward_with_shared_features(
+            vertex_features, edge_index
+        )
+        oracle_residual_prediction = None
+        if self.oracle_residual_expert is not None:
+            mask = sample.get("oracle_high_signal_mask")
+            if not isinstance(mask, torch.Tensor):
+                raise ValueError(
+                    "oracle residual expert requires sample.oracle_high_signal_mask."
+                )
+            if tuple(mask.shape) != (query_positions.shape[0],):
+                raise ValueError("oracle_high_signal_mask must have shape [N].")
+            oracle_residual_prediction = self.oracle_residual_expert(shared_features)
+            oracle_residual_prediction = oracle_residual_prediction * mask.to(
+                device=predicted.device, dtype=predicted.dtype
+            ).unsqueeze(-1)
+            predicted = predicted + oracle_residual_prediction
         confidence_prediction = (
             None
             if self.confidence_head is None
@@ -227,6 +267,7 @@ class LearnedLaplacianModel(nn.Module):
             aggregated_image_features=aggregated,
             valid_view_ratio=valid_ratio,
             valid_views=valid,
+            oracle_residual_prediction=oracle_residual_prediction,
         )
 
     def architecture_config(self) -> dict[str, Any]:
@@ -242,6 +283,8 @@ class LearnedLaplacianModel(nn.Module):
             "position_num_frequencies": self.position_encoder.num_frequencies,
             "position_include_input": self.position_encoder.include_input,
             "predict_confidence": self.predict_confidence,
+            "oracle_residual_expert_enabled": self.oracle_residual_expert_enabled,
+            "oracle_residual_expert_hidden_dim": self.oracle_residual_expert_hidden_dim,
         }
 
 

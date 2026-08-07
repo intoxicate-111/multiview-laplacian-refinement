@@ -1,0 +1,17 @@
+{
+  "coarse_perturbation": {
+    "enabled": true,
+    "seed": 20260806,
+    "distribution": "gaussian",
+    "use_local_edge_scale": true,
+    "normal_std_h": 0.10,
+    "tangent_std_h": 0.03,
+    "max_offset_h": 0.25,
+    "smoothing_steps": 5,
+    "smoothing_alpha": 0.5,
+    "boundary_scale": 0.5,
+    "topology_safe_altitude_ratio": 0.30,
+    "preserve_centroid": true,
+    "remove_global_translation": true
+  }
+}

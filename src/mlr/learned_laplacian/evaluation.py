@@ -41,7 +41,18 @@ def reconstruct_and_evaluate(
     output_dir.mkdir(parents=True, exist_ok=True)
     vertices = _numpy(sample["vertices"])
     faces = _numpy(sample["faces"]).astype(np.int64)
-    target = _numpy(sample.get("raw_laplacian_target", sample["laplacian_target"]))
+    evaluate_oracle = bool(reconstruction_config.get("evaluate_oracle", True))
+    target = None
+    if evaluate_laplacian_prediction or evaluate_oracle:
+        if "raw_laplacian_target" in sample:
+            target = _numpy(sample["raw_laplacian_target"])
+        elif "laplacian_target" in sample:
+            target = _numpy(sample["laplacian_target"])
+        else:
+            raise ValueError(
+                "A Laplacian target is required when prediction or oracle "
+                "evaluation is enabled."
+            )
     confidence = _numpy(
         sample["target_confidence"] if solver_confidence is None else solver_confidence
     )
@@ -73,6 +84,7 @@ def reconstruct_and_evaluate(
         local_edge_length_t = mean_incident_edge_length(vertices_t, edge_index).cpu()
     normalized_target_t = None
     if evaluate_laplacian_prediction:
+        assert target is not None
         normalized_target_t = normalize_laplacian_by_edge_scale(
             torch.as_tensor(target),
             local_edge_length_t,
@@ -116,10 +128,10 @@ def reconstruct_and_evaluate(
         dense_vertex_limit,
         laplacian_weight=recovery_weight,
     )
-    evaluate_oracle = bool(reconstruction_config.get("evaluate_oracle", True))
     oracle_result = None
     oracle_solver_name = None
     if evaluate_oracle:
+        assert target is not None
         oracle_result, oracle_solver_name = _reconstruct(
             coarse, target, confidence, refinement, dense_vertex_limit
         )

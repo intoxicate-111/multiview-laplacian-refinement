@@ -112,7 +112,7 @@
     "learning_rate": 0.01,
     "robust_loss": "huber",
     "huber_delta": 0.01,
-    "unseen_anchor_weight": 1.0,
+    "unseen_anchor_weight": 0.0,
     "write_legacy_prediction_names": false,
     "denormalization": "delta_pred_raw=delta_hat_prediction*(h_current^2+1e-12)"
   }

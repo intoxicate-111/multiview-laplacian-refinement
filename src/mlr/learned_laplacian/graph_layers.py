@@ -96,6 +96,16 @@ class LaplacianPredictor(nn.Module):
             predicted_laplacian: Tensor[N, 3]
         """
 
+        _, predicted = self.forward_with_shared_features(vertex_features, edge_index)
+        return predicted
+
+    def forward_with_shared_features(
+        self,
+        vertex_features: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the post-message-passing feature and canonical prediction."""
+
         if vertex_features.ndim != 2:
             raise ValueError("vertex_features must have shape [N, C].")
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
@@ -103,4 +113,4 @@ class LaplacianPredictor(nn.Module):
         hidden = self.input_mlp(vertex_features)
         for block in self.blocks:
             hidden = block(hidden, edge_index)
-        return self.output_mlp(hidden)
+        return hidden, self.output_mlp(hidden)

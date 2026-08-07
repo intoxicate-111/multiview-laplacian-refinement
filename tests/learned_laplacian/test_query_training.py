@@ -108,15 +108,15 @@ def test_query_training_rejects_unconverted_coarse_sample():
         train_multi_object([tiny_sample()], None, _config(), progress=False)
 
 
-def test_query_perturbation_defaults_enforce_local_one_tenth_percent_bound():
+def test_query_perturbation_defaults_and_screening_safety_bound():
     settings = query_augmentation_settings({"query_training": {"enabled": True}})
     assert settings.normal_std_h == 0.0003
     assert settings.tangent_std_h == 0.0003
     assert settings.max_offset_h == 0.001
 
-    with pytest.raises(ValueError, match="must not exceed 0.001"):
+    with pytest.raises(ValueError, match="must not exceed 0.1"):
         query_augmentation_settings(
-            {"query_training": {"enabled": True, "max_offset_h": 0.0011}}
+            {"query_training": {"enabled": True, "max_offset_h": 0.1001}}
         )
 
 
@@ -334,3 +334,18 @@ def test_query_training_records_exact_and_perturbed_losses(tmp_path):
     ]
     assert diagnostics["max_offset_norm_over_h"] <= 0.001 + 1e-7
     assert diagnostics["bound_violations"] == 0
+
+
+def test_float32_rounding_guard_also_holds_for_screening_support():
+    sample = _gt_query_sample()
+    augmented = apply_query_augmentation(
+        sample,
+        _settings(normal_std_h=0.003, tangent_std_h=0.003, max_offset_h=0.01),
+        base_seed=7,
+        epoch=7,
+    )
+    ratio = torch.linalg.vector_norm(
+        augmented["query_positions"] - sample["vertices"], dim=-1
+    ) / sample["local_edge_length"]
+    assert float(ratio.max()) <= 0.0100001
+    assert augmented["query_perturbation_diagnostics"]["bound_violations"] == 0

@@ -41,6 +41,7 @@ from .target_scaling import (
     normalize_laplacian_by_edge_scale,
 )
 from .trainer import _resolve_device, _seed_everything
+from .vertex_sampling import sample_training_vertices, vertex_sampling_settings
 
 
 @dataclass
@@ -205,6 +206,7 @@ def train_multi_object(
     device = _resolve_device(device_override or str(config.get("device", "cpu")))
     target_mode, epsilon = _target_settings(config)
     query_settings = query_augmentation_settings(config)
+    vertex_sampling = vertex_sampling_settings(config)
     if query_settings.enabled and str(
         config.get("model", {}).get("geometry_mode", "legacy")
     ) != QUERY_FOURIER_GEOMETRY_MODE:
@@ -547,10 +549,27 @@ def train_multi_object(
                 ):
                     model_output = model(prepared.sample)
                 prediction_fp32 = model_output.predicted_laplacian.float()
-                prediction_loss = weighted_robust_laplacian_loss(
-                    prediction_fp32,
+                sampled_vertices = sample_training_vertices(
                     prepared.training_target.float(),
-                    prepared.sample["target_confidence"].float(),
+                    prepared.sample["valid_scale_mask"],
+                    vertex_sampling,
+                    sample_id=str(prepared.sample["sample_id"]),
+                    base_seed=seed,
+                    epoch=epoch,
+                )
+                loss_prediction = prediction_fp32
+                loss_target = prepared.training_target.float()
+                loss_weight = prepared.sample["target_confidence"].float()
+                if sampled_vertices.indices is not None:
+                    loss_prediction = loss_prediction.index_select(
+                        0, sampled_vertices.indices
+                    )
+                    loss_target = loss_target.index_select(0, sampled_vertices.indices)
+                    loss_weight = loss_weight.index_select(0, sampled_vertices.indices)
+                prediction_loss = weighted_robust_laplacian_loss(
+                    loss_prediction,
+                    loss_target,
+                    loss_weight,
                     **loss_kwargs,
                 )
                 confidence_loss = None
@@ -561,11 +580,16 @@ def train_multi_object(
                             "confidence.enabled requires a model confidence head."
                         )
                     confidence_prediction = model_output.confidence_prediction.float()
+                    loss_confidence_prediction = confidence_prediction
+                    if sampled_vertices.indices is not None:
+                        loss_confidence_prediction = confidence_prediction.index_select(
+                            0, sampled_vertices.indices
+                        )
                     confidence_loss = confidence_reliability_loss(
-                        confidence_prediction,
-                        prediction_fp32,
-                        prepared.training_target.float(),
-                        prepared.sample["target_confidence"].float(),
+                        loss_confidence_prediction,
+                        loss_prediction,
+                        loss_target,
+                        loss_weight,
                         regularizer=confidence_settings["regularizer"],
                         minimum_confidence=confidence_settings["minimum_confidence"],
                         loss_type=str(loss_kwargs["loss_type"]),
@@ -1104,6 +1128,9 @@ def _build_model(
     position_config = model_config.get("position_encoding", {})
     if not isinstance(position_config, Mapping):
         raise ValueError("model.position_encoding must be an object.")
+    expert_config = model_config.get("oracle_residual_expert", {})
+    if not isinstance(expert_config, Mapping):
+        raise ValueError("model.oracle_residual_expert must be an object.")
     return LearnedLaplacianModel(
         image_feature_dim=int(image_config.get("feature_dim", 32)),
         hidden_dim=int(model_config.get("hidden_dim", 128)),
@@ -1115,6 +1142,8 @@ def _build_model(
         position_num_frequencies=int(position_config.get("num_frequencies", 6)),
         position_include_input=bool(position_config.get("include_input", True)),
         predict_confidence=bool(config.get("confidence", {}).get("enabled", False)),
+        oracle_residual_expert_enabled=bool(expert_config.get("enabled", False)),
+        oracle_residual_expert_hidden_dim=int(expert_config.get("hidden_dim", 32)),
     )
 
 
@@ -1238,6 +1267,14 @@ def _prepare_object_static(
         factors = (clip_max_norm / magnitudes.clamp_min(1e-12)).clamp_max(1.0)
         target = target * factors.unsqueeze(-1)
     raw_target = static_sample["raw_laplacian_target"]
+    expert_config = config.get("model", {}).get("oracle_residual_expert", {})
+    if not isinstance(expert_config, Mapping):
+        raise ValueError("model.oracle_residual_expert must be an object.")
+    if bool(expert_config.get("enabled", False)):
+        top_fraction = float(expert_config.get("top_fraction", 0.10))
+        static_sample["oracle_high_signal_mask"] = _oracle_top_magnitude_mask(
+            target, static_sample["valid_scale_mask"], top_fraction
+        )
     face_count = int(static_sample["faces"].shape[0])
     if static_sample.get("prepared_storage_format") == "lazy_image_paths_v1":
         static_sample.pop("images", None)
@@ -1315,6 +1352,7 @@ def _prune_sample_for_training(
         "query_is_exact",
         "position_normalization_center",
         "position_normalization_scale",
+        "oracle_high_signal_mask",
     }
     if keep_projection:
         fields.update({"intrinsics", "extrinsics", "visibility"})
@@ -1346,6 +1384,27 @@ def _prune_sample_for_training(
     result["image_height"] = int(image_height)
     result["image_width"] = int(image_width)
     result["num_views"] = int(num_views)
+    return result
+
+
+def _oracle_top_magnitude_mask(
+    target: torch.Tensor, valid_mask: torch.Tensor, top_fraction: float
+) -> torch.Tensor:
+    """Per-mesh clean-target oracle gate for the residual-expert diagnostic."""
+
+    if not 0.0 < top_fraction < 1.0:
+        raise ValueError("oracle residual expert top_fraction must be between zero and one.")
+    valid = valid_mask.to(dtype=torch.bool, device=target.device)
+    valid_indices = torch.nonzero(valid, as_tuple=False).squeeze(-1)
+    if valid_indices.numel() < 1:
+        raise ValueError("oracle residual expert requires at least one valid vertex.")
+    magnitude = torch.linalg.vector_norm(target.float(), dim=-1)
+    descending = valid_indices[
+        torch.argsort(magnitude[valid_indices], descending=True, stable=True)
+    ]
+    selected_count = max(1, int(round(top_fraction * int(valid_indices.numel()))))
+    result = torch.zeros(target.shape[0], dtype=torch.bool, device=target.device)
+    result[descending[:selected_count]] = True
     return result
 
 

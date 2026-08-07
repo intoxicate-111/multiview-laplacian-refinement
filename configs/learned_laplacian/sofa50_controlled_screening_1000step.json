@@ -1,0 +1,25 @@
+{
+  "experiment": "sofa50_controlled_screening_1000step",
+  "manifest": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960/gt_query_manifest.json",
+  "base_config": "configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json",
+  "output_root": "runs/learned_laplacian/sofa50_controlled_screening_1000step",
+  "max_optimizer_steps": 1000,
+  "shared_seed": 7,
+  "arm_order": [
+    "canonical_0001",
+    "exact_0000",
+    "support_0010",
+    "support_0030",
+    "support_0100",
+    "importance_0001"
+  ],
+  "baseline_reuse": {
+    "A1": "canonical_0001",
+    "A2": "exact_0000",
+    "B0": "exact_0000",
+    "B1": "canonical_0001",
+    "C0": "canonical_0001"
+  },
+  "validation": "fixed exact GT queries for checkpoint selection; fixed shared query sets for support evaluation",
+  "recovery": false
+}
