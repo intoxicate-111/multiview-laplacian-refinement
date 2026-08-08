@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+VERSION = "2026-08-08-expanded-query-fix-v2"
+
 """Full Sofa50 comparison: prediction + real-expanded recovery + renderings.
 
 Compares the existing 50k C0F0/C0F1/C0F2 resolution arms with the new
@@ -27,6 +29,7 @@ Outputs include:
 """
 
 import argparse
+import copy
 import csv
 import importlib.util
 import json
@@ -333,11 +336,21 @@ def evaluate_expanded_run(
     label = str(run["label"])
     workspace = prepare_expanded_workspace(run, output_dir)
     config = read_json(workspace / "config.json")
+
+    # Real expanded-query samples are inference inputs, not GT-query augmentation
+    # samples. Mirror run_canonical_experiment_evaluation(): disable the training
+    # query-perturbation contract before _prepare_object_static() sees them.
+    expanded_config = copy.deepcopy(config)
+    query_cfg = expanded_config.setdefault("query_training", {})
+    query_cfg["enabled"] = False
+    query_cfg["apply_to_validation"] = False
+    query_cfg["zero_initial_laplacian"] = True
+
     print(f"[expanded] {label}: {expanded_manifest}", flush=True)
     per_mesh, aggregate, failures = _evaluate_expanded(
         workspace,
         expanded_manifest,
-        config,
+        expanded_config,
         device,
     )
     main = main_variant(aggregate)
