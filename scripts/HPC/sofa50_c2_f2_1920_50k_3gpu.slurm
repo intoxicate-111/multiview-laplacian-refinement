@@ -19,7 +19,7 @@ CONDA="/networkhome/WMGDS/zhou_c/miniconda3/bin/conda"
 MANIFEST="${SOFA50_1920_MANIFEST:-/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_1920/gt_query_manifest.json}"
 
 BASE_CONFIG="${REPO}/configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json"
-OUTPUT_ROOT="${REPO}/runs/learned_laplacian/sofa50_c2_f2_1920_50000step_3seed"
+OUTPUT_ROOT="${REPO}/runs/learned_laplacian/sofa50_c2_f2_1920_20000step_3seed"
 
 SEEDS=(7 17 27)
 SEED="${SEEDS[$SLURM_ARRAY_TASK_ID]}"
@@ -85,7 +85,7 @@ data_loading["validation_views_per_sample"] = None
 # Same optimizer-step budget as the 960 C2F2 comparison.
 multi = cfg.setdefault("multi_object_training", {})
 multi["epochs"] = 6000
-multi["max_optimizer_steps"] = 50000
+multi["max_optimizer_steps"] = 20000
 multi["gradient_accumulation_meshes"] = 4
 multi["checkpoint_every_epochs"] = 0
 multi["checkpoint_epochs"] = []
@@ -132,4 +132,4 @@ PYTHONPATH="${REPO}/src" "${CONDA}" run \
         --config "${CONFIG}" \
         --output-dir "${RUN_DIR}" \
         --device cuda \
-        --max-optimizer-steps 50000
+        --max-optimizer-steps 20000
