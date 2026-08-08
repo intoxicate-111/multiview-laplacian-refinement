@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-"""Unified Sofa50 comparison for C0/C1/C2, F0/F1/F2, and C2F2 3-seed runs.
+"""Sofa50 comparison for C0F0/C0F1/C0F2 and C2F2 3-seed runs.
 
 This script intentionally reuses the repository's existing capacity evaluator
 (`scripts/analyze_sofa50_capacity_2000.py::evaluate_arm`) so that all runs use
@@ -428,7 +428,7 @@ def build_report(
     roots: Mapping[str, Any],
 ) -> str:
     lines: list[str] = []
-    lines.append("# Sofa50 C/F/C2F2 comparison")
+    lines.append("# Sofa50 resolution + C2F2 three-seed comparison")
     lines.append("")
     lines.append("All checkpoints are freshly evaluated with the same exact-query metric contract from `analyze_sofa50_capacity_2000.py::evaluate_arm`.")
     lines.append("")
@@ -501,7 +501,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--runs-root", type=Path, default=DEFAULT_RUNS_ROOT)
     parser.add_argument("--resolution-root", type=Path, default=None)
-    parser.add_argument("--capacity-root", type=Path, default=None)
+    parser.add_argument("--capacity-root", type=Path, default=None, help="Optional historical C0/C1/C2 root; omitted by default.")
     parser.add_argument("--c2f2-root", type=Path, default=DEFAULT_C2F2_ROOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--device", default="cuda")
@@ -541,18 +541,13 @@ def main() -> int:
                 "Pass --resolution-root explicitly."
             )
 
+    # Historical C0/C1/C2 capacity runs are optional.  The current fair
+    # comparison only needs C0F0/C0F1/C0F2 @ 50k plus C2F2 @ 50k x 3 seeds.
     capacity_root = None
-    if not args.skip_capacity:
-        capacity_root = (
-            args.capacity_root.expanduser().resolve()
-            if args.capacity_root is not None
-            else discover_capacity_root(runs_root)
-        )
-        if capacity_root is None:
-            raise FileNotFoundError(
-                "Could not auto-discover a C0/C1/C2 capacity root. "
-                "Pass --capacity-root explicitly or use --skip-capacity."
-            )
+    if not args.skip_capacity and args.capacity_root is not None:
+        capacity_root = args.capacity_root.expanduser().resolve()
+        if not capacity_root.is_dir():
+            raise FileNotFoundError(f"Capacity root not found: {capacity_root}")
 
     if not c2f2_root.is_dir():
         raise FileNotFoundError(f"C2F2 3-seed root not found: {c2f2_root}")
@@ -627,7 +622,7 @@ def main() -> int:
     }
 
     summary = {
-        "experiment": "Sofa50 unified C0/C1/C2 + F0/F1/F2 + C2F2 3-seed comparison",
+        "experiment": "Sofa50 C0F0/C0F1/C0F2 + C2F2 3-seed comparison",
         "metric_contract": "scripts/analyze_sofa50_capacity_2000.py::evaluate_arm",
         "roots": roots,
         "rows": main_rows,
@@ -635,7 +630,7 @@ def main() -> int:
         "pairwise_changes": pairwise,
         "notes": [
             "C0F0/C0F1/C0F2_res form the controlled resolution ablation.",
-            "C0F2_cap/C1F2/C2F2_cap form the historical capacity ablation.",
+            "Historical C0/C1/C2 runs are included only when --capacity-root is explicitly supplied.",
             "C0F2_res and C0F2_cap are separate training runs of the common L-shaped anchor and are not silently merged.",
             "C2F2_seed7/17/27 are the new 50k selected-configuration robustness runs.",
             "Pairwise rows explicitly report whether optimizer-step budgets match.",
