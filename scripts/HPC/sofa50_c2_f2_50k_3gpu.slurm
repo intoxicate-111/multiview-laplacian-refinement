@@ -166,6 +166,7 @@ for SEED in "${SEEDS[@]}"; do
 
     srun \
         --exclusive \
+        --exact \
         --nodes=1 \
         --ntasks=1 \
         --cpus-per-task=8 \
@@ -192,8 +193,20 @@ for SEED in "${SEEDS[@]}"; do
         2> "${REPO}/slurm_logs/c2f2_seed${SEED}_${SLURM_JOB_ID}.err" &
 
     PIDS+=($!)
-
 done
+
+FAIL=0
+
+for PID in "${PIDS[@]}"; do
+    if ! wait "${PID}"; then
+        FAIL=1
+    fi
+done
+
+if [ "${FAIL}" -ne 0 ]; then
+    echo "At least one run failed."
+    exit 1
+fi
 
 # ============================================================
 # Wait for all three runs
