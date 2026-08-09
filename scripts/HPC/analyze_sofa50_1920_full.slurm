@@ -43,7 +43,7 @@ RESOLUTION_ROOT="${REPO}/runs/learned_laplacian/sofa50_image_resolution_ablation
 # C2F2 three-seed roots
 # ============================================================
 
-C2F2_960_ROOT="${REPO}/runs/learned_laplacian/sofa50_c2_f2_960_20000step_3seed"
+C2F2_960_ROOT="${REPO}/runs/learned_laplacian/sofa50_c2_f2_50000step_3seed"
 C2F2_1920_ROOT="${REPO}/runs/learned_laplacian/sofa50_c2_f2_1920_20000step_3seed"
 
 # ============================================================
