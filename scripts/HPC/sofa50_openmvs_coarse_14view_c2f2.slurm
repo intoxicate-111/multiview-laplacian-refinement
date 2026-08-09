@@ -17,7 +17,7 @@ C2F2_ROOT="${REPO}/runs/learned_laplacian/sofa50_c2_f2_50000step_3seed"
 
 SOURCE_MANIFEST="/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_960/gt_query_manifest.json"
 
-COARSE_MODELS_ROOT="/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/openmvs_coarse_v6/models"
+COARSE_MODELS_ROOT="/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/openmvs_coarse_v6/reconstruction/models"
 
 OUTPUT_DIR="${REPO}/runs/learned_laplacian/sofa50_openmvs48_c2f2_3seed_48mesh"
 
