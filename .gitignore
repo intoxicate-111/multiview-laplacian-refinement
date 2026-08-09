@@ -17,6 +17,7 @@ runs/thingi10k50_gpu_trial/
 # Learned single-object runs include checkpoints and diagnostic meshes; keep
 # them local even though other run OBJ artifacts may be versioned.
 runs/learned_laplacian/**
+boundary_diagnostic/
 projected_gt_on_coarse.obj
 .external/
 mesh/input.obj
