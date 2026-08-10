@@ -22,7 +22,8 @@ Status date: 2026-08-10.
 | Expanded-query recovery | Complete | Refinement increases Chamfer distance on all five validation meshes for the evaluated 960 and 1920 C2F2 checkpoints. |
 | OpenMVS coarse-mesh recovery | Complete for 48 of 50 meshes | Mean Chamfer distance increases after refinement. Two objects have no OpenMVS coarse mesh. |
 | Oracle residual expert | Closed | The 2,000-step diagnostic does not support this branch. |
-| 14/28/56-view ablation | Blocked before training | Prepared samples lack `visibility_backface_and_occlusion`; expanded-inference manifests are absent. No checkpoint or result report was produced. |
+| 14/28/56-view ablation | Preparation contract implemented | The preparation writes a GT-query training manifest, an expanded-inference manifest and graph-specific `visibility_backface_and_occlusion` for each view count. No checkpoint or result report has been produced. |
+| Query-graph resolution ablation | Preparation contract implemented | The preparation writes GT, GT-sub1, GT-sub2 and adaptive represented-vertex-area manifests. No checkpoint or result report has been produced. |
 | Automated tests | Passing | `216 passed, 3 skipped` in the `test` Conda environment. |
 
 The implemented model learns the supervised differential field on GT-query
@@ -72,6 +73,332 @@ coarse mesh vertices
 
 No GT differential value is transferred to the inference graph. GT geometry is
 used only for evaluation.
+
+## Mathematical specification
+
+The equations below describe the implemented code path. Legacy terms are marked
+explicitly.
+
+### Uniform Laplacian and supervised target
+
+Let `N(i)` be the one-ring neighbours of vertex `i`, and let
+`d_i = |N(i)|`. The uniform graph Laplacian is
+
+$$
+(L X)_i = X_i - \frac{1}{d_i}\sum_{j\in N(i)}X_j,
+\qquad
+L_{ii}=1,\quad L_{ij}=-\frac{1}{d_i}.
+$$
+
+An isolated vertex has a zero Laplacian row. The local edge scale and the
+absolute supervised target are
+
+$$
+h_i = \frac{1}{d_i}\sum_{j\in N(i)}\lVert V_i-V_j\rVert_2,
+\qquad
+\delta_i^{\mathrm{GT}}=(L_{\mathrm{GT}}V_{\mathrm{GT}})_i,
+$$
+
+$$
+\widehat{\delta}_i^{\mathrm{GT}}
+=\frac{\delta_i^{\mathrm{GT}}}{h_i^2+\varepsilon},
+\qquad \varepsilon=10^{-12}.
+$$
+
+The network predicts the absolute normalised vector
+`delta_hat_prediction`; it does not predict a displacement or Laplacian
+residual. For a current inference graph,
+
+$$
+\delta_i^{\mathrm{pred}}
+=\widehat{\delta}_i^{\mathrm{pred}}\left((h_i^{\mathrm{current}})^2+\varepsilon\right).
+$$
+
+This denormalisation is applied exactly once, using the current query graph.
+
+### Query perturbation
+
+For perturbed GT queries,
+
+$$
+q_i=V_i+h_i\left(\xi_i n_i+\zeta_i t_i\right),
+\qquad
+\xi_i\sim\mathcal N(0,\sigma_n^2),\quad
+\zeta_i\sim\mathcal N(0,\sigma_t^2),
+$$
+
+where `n_i` is the vertex normal and `t_i` is a random unit tangent obtained by
+removing the normal component from a Gaussian 3D direction. The displacement is
+clamped to
+
+$$
+\lVert q_i-V_i\rVert_2\leq \kappa h_i.
+$$
+
+The canonical settings are
+`sigma_n = sigma_t = 0.0003`, `kappa = 0.001`, and an exact-query fraction of
+`0.2`. Exact queries set `q_i = V_i`. Perturbation changes the query position,
+not the graph or target.
+
+### Projection, renderer visibility and multi-view aggregation
+
+For view `v`, world-to-camera projection is
+
+$$
+y_{vi}=E_v[q_i^\top,1]^\top,
+\qquad
+\widetilde p_{vi}=K_v y_{vi},
+\qquad
+(u_{vi},v_{vi})=
+\left(\frac{\widetilde p_{vi,x}}{\widetilde p_{vi,z}},
+      \frac{\widetilde p_{vi,y}}{\widetilde p_{vi,z}}\right).
+$$
+
+Let `f_vi` indicate positive depth and in-frame projection. Let `r_vi` be the
+precomputed renderer-native back-face and occlusion result. The feature-sampling
+mask is
+
+$$
+z_{vi}=f_{vi}r_{vi}\in\{0,1\}.
+$$
+
+If `F_v(u_vi,v_vi)` is the bilinearly sampled CNN feature, the implemented
+masked mean and valid-view ratio are
+
+$$
+\overline F_i=
+\frac{\sum_{v=1}^{M}z_{vi}F_v(u_{vi},v_{vi})}
+     {\max\left(1,\sum_{v=1}^{M}z_{vi}\right)},
+\qquad
+\rho_i=\frac{1}{M}\sum_{v=1}^{M}z_{vi}.
+$$
+
+When no view is valid, `F_bar_i = 0` and `rho_i = 0`.
+
+For C2F2, the image encoder is
+
+$$
+F_v=\operatorname{Conv}_{3\times3}^{64}\!\left(
+\operatorname{ReLU}\!\left(
+\operatorname{Conv}_{3\times3,s=1}^{64}\!\left(
+\operatorname{ReLU}\!\left(
+\operatorname{Conv}_{5\times5,s=1}^{32}(I_v)
+\right)\right)\right)\right).
+$$
+
+Padding preserves the input spatial resolution in all three convolutions.
+
+### Visibility, confidence and Gaussian gates
+
+The canonical renderer gate is a strict any-view gate:
+
+$$
+m_i=\mathbf 1\!\left[\sum_{v=1}^{M}z_{vi}>0\right].
+$$
+
+The optional confidence head predicts a bounded reliability value
+
+$$
+c_i=\operatorname{sigmoid}(g_\theta(x_i))\in[0,1].
+$$
+
+The canonical recovery weight is
+
+$$
+w_i=m_i c_i,
+$$
+
+or `w_i = m_i` when the confidence head is disabled. Consequently, a vertex
+that is invisible in every view has exactly zero learned-Laplacian weight.
+
+The repository also implements the following Gaussian distance-confidence gate
+in the legacy coarse/GT projection path:
+
+$$
+g_i=\operatorname{clip}\!\left(
+\exp\!\left[-\left(\frac{d_i^{\mathrm{surface}}}{s}\right)^2\right],
+g_{\min},1\right).
+$$
+
+Here `d_i^surface` is the distance from a coarse query to the GT surface and
+`s` is `distance_confidence_scale`. This Gaussian gate is not renderer
+visibility and is not used by the canonical GT-query training path. Canonical
+training uses `z_vi` for image-feature sampling; canonical recovery uses
+`m_i c_i`.
+
+### Vertex representation and graph network
+
+Let `c_obj` and `s_obj` be the object normalisation centre and scale. The
+normalised query is
+
+$$
+\widetilde q_i=\frac{q_i-c_{\mathrm{obj}}}{s_{\mathrm{obj}}}.
+$$
+
+With `K = 6` frequencies, the dynamic Fourier encoding is
+
+$$
+\phi(\widetilde q_i)=
+\left[
+\widetilde q_i,
+\left\{\sin(2^k\pi\widetilde q_i),
+\cos(2^k\pi\widetilde q_i)\right\}_{k=0}^{K-1}
+\right].
+$$
+
+The per-vertex input is
+
+$$
+x_i=\left[
+\phi(\widetilde q_i),\ n_i,\
+\log\!\left(\max(h_i/s_{\mathrm{obj}},10^{-8})\right),\
+\log(1+d_i),\ \rho_i,\ \overline F_i
+\right].
+$$
+
+For C2F2, `phi` has 39 channels and the complete vertex input has
+`39 + 3 + 1 + 1 + 1 + 64 = 109` channels. The graph backbone is
+`109 -> 256 -> 256`, followed by three 256-channel message-passing blocks and
+an output MLP `256 -> 256 -> 3`. The confidence side head is
+`109 -> 256 -> 1` with a final sigmoid.
+
+After an input MLP, graph layer `l` computes
+
+$$
+\mu_i^{(l)}=\frac{1}{\max(1,d_i)}
+\sum_{j\in N(i)}u_j^{(l)},
+$$
+
+$$
+u_i^{(l+1)}=operatorname{ReLU}\!\left(
+u_i^{(l)}+operatorname{MLP}_l
+\left([u_i^{(l)},\mu_i^{(l)}]\right)
+\right).
+$$
+
+The output MLP maps the final graph state to
+`delta_hat_prediction in R^3`.
+
+### Training objective
+
+For component residual
+
+$$
+r_{ik}=\widehat\delta^{\mathrm{pred}}_{ik}
+-\widehat\delta^{\mathrm{GT}}_{ik},
+$$
+
+the component-wise Huber function is
+
+$$
+H_\tau(r)=
+\begin{cases}
+\frac{1}{2}r^2, & |r|\leq\tau,\\
+\tau\left(|r|-\frac{1}{2}\tau\right), & |r|>\tau,
+\end{cases}
+\qquad \tau=0.01.
+$$
+
+The per-vertex error and primary loss are
+
+$$
+e_i=\frac{1}{3}\sum_{k=1}^{3}H_\tau(r_{ik}),
+\qquad
+\mathcal L_{\mathrm{lap}}=
+\frac{\sum_i a_i e_i}{\max(10^{-12},\sum_i a_i)},
+$$
+
+where `a_i` is the prepared target-confidence/valid-scale weight. The current
+full-vertex GT-query contract assigns unit weight to valid non-isolated
+vertices and zero weight to invalid local scales.
+
+The confidence side head uses detached prediction error:
+
+$$
+\widetilde c_i=\operatorname{clip}(c_i,c_{\min},1),
+$$
+
+$$
+\mathcal L_{\mathrm{conf}}=
+\frac{\sum_i a_i
+\left[\widetilde c_i\,\operatorname{stopgrad}(e_i)
+-\beta\log\widetilde c_i\right]}
+{\max(10^{-12},\sum_i a_i)}.
+$$
+
+The complete optimisation objective is
+
+$$
+\mathcal L_{\mathrm{train}}
+=\mathcal L_{\mathrm{lap}}
++\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}},
+$$
+
+with `beta = 0.01`, `c_min = 10^-4`, and `lambda_conf = 1` in the canonical
+configuration. Predicted confidence does not reweight
+`L_lap`; this prevents the confidence head from suppressing the primary
+supervision.
+
+### Laplacian recovery objective
+
+For the fixed current graph `(X_0, F)`, construct `L_current` and
+`h_current`, then recover vertex positions `X` from `delta_pred`. The canonical
+dense objective is
+
+$$
+\mathcal L_{\mathrm{rec}}(X)=
+\lambda_{\mathrm{lap}}
+\sum_{i,k}H_\tau\!\left(
+\sqrt{w_i}\left[(L_{\mathrm{current}}X)_{ik}
+-\delta_{ik}^{\mathrm{pred}}\right]\right)
++\frac{\lambda_{\mathrm{anchor}}}{2}\lVert X-X_0\rVert_F^2
++\mathcal L_{\mathrm{edge}}+\mathcal L_{\mathrm{unseen}}.
+$$
+
+The current canonical values are `lambda_lap = 1`,
+`lambda_anchor = 0.01`, `lambda_edge = 0`, and
+`lambda_unseen_anchor = 0`. The visibility/confidence weight applies to the
+complete Laplacian equation row through `sqrt(w_i)`.
+
+For large uniform-Laplacian meshes, the sparse solver uses the corresponding L2
+form:
+
+$$
+\mathcal L_{\mathrm{sparse}}(X)=
+\frac{\lambda_{\mathrm{lap}}}{N}
+\left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred}})\right\rVert_F^2
++\frac{\lambda_{\mathrm{anchor}}}{N}\lVert X-X_0\rVert_F^2,
+\qquad W=\operatorname{diag}(w).
+$$
+
+### Reported metrics
+
+For predicted and target normalised Laplacians `P` and `T`, the principal
+prediction metrics are
+
+$$
+\operatorname{EPE}=\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2,
+$$
+
+$$
+\operatorname{Cos}_{\mathrm{global}}=
+\frac{\langle\operatorname{vec}(P),\operatorname{vec}(T)\rangle}
+{\lVert P\rVert_F\lVert T\rVert_F},
+\qquad
+R_{\mathrm{norm}}=\frac{\lVert P\rVert_F}{\lVert T\rVert_F}.
+$$
+
+The reported bidirectional vertex-to-surface Chamfer value is
+
+$$
+D_{\mathrm{C}}(A,B)=\frac{1}{2}\left[
+\frac{1}{|V_A|}\sum_{x\in V_A}d(x,S_B)
++\frac{1}{|V_B'|}\sum_{y\in V_B'}d(y,S_A)
+\right],
+$$
+
+where `S_A` and `S_B` are triangle surfaces and `V_B'` is the evaluated or
+subsampled GT vertex set.
 
 ## Dataset contract
 
@@ -184,9 +511,10 @@ sbatch scripts/HPC/sofa50_c2_f2_1920_50k_3gpu.slurm
 sbatch scripts/HPC/test_sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000.slurm
 ```
 
-The 14/28/56-view job is not executable under its current data contract. It
-requires renderer-visibility fields in the GT-query samples and matching
-expanded-inference manifests.
+The 14/28/56-view preparation writes GT-query and expanded-inference manifests
+for 14, 28 and 56 views. Each prepared graph contains renderer-native
+`visibility_backface_and_occlusion`. The training job consumes the GT-query
+manifests without a separate visibility attachment step.
 
 ## Result locations on the HPC
 
