@@ -1,35 +1,46 @@
-# Multi-View GT Laplacian Learning
-
-The production Sofa50 method is defined in one place: [Canonical Sofa50
-learned-Laplacian pipeline](docs/CANONICAL_SOFA50_PIPELINE.md). It predicts an
-absolute GT `h^2`-normalized differential target and performs exactly one
-current-expanded-graph denormalization before visibility/confidence-aware
-recovery. Older residual, displacement, oracle, and 5000-epoch material elsewhere
-is retained only as legacy experimental context.
+# Multi-View Laplacian Refinement
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Training guides: [English](docs/MULTI_MESH_TRAINING.md) |
-[简体中文](docs/MULTI_MESH_TRAINING.zh-CN.md)
+Method specification: [Canonical Sofa50 pipeline](docs/CANONICAL_SOFA50_PIPELINE.md)
 
-## Project objective
+Training guide: [Multi-mesh GT-query training](docs/MULTI_MESH_TRAINING.md)
 
-The learned-Laplacian pipeline has one primary objective:
+Visibility and recovery: [Visibility-aware recovery report](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
+
+## Project status
+
+Status date: 2026-08-10.
+
+| Component | State | Conclusion |
+|---|---|---|
+| GT-query dataset and training pipeline | Implemented | Direct supervision of the absolute GT `h^2`-normalised Laplacian is operational. |
+| Target-leakage controls | Implemented and tested | GT Laplacian values are excluded from model inputs. |
+| Sofa50 960 image-resolution ablation | Complete | F2 has lower exact-query error than F0 and F1 at 50,000 optimiser steps. |
+| Sofa50 960 C2F2 training | Complete | Three seeds completed at 50,000 optimiser steps. C2F2 is the current lowest-error exact-query configuration. |
+| Sofa50 1920 C2F2 training | Complete | Three seeds completed at 20,000 optimiser steps. Mean endpoint error and recovery Chamfer are higher than the 960 result; mean cosine is higher. |
+| Expanded-query recovery | Complete | Refinement increases Chamfer distance on all five validation meshes for the evaluated 960 and 1920 C2F2 checkpoints. |
+| OpenMVS coarse-mesh recovery | Complete for 48 of 50 meshes | Mean Chamfer distance increases after refinement. Two objects have no OpenMVS coarse mesh. |
+| Oracle residual expert | Closed | The 2,000-step diagnostic does not support this branch. |
+| 14/28/56-view ablation | Blocked before training | Prepared samples lack `visibility_backface_and_occlusion`; expanded-inference manifests are absent. No checkpoint or result report was produced. |
+| Automated tests | Passing | `216 passed, 3 skipped` in the `test` Conda environment. |
+
+The implemented model learns the supervised differential field on GT-query
+graphs and uses RGB information. Transfer from GT-query graphs to expanded or
+OpenMVS query graphs has not produced a geometry improvement. The end-to-end
+coarse-mesh refinement objective is not met by the current recovery path.
+
+## Method
+
+The model maps calibrated multi-view observations and a graph query to the GT
+local differential signal:
 
 ```text
-multi-view RGB + calibrated cameras + 3D query position + local graph context
-    -> the ground-truth local Laplacian signal at that 3D location
+multi-view RGB + cameras + 3D query + local graph context
+    -> absolute GT h^2-normalised Laplacian
 ```
 
-Training uses ground-truth meshes because they provide the supervised field we
-want the network to learn. It does **not** create a coarse mesh and does not
-train a coarse-to-GT correction. At inference, the learned field is queried at
-the vertices of an arbitrary input mesh, including an unseen coarse or
-topology-expanded mesh. Generalisation to held-out objects and non-GT query
-graphs is the final goal.
-
-The current target is the edge-scale-normalised uniform Laplacian of the GT
-mesh. For a GT vertex `i`,
+For GT vertex `i`:
 
 ```text
 delta_gt_i = (L_gt V_gt)_i
@@ -37,221 +48,157 @@ h_i        = mean incident GT edge length at i
 target_i   = delta_gt_i / (h_i^2 + epsilon)
 ```
 
-The normalised target is predicted first. Reconstruction converts it back to
-raw Laplacian coordinates with the query graph's local scale and solves the
-existing Laplacian reconstruction problem.
+Training uses GT vertices and GT connectivity. A fixed fraction of queries
+remain at exact GT positions; the other queries receive bounded normal and
+tangent perturbations relative to `h_i`. The target remains attached to the
+original GT vertex.
 
-## Training contract
+The current geometry mode is `query_fourier`. Fourier features are calculated
+after query augmentation. Image features, query position, normal, relative
+local scale, degree and graph connectivity are model inputs. The raw and
+normalised GT Laplacians are supervision only. `initial_laplacian` is zero in
+GT-query training samples.
 
-For every training object:
-
-1. render calibrated multi-view RGB observations from the GT mesh;
-2. use GT vertices and GT connectivity as the training query graph;
-3. retain some exact GT query positions;
-4. perturb the other query positions by small normal and tangent offsets
-   relative to local edge length `h_i`;
-5. keep the target attached to the corresponding original GT vertex;
-6. predict its edge-scale-normalised GT Laplacian.
-
-In symbols:
+Inference uses an independently produced coarse or topology-expanded mesh:
 
 ```text
-q_i = V_gt_i + small_normal_offset_i + small_tangent_offset_i
-
-F(images, cameras, q_i, normal_i, h_i, graph)
-    ~= edge_scale_normalized_laplacian_gt_i
-```
-
-The perturbation teaches a local 3D query field instead of a lookup table that
-only works at exact GT coordinates. Exact and perturbed query losses are
-recorded separately.
-
-## No target leakage
-
-GT Laplacian vectors are supervision only. They must never be copied into the
-model input.
-
-- `initial_laplacian` is zero in GT-query samples.
-- The raw or normalised GT Laplacian is not an input feature.
-- A GT Laplacian is never interpolated onto a coarse or expanded graph.
-- An inference-only expanded sample may contain schema placeholders, but they
-  are not training targets or oracle supervision.
-- The input normal, local edge scale, degree, query coordinates, graph and
-  image features provide context; none is the target itself.
-
-## Query positional encoding
-
-Fourier encoding is computed dynamically in the model after query
-augmentation:
-
-```text
-query position
-  -> normalize by per-object center and scale
-  -> [q, sin(2^k pi q), cos(2^k pi q)]
-  -> concatenate image feature, normal, relative local scale and degree
-  -> graph predictor
-```
-
-It is intentionally not precomputed during dataset preparation. The encoded
-coordinate must follow the actual perturbed training query or the actual
-coarse/expanded inference query.
-
-The production geometry mode is `query_fourier`. The historical CLI value
-`coarse_plus_multiview` means “query-geometry context plus multi-view features”
-in this mode; it does not mean that training constructs a coarse mesh or feeds
-its raw Laplacian to the predictor.
-
-## Inference contract
-
-Inference is separate from supervised GT-query training:
-
-```text
-multi-view observations
-  -> obtain any initial/coarse mesh
-  -> optional topology expansion
-  -> use its vertices as 3D queries
-  -> project each query into all calibrated views
-  -> aggregate CNN features
-  -> apply Fourier query encoding and graph context
+coarse mesh vertices
+  -> project into calibrated views
+  -> aggregate image features
   -> predict normalised Laplacian
-  -> recover raw query-graph Laplacian
-  -> Laplacian reconstruction
+  -> denormalise with the current query graph scale
+  -> confidence/visibility-weighted Laplacian recovery
 ```
 
-No GT mesh is available or required in this path. Position normalisation at
-inference must come from the observation/query coordinate frame, not from a
-hidden GT mesh.
+No GT differential value is transferred to the inference graph. GT geometry is
+used only for evaluation.
 
-## Current Sofa50 dataset
+## Dataset contract
 
-The current full dataset is:
+The Sofa50 data roots used on the HPC are:
 
 ```text
-/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_960
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_1920
 ```
 
-It contains:
+Each dataset contains 40 training, 5 validation and 5 held-out test objects.
+The standard 960 experiment uses 14 calibrated RGB views per object. Training
+uses `gt_query_manifest.json`; expanded recovery uses
+`expanded_inference_manifest.json`. Expanded manifests are inference-only.
 
-- 40 train, 5 validation and 5 held-out test objects;
-- 14 calibrated 960 x 960 RGB views per object;
-- lazy GT-query samples for supervised training;
-- separate expanded-query samples for inference evaluation;
-- variable topology and mesh size across objects.
+RGB images remain on disk and are decoded lazily as `uint8`. CUDA training uses
+pinned memory, non-blocking transfer and AMP for CNN/GNN forward passes.
+Target scaling, loss accumulation and numerical geometry operations remain in
+FP32.
 
-Training manifest:
+## Experiment nomenclature
 
-```text
-.../multiview_960/gt_query_manifest.json
-```
+| Label | Definition |
+|---|---|
+| C0 | Image feature dimension 16; graph hidden dimension 64; 3 graph layers. |
+| C2 | Image feature dimension 64; graph hidden dimension 256; 3 graph layers. |
+| F0 | Encoder strides `2, 2`; 240 x 240 feature map for 960 input. |
+| F1 | Encoder strides `2, 1`; 480 x 480 feature map for 960 input. |
+| F2 | Encoder strides `1, 1`; feature-map resolution equals input resolution. |
+| C2F2 | C2 capacity with the F2 image encoder. |
 
-Inference-only expanded manifest:
+## Completed results
 
-```text
-.../multiview_960/expanded_inference_manifest.json
-```
+### Exact GT-query prediction at 960
 
-Never pass the expanded inference manifest to the training loop.
+| Run | Seed | All EPE ↓ | Top-10% EPE ↓ | Global cosine ↑ | Prediction/GT norm |
+|---|---:|---:|---:|---:|---:|
+| C0F0 | 7 | 9.4641 | 30.7221 | 0.7808 | 0.8020 |
+| C0F1 | 7 | 9.3786 | 30.3095 | 0.7892 | 0.7938 |
+| C0F2 | 7 | 9.1665 | 28.4751 | 0.8227 | 0.8180 |
+| C2F2 | 7, 17, 27 | 2.8260 ± 0.0864 | 15.3614 ± 0.4036 | 0.8912 ± 0.0127 | 0.9348 ± 0.0160 |
 
-## Canonical Sofa50 training
+Original RGB produces lower error than zero RGB in the completed resolution
+ablation. The original-minus-zero global-cosine gaps are 0.2236, 0.3315 and
+0.3724 for F0, F1 and F2, respectively.
 
-Install the package and training dependencies, then run:
+### C2F2 at 960 and 1920
+
+| Input | Training budget | Mean all EPE ↓ | Mean top-10% EPE ↓ | Mean cosine ↑ | Mean expanded Chamfer ↓ |
+|---|---:|---:|---:|---:|---:|
+| 960 | 50,000 steps, 3 seeds | 2.8282 | 15.3743 | 0.8911 | 0.0011624 |
+| 1920 | 20,000 steps, 3 seeds | 3.0928 | 16.3299 | 0.8954 | 0.0012570 |
+
+The two rows do not have the same optimiser-step budget. The 1920 runs do not
+establish an improvement over the 960 runs.
+
+### Expanded-query recovery
+
+The shared five-object expanded-validation initial Chamfer is `0.000652884`.
+The 960 C2F2 mean refined Chamfer is `0.00116202`; the 1920 C2F2 mean is
+`0.00125704`. Each evaluated seed improves `0/5` meshes relative to its initial
+mesh.
+
+### OpenMVS coarse-mesh recovery
+
+The test uses 48-view COLMAP/OpenMVS coarse meshes, the original 14 Sofa50 RGB
+views for prediction, the three 960 C2F2 checkpoints, OpenGL visibility at 480,
+and no GT differential transfer. Forty-eight meshes are evaluated; two coarse
+meshes are absent.
+
+| Recovery | Initial mean Chamfer | Ensemble refined mean Chamfer | Better meshes | Introduced flips |
+|---|---:|---:|---:|---:|
+| 200 iterations | 0.0212023 | 0.0213199 | 2/48 | 4,692 |
+| 1,000 iterations | 0.0212023 | 0.0213198 | 2/48 | 4,734 |
+
+Increasing recovery from 200 to 1,000 iterations does not change the aggregate
+conclusion.
+
+## Installation and verification
 
 ```bash
+conda env create -f environment.yml
+conda activate test
 pip install -e ".[train]"
-bash scripts/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.sh
+PYTHONPATH=src pytest -q
 ```
 
-The launcher uses:
-
-```text
-configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json
-```
-
-The profile uses CUDA AMP, four lazy DataLoader workers, pinned memory,
-non-blocking transfer, gradient accumulation over four meshes, validation every
-five epochs and periodic checkpoints. The controlled experiment is exactly
-2,000 epochs and 20,000 optimizer steps and includes the minimal confidence
-head.
-
-The current full output directory is:
-
-```text
-runs/learned_laplacian/sofa50_50mesh_2000epoch_absolute_h2_confidence
-```
-
-## What constitutes evidence
-
-A lower GT-query validation loss is necessary but is not sufficient to prove
-the final goal. A useful checkpoint must pass all of the following checks:
-
-1. **Finite learning:** train and held-out validation losses improve over a
-   zero predictor.
-2. **Image dependence:** original RGB outperforms zero RGB, shuffled views and
-   cross-object RGB with the query graph and target fixed.
-3. **Non-collapsed amplitude:** `mean |prediction| / mean |GT|` is not near
-   zero, especially in high-magnitude regions.
-4. **Directional accuracy:** high-magnitude target regions have positive and
-   improving cosine similarity.
-5. **Cross-object generalisation:** held-out objects improve, not only the
-   training meshes.
-6. **Expanded-query transfer:** the same checkpoint works on real
-   coarse/expanded queries that were never used as GT training graphs.
-7. **Reconstruction:** predicted-Laplacian reconstruction improves Chamfer and
-   normal consistency over the initial mesh.
-
-Single-mesh overfitting only proves capacity. GT-query validation only proves
-the supervised field is learnable. Neither alone proves expanded-query
-reconstruction.
-
-## Diagnostic commands
-
-Image ablation and mesh-count scaling tools are available under `scripts/`:
-
-```bash
-python scripts/ablate_single_mesh_checkpoint_images.py --help
-python scripts/run_mesh_count_scaling.py --help
-python scripts/diagnose_laplacian_prediction.py --help
-```
-
-Supported image conditions include original RGB, zero RGB, shuffled view order
-and cross-object RGB. Mesh-count scaling uses nested 1/2/4/8/16-object sets and
-reports the zero-predictor baseline, prediction/target amplitude ratio,
-high-10% cosine and per-object metrics.
-
-## Data and precision path
-
-Prepared RGB remains lazy on disk. A worker decodes only the requested views as
-`uint8`; pinned CPU tensors are transferred to CUDA non-blockingly, converted
-to floating point, divided by 255 and normalised on the GPU. CNN and GNN
-forward passes use AMP. Target scaling, robust loss and numerical geometry
-operations remain FP32.
-
-The trainer records DataLoader wait, image decode, GPU transfer,
-forward/backward, total epoch time, validation time and CPU/GPU memory.
-
-## Legacy baselines
-
-The repository still contains coarse-mesh generators, oracle refinement,
-pseudo-surface experiments, single-object Bunny experiments and reconstruction
-solvers. They are useful baselines and debugging tools, but they do not define
-the current learned model's supervision contract.
-
-In particular, historical coarse-graph targets or closest-point pseudo targets
-must not be described as the production learned-Laplacian target. Production
-training is direct GT-query supervision; coarse/expanded meshes appear only as
-queries during downstream inference and evaluation.
-
-Renderer-native visibility and hard any-view Laplacian recovery are documented in
-[the visibility-aware recovery report](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md).
-All-view-invisible vertices can be removed from the recovery Laplacian objective
-without using depth images or changing the network.
-
-## Tests
+If the environment already exists:
 
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n test pytest -q
 ```
 
-Focused tests cover query perturbation bounds, zero initial-Laplacian leakage
-protection, Fourier query encoding, lazy image loading, AMP training, image
-ablation, mesh-count scaling and Sofa50 preparation.
+## HPC entry points
+
+The checked-in Slurm files contain cluster-specific paths and resource
+requests.
+
+```bash
+# 960 F0/F1/F2, 50,000 steps
+bash scripts/slurm_jobs/submit_resolution_50k_parallel.sh
+
+# 960 C2F2, seeds 7/17/27, 50,000 steps
+sbatch scripts/HPC/sofa50_c2_f2_50k_3gpu.slurm
+
+# 1920 C2F2, seeds 7/17/27, current 20,000-step output contract
+sbatch scripts/HPC/sofa50_c2_f2_1920_50k_3gpu.slurm
+
+# OpenMVS recovery with OpenGL visibility and 1,000 recovery iterations
+sbatch scripts/HPC/test_sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000.slurm
+```
+
+The 14/28/56-view job is not executable under its current data contract. It
+requires renderer-visibility fields in the GT-query samples and matching
+expanded-inference manifests.
+
+## Result locations on the HPC
+
+```text
+runs/learned_laplacian/sofa50_image_resolution_ablation_50000step
+runs/learned_laplacian/sofa50_c2_f2_50000step_3seed
+runs/learned_laplacian/sofa50_c2_f2_1920_20000step_3seed
+runs/learned_laplacian/sofa50_cf_c2f2_comparison_full
+runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
+runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
+runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
+```
+
+Checkpoints, prepared datasets and HPC result directories are not distributed
+with the source repository.

@@ -1,31 +1,44 @@
-# 多视图 GT Laplacian 学习
-
-正式的 Sofa50 方法统一定义在[Canonical Sofa50 learned-Laplacian
-pipeline](docs/CANONICAL_SOFA50_PIPELINE.md) 中。模型预测绝对 GT `h^2` 归一化微分
-目标，并且在可见性/置信度感知恢复前，只进行一次基于当前 expanded graph 的反归一化。
-仓库中的旧 residual、displacement、oracle 和 5,000-epoch 内容仅作为历史实验记录保留。
+# 多视图 Laplacian 网格细化
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-训练指南：[English](docs/MULTI_MESH_TRAINING.md) |
-[简体中文](docs/MULTI_MESH_TRAINING.zh-CN.md)
+方法定义：[Sofa50 标准流程](docs/CANONICAL_SOFA50_PIPELINE.md)
 
-## 项目目标
+训练说明：[多网格 GT-query 训练](docs/MULTI_MESH_TRAINING.zh-CN.md)
 
-Learned-Laplacian pipeline 只有一个核心目标：
+可见性与恢复：[可见性感知恢复报告](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
+
+## 项目状态
+
+状态日期：2026-08-10。
+
+| 组件 | 状态 | 结论 |
+|---|---|---|
+| GT-query 数据与训练流程 | 已实现 | 绝对 GT `h^2` 归一化 Laplacian 的直接监督训练可以运行。 |
+| Target 泄漏控制 | 已实现并测试 | 模型输入不包含 GT Laplacian。 |
+| Sofa50 960 图像分辨率消融 | 已完成 | 在 50,000 个 optimizer steps 下，F2 的 exact-query error 低于 F0 和 F1。 |
+| Sofa50 960 C2F2 训练 | 已完成 | 三个 seed 均完成 50,000 个 optimizer steps。C2F2 是当前 exact-query error 最低的配置。 |
+| Sofa50 1920 C2F2 训练 | 已完成 | 三个 seed 均完成 20,000 个 optimizer steps。平均 endpoint error 和 recovery Chamfer 高于 960 结果；平均 cosine 更高。 |
+| Expanded-query recovery | 已完成 | 对已评估的 960 和 1920 C2F2 checkpoint，五个 validation mesh 的 Chamfer 均增加。 |
+| OpenMVS coarse-mesh recovery | 50 个物体中完成 48 个 | 细化后的平均 Chamfer 增加。两个物体缺少 OpenMVS coarse mesh。 |
+| Oracle residual expert | 已关闭 | 2,000-step diagnostic 不支持该分支。 |
+| 14/28/56-view 消融 | 训练前阻断 | Prepared sample 缺少 `visibility_backface_and_occlusion`；expanded-inference manifest 不存在。未生成 checkpoint 或结果报告。 |
+| 自动化测试 | 通过 | `test` Conda 环境中为 `216 passed, 3 skipped`。 |
+
+当前模型能够在 GT-query graph 上学习监督微分场，并使用 RGB 信息。从 GT-query
+graph 到 expanded 或 OpenMVS query graph 的迁移未产生几何改善。当前 recovery
+流程未达到端到端 coarse-mesh refinement 目标。
+
+## 方法
+
+模型根据标定后的多视图观测和图查询预测 GT 局部微分信号：
 
 ```text
-多视图 RGB + 标定相机 + 3D query position + 局部图上下文
-    -> 该 3D 位置对应的 GT 局部 Laplacian signal
+多视图 RGB + 相机 + 3D query + 局部图上下文
+    -> 绝对 GT h^2 归一化 Laplacian
 ```
 
-训练使用 GT mesh，因为 GT mesh 提供了希望网络学习的监督场。训练阶段**不生成
-coarse mesh**，也不学习 coarse-to-GT correction。推理时，在任意输入 mesh 的
-顶点上查询这个学习到的场，包括未见物体的 coarse mesh 或经过 topology expansion
-的 mesh。最终目标是泛化到 held-out objects 和非 GT query graphs。
-
-当前 target 是 GT mesh 的 edge-scale-normalized uniform Laplacian。对于 GT vertex
-`i`：
+对于 GT vertex `i`：
 
 ```text
 delta_gt_i = (L_gt V_gt)_i
@@ -33,206 +46,145 @@ h_i        = vertex i 的平均相邻 GT 边长
 target_i   = delta_gt_i / (h_i^2 + epsilon)
 ```
 
-网络首先预测 normalized target。Reconstruction 使用 query graph 的局部尺度将其
-恢复为 raw Laplacian coordinates，然后求解现有的 Laplacian reconstruction 问题。
+训练使用 GT vertices 和 GT connectivity。一部分 query 保持精确 GT 位置，其余
+query 按照 `h_i` 加入有界的法向与切向扰动。Target 始终绑定到原始 GT vertex。
 
-## 训练契约
+当前 geometry mode 为 `query_fourier`。Fourier feature 在 query augmentation
+之后计算。Image feature、query position、normal、相对局部尺度、degree 和 graph
+connectivity 是模型输入。Raw 和 normalized GT Laplacian 仅用于监督。GT-query
+training sample 中的 `initial_laplacian` 为零。
 
-对每个训练物体：
-
-1. 从 GT mesh 渲染带标定信息的多视图 RGB；
-2. 使用 GT vertices 和 GT connectivity 构建训练 query graph；
-3. 保留一部分未扰动的精确 GT query positions；
-4. 按照局部边长 `h_i` 对其余 query 加入小尺度法向和切向扰动；
-5. target 始终绑定到对应的原始 GT vertex；
-6. 预测该点的 edge-scale-normalized GT Laplacian。
-
-形式化表示为：
+推理使用独立生成的 coarse mesh 或 topology-expanded mesh：
 
 ```text
-q_i = V_gt_i + small_normal_offset_i + small_tangent_offset_i
-
-F(images, cameras, q_i, normal_i, h_i, graph)
-    ~= edge_scale_normalized_laplacian_gt_i
-```
-
-Query 扰动让模型学习表面附近的局部 3D query field，而不是只能在精确 GT
-coordinates 上工作的 lookup table。训练分别记录 exact-query loss 和
-perturbed-query loss。
-
-## 防止 target 泄漏
-
-GT Laplacian vector 只能作为监督，绝不能复制到模型输入中。
-
-- GT-query sample 中的 `initial_laplacian` 为零；
-- raw 或 normalized GT Laplacian 不能作为输入特征；
-- 不允许把 GT Laplacian 插值到 coarse 或 expanded graph；
-- inference-only expanded sample 可能包含满足 schema 所需的 placeholder，但它们
-  不是 training target 或 oracle supervision；
-- 输入的 normal、局部边长、degree、query coordinate、graph 和 image feature
-  提供预测上下文，但其中任何一个都不是 target 本身。
-
-## Query 位置编码
-
-Fourier encoding 在 query augmentation 之后由模型动态计算：
-
-```text
-query position
-  -> 使用每个物体的 center 和 scale 归一化
-  -> [q, sin(2^k pi q), cos(2^k pi q)]
-  -> 拼接 image feature、normal、相对局部边长和 degree
-  -> graph predictor
-```
-
-Fourier feature 不会在数据准备阶段预计算。编码后的坐标必须对应实际扰动后的训练
-query，或实际 coarse/expanded inference query。
-
-正式 geometry mode 是 `query_fourier`。历史 CLI 参数
-`coarse_plus_multiview` 在该模式中表示“query geometry context 加多视图特征”；
-它不表示训练阶段会构造 coarse mesh，也不表示会把 coarse mesh 的 raw
-Laplacian 输入 predictor。
-
-## 推理契约
-
-推理与有监督的 GT-query training 是两个不同阶段：
-
-```text
-多视图观测
-  -> 获得任意 initial/coarse mesh
-  -> 可选 topology expansion
-  -> 将其 vertices 作为 3D queries
-  -> 把每个 query 投影到所有标定视图
-  -> 聚合 CNN features
-  -> 使用 Fourier query encoding 和 graph context
+coarse mesh vertices
+  -> 投影到标定视图
+  -> 聚合 image features
   -> 预测 normalized Laplacian
-  -> 恢复 query graph 的 raw Laplacian
-  -> Laplacian reconstruction
+  -> 使用当前 query graph 尺度反归一化
+  -> confidence/visibility 加权 Laplacian recovery
 ```
 
-这条推理路径不使用也不要求 GT mesh。推理时的位置归一化必须来自 observation/query
-coordinate frame，不能依赖隐藏的 GT mesh。
+推理 graph 不接收任何 GT differential value。GT geometry 仅用于评估。
 
-## 当前 Sofa50 数据集
+## 数据契约
 
-当前完整数据集为：
+HPC 上使用的 Sofa50 数据目录为：
 
 ```text
-/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_960
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_1920
 ```
 
-数据集包含：
+每个数据集包含 40 个 training、5 个 validation 和 5 个 held-out test objects。
+标准 960 实验对每个物体使用 14 个标定 RGB views。训练使用
+`gt_query_manifest.json`；expanded recovery 使用
+`expanded_inference_manifest.json`。Expanded manifest 仅用于推理。
 
-- 40 个 train、5 个 validation 和 5 个 held-out test objects；
-- 每个物体 14 个带标定信息的 960 x 960 RGB views；
-- 用于有监督训练的 lazy GT-query samples；
-- 用于 inference evaluation 的独立 expanded-query samples；
-- 不同物体允许使用不同 topology 和 mesh size。
+RGB 图像保存在磁盘上，并以 `uint8` 形式 lazy decode。CUDA 训练使用 pinned
+memory、non-blocking transfer，以及用于 CNN/GNN forward 的 AMP。Target scaling、
+loss accumulation 和数值几何操作使用 FP32。
 
-训练 manifest：
+## 实验命名
 
-```text
-.../multiview_960/gt_query_manifest.json
-```
+| 标签 | 定义 |
+|---|---|
+| C0 | Image feature dimension 16；graph hidden dimension 64；3 个 graph layers。 |
+| C2 | Image feature dimension 64；graph hidden dimension 256；3 个 graph layers。 |
+| F0 | Encoder strides 为 `2, 2`；960 输入对应 240 x 240 feature map。 |
+| F1 | Encoder strides 为 `2, 1`；960 输入对应 480 x 480 feature map。 |
+| F2 | Encoder strides 为 `1, 1`；feature-map resolution 等于 input resolution。 |
+| C2F2 | C2 capacity 与 F2 image encoder 的组合。 |
 
-仅用于推理的 expanded manifest：
+## 已完成结果
 
-```text
-.../multiview_960/expanded_inference_manifest.json
-```
+### 960 exact GT-query prediction
 
-不要把 expanded inference manifest 传给训练循环。
+| Run | Seed | All EPE ↓ | Top-10% EPE ↓ | Global cosine ↑ | Prediction/GT norm |
+|---|---:|---:|---:|---:|---:|
+| C0F0 | 7 | 9.4641 | 30.7221 | 0.7808 | 0.8020 |
+| C0F1 | 7 | 9.3786 | 30.3095 | 0.7892 | 0.7938 |
+| C0F2 | 7 | 9.1665 | 28.4751 | 0.8227 | 0.8180 |
+| C2F2 | 7, 17, 27 | 2.8260 ± 0.0864 | 15.3614 ± 0.4036 | 0.8912 ± 0.0127 | 0.9348 ± 0.0160 |
 
-## Canonical Sofa50 训练
+在已完成的分辨率消融中，original RGB 的 error 低于 zero RGB。F0、F1 和 F2
+的 original-minus-zero global-cosine gap 分别为 0.2236、0.3315 和 0.3724。
 
-安装 package 和训练依赖后运行：
+### 960 与 1920 C2F2
+
+| 输入 | 训练预算 | Mean all EPE ↓ | Mean top-10% EPE ↓ | Mean cosine ↑ | Mean expanded Chamfer ↓ |
+|---|---:|---:|---:|---:|---:|
+| 960 | 50,000 steps，3 seeds | 2.8282 | 15.3743 | 0.8911 | 0.0011624 |
+| 1920 | 20,000 steps，3 seeds | 3.0928 | 16.3299 | 0.8954 | 0.0012570 |
+
+两组实验的 optimizer-step budget 不相同。1920 结果未证明相对 960 的改善。
+
+### Expanded-query recovery
+
+五个共享 expanded-validation objects 的 initial Chamfer 为 `0.000652884`。960
+C2F2 的平均 refined Chamfer 为 `0.00116202`；1920 C2F2 为 `0.00125704`。每个
+已评估 seed 相对 initial mesh 的改善数量均为 `0/5`。
+
+### OpenMVS coarse-mesh recovery
+
+该测试使用由 48 views 经 COLMAP/OpenMVS 生成的 coarse meshes、原始 14 个
+Sofa50 RGB views、三个 960 C2F2 checkpoints、480 分辨率 OpenGL visibility，且
+不传递 GT differential。共评估 48 个 meshes；两个 coarse meshes 不存在。
+
+| Recovery | Initial mean Chamfer | Ensemble refined mean Chamfer | 改善 mesh 数 | Introduced flips |
+|---|---:|---:|---:|---:|
+| 200 iterations | 0.0212023 | 0.0213199 | 2/48 | 4,692 |
+| 1,000 iterations | 0.0212023 | 0.0213198 | 2/48 | 4,734 |
+
+Recovery 从 200 增加到 1,000 iterations 未改变聚合结论。
+
+## 安装与验证
 
 ```bash
+conda env create -f environment.yml
+conda activate test
 pip install -e ".[train]"
-bash scripts/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.sh
+PYTHONPATH=src pytest -q
 ```
 
-启动脚本使用：
-
-```text
-configs/learned_laplacian/train_sofa50_50mesh_2000epoch_absolute_h2_confidence.json
-```
-
-该配置使用 CUDA AMP、4 个 lazy DataLoader workers、pinned memory、non-blocking
-transfer、跨 4 个 meshes 的 gradient accumulation、每 5 epochs validation，以及
-周期 checkpoint。受控实验严格训练 2,000 epochs、20,000 optimizer steps，并使用
-最小置信度预测头。
-
-当前完整输出目录为：
-
-```text
-runs/learned_laplacian/sofa50_50mesh_2000epoch_absolute_h2_confidence
-```
-
-## 什么才算有效证据
-
-GT-query validation loss 降低是必要条件，但不足以证明最终目标已经实现。有效的
-checkpoint 必须通过以下检查：
-
-1. **有效学习：** train 和 held-out validation loss 都优于 zero predictor；
-2. **依赖图像：** 固定 query graph 和 target 时，original RGB 优于 zero RGB、
-   shuffled views 和 cross-object RGB；
-3. **预测幅值未塌缩：** `mean |prediction| / mean |GT|` 不接近零，尤其是在
-   high-magnitude regions；
-4. **方向准确：** high-magnitude target regions 的 cosine similarity 为正且持续改善；
-5. **跨物体泛化：** held-out objects 得到改善，而不只是 training meshes；
-6. **Expanded-query 迁移：** 同一个 checkpoint 能用于从未作为 GT training graph
-   出现的真实 coarse/expanded queries；
-7. **重建有效：** predicted-Laplacian reconstruction 相比 initial mesh 改善
-   Chamfer 和 normal consistency。
-
-Single-mesh overfitting 只能证明模型容量足够。GT-query validation 只能证明监督场
-可以学习。两者都不能单独证明 expanded-query reconstruction 有效。
-
-## 诊断命令
-
-Image ablation 和 mesh-count scaling 工具位于 `scripts/`：
-
-```bash
-python scripts/ablate_single_mesh_checkpoint_images.py --help
-python scripts/run_mesh_count_scaling.py --help
-python scripts/diagnose_laplacian_prediction.py --help
-```
-
-支持的图像条件包括 original RGB、zero RGB、shuffled view order 和 cross-object
-RGB。Mesh-count scaling 使用嵌套的 1/2/4/8/16-object sets，并报告 zero-predictor
-baseline、prediction/target amplitude ratio、high-10% cosine 和逐物体指标。
-
-## 数据和精度路径
-
-Prepared RGB 以 lazy 形式保留在磁盘上。Worker 只将当前请求的 views 解码为
-`uint8`；pinned CPU tensor 通过 non-blocking transfer 传到 CUDA，在 GPU 上转换为
-浮点数、除以 255 并进行 normalization。CNN 和 GNN forward 使用 AMP。Target
-scaling、robust loss 和数值几何操作保留 FP32。
-
-Trainer 会记录 DataLoader wait、image decode、GPU transfer、forward/backward、
-总 epoch 时间、validation 时间，以及 CPU/GPU memory。
-
-## 历史基线
-
-仓库仍包含 coarse-mesh generator、oracle refinement、pseudo-surface experiment、
-single-object Bunny experiment 和 reconstruction solver。它们是有用的基线和调试
-工具，但不定义当前 learned model 的 supervision contract。
-
-特别是，历史 coarse-graph target 或 closest-point pseudo target 不能描述为正式的
-learned-Laplacian target。正式训练使用直接 GT-query supervision；coarse/expanded
-mesh 只在 downstream inference 和 evaluation 阶段作为 query 出现。
-
-Renderer-native visibility 与 hard any-view Laplacian recovery 的定义、实验结果和
-复现命令见[可见性感知恢复报告](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)。该功能
-无需 depth image，也不修改网络；它会从 recovery 的 Laplacian objective 中移除
-所有 view 均不可见 vertex 自身的预测方程。
-
-## 测试
+如果环境已经存在：
 
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n test pytest -q
 ```
 
-相关测试覆盖 query perturbation bounds、zero initial-Laplacian leakage protection、
-Fourier query encoding、lazy image loading、AMP training、image ablation、mesh-count
-scaling 和 Sofa50 preparation。
+## HPC 入口
+
+仓库中的 Slurm 文件包含当前集群的路径和资源配置。
+
+```bash
+# 960 F0/F1/F2，50,000 steps
+bash scripts/slurm_jobs/submit_resolution_50k_parallel.sh
+
+# 960 C2F2，seeds 7/17/27，50,000 steps
+sbatch scripts/HPC/sofa50_c2_f2_50k_3gpu.slurm
+
+# 1920 C2F2，seeds 7/17/27，当前输出契约为 20,000 steps
+sbatch scripts/HPC/sofa50_c2_f2_1920_50k_3gpu.slurm
+
+# OpenMVS recovery，OpenGL visibility，1,000 recovery iterations
+sbatch scripts/HPC/test_sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000.slurm
+```
+
+当前数据契约下不能执行 14/28/56-view job。该任务需要 GT-query sample 中的
+renderer-visibility fields，以及对应的 expanded-inference manifests。
+
+## HPC 结果目录
+
+```text
+runs/learned_laplacian/sofa50_image_resolution_ablation_50000step
+runs/learned_laplacian/sofa50_c2_f2_50000step_3seed
+runs/learned_laplacian/sofa50_c2_f2_1920_20000step_3seed
+runs/learned_laplacian/sofa50_cf_c2f2_comparison_full
+runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
+runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
+runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
+```
+
+Source repository 不包含 checkpoints、prepared datasets 和 HPC result
+directories。
