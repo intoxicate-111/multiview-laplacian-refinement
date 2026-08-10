@@ -178,11 +178,11 @@ When no view is valid, `F_bar_i = 0` and `rho_i = 0`.
 For C2F2, the image encoder is
 
 $$
-F_v=\operatorname{Conv}_{3\times3}^{64}\!\left(
-\operatorname{ReLU}\!\left(
-\operatorname{Conv}_{3\times3,s=1}^{64}\!\left(
-\operatorname{ReLU}\!\left(
-\operatorname{Conv}_{5\times5,s=1}^{32}(I_v)
+F_v=\mathrm{Conv}_{3\times3}^{64}\!\left(
+\mathrm{ReLU}\!\left(
+\mathrm{Conv}_{3\times3,s=1}^{64}\!\left(
+\mathrm{ReLU}\!\left(
+\mathrm{Conv}_{5\times5,s=1}^{32}(I_v)
 \right)\right)\right)\right).
 $$
 
@@ -199,7 +199,7 @@ $$
 The optional confidence head predicts a bounded reliability value
 
 $$
-c_i=\operatorname{sigmoid}(g_\theta(x_i))\in[0,1].
+c_i=\mathrm{sigmoid}(g_\theta(x_i))\in[0,1].
 $$
 
 The canonical recovery weight is
@@ -215,7 +215,7 @@ The repository also implements the following Gaussian distance-confidence gate
 in the legacy coarse/GT projection path:
 
 $$
-g_i=\operatorname{clip}\!\left(
+g_i=\mathrm{clip}\!\left(
 \exp\!\left[-\left(\frac{d_i^{\mathrm{surface}}}{s}\right)^2\right],
 g_{\min},1\right).
 $$
@@ -315,13 +315,13 @@ vertices and zero weight to invalid local scales.
 The confidence side head uses detached prediction error:
 
 $$
-\widetilde c_i=\operatorname{clip}(c_i,c_{\min},1),
+\widetilde c_i=\mathrm{clip}(c_i,c_{\min},1),
 $$
 
 $$
 \mathcal L_{\mathrm{conf}}=
 \frac{\sum_i a_i
-\left[\widetilde c_i\,\operatorname{stopgrad}(e_i)
+\left[\widetilde c_i\,\mathrm{stopgrad}(e_i)
 -\beta\log\widetilde c_i\right]}
 {\max(10^{-12},\sum_i a_i)}.
 $$
@@ -368,7 +368,7 @@ $$
 \frac{\lambda_{\mathrm{lap}}}{N}
 \left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred}})\right\rVert_F^2
 +\frac{\lambda_{\mathrm{anchor}}}{N}\lVert X-X_0\rVert_F^2,
-\qquad W=\operatorname{diag}(w).
+\qquad W=\mathrm{diag}(w).
 $$
 
 ### Reported metrics
@@ -377,12 +377,12 @@ For predicted and target normalised Laplacians `P` and `T`, the principal
 prediction metrics are
 
 $$
-\operatorname{EPE}=\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2,
+\mathrm{EPE}=\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2,
 $$
 
 $$
-\operatorname{Cos}_{\mathrm{global}}=
-\frac{\langle\operatorname{vec}(P),\operatorname{vec}(T)\rangle}
+\mathrm{Cos}_{\mathrm{global}}=
+\frac{\langle\mathrm{vec}(P),\mathrm{vec}(T)\rangle}
 {\lVert P\rVert_F\lVert T\rVert_F},
 \qquad
 R_{\mathrm{norm}}=\frac{\lVert P\rVert_F}{\lVert T\rVert_F}.
