@@ -278,6 +278,14 @@ def test_fourier_position_encoding_has_expected_dimension_and_finite_values():
     assert torch.isfinite(encoded).all()
 
 
+def test_zero_frequency_position_encoding_is_raw_xyz():
+    encoder = FourierPositionEncoding(num_frequencies=0, include_input=True)
+    positions = torch.tensor([[0.0, -0.5, 1.0], [0.25, 0.75, -1.0]])
+    encoded = encoder(positions)
+    assert encoder.output_dim == 3
+    torch.testing.assert_close(encoded, positions, rtol=0.0, atol=0.0)
+
+
 def test_query_fourier_model_cannot_copy_initial_laplacian():
     sample = _gt_query_sample()
     sample = apply_query_augmentation(sample, _settings(), base_seed=2, epoch=1)

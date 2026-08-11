@@ -8,9 +8,13 @@
 
 可见性与恢复：[可见性感知恢复报告](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
 
+实验指标与运行状态：[实验数据汇总](docs/EXPERIMENT_DATA_SUMMARY.zh-CN.md)
+
+View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
+
 ## 项目状态
 
-状态日期：2026-08-10。
+状态日期：2026-08-11。
 
 | 组件 | 状态 | 结论 |
 |---|---|---|
@@ -22,9 +26,10 @@
 | Expanded-query recovery | 已完成 | 对已评估的 960 和 1920 C2F2 checkpoint，五个 validation mesh 的 Chamfer 均增加。 |
 | OpenMVS coarse-mesh recovery | 50 个物体中完成 48 个 | 细化后的平均 Chamfer 增加。两个物体缺少 OpenMVS coarse mesh。 |
 | Oracle residual expert | 已关闭 | 2,000-step diagnostic 不支持该分支。 |
-| 14/28/56-view 消融 | 数据准备契约已实现 | 数据准备为每个 view count 写出 GT-query training manifest、expanded-inference manifest 和对应 graph 的 `visibility_backface_and_occlusion`。尚未生成 checkpoint 或结果报告。 |
-| Query-graph resolution 消融 | 数据准备契约已实现 | 数据准备写出 GT、GT-sub1、GT-sub2 和 adaptive represented-vertex-area manifests。尚未生成 checkpoint 或结果报告。 |
-| 自动化测试 | 通过 | `test` Conda 环境中为 `216 passed, 3 skipped`。 |
+| 14/28/56-view 消融 | 已完成 | 14、28、56 views 的 best validation loss 分别为 0.0139316、0.0130296、0.0138104。 |
+| Query-graph resolution 消融 | 已完成 | GT alias、GT-sub1、GT-adaptive 的 best validation loss 分别为 0.0139316、0.0614830、0.0145840；GT-sub2 未训练。 |
+| 28-view + GT-adaptive 组合 | 训练中 | 该 arm 使用 C2F2、seed 7、full-vertex training 和 20,000-step budget。 |
+| 自动化测试 | 通过 | `test` Conda 环境中为 `219 passed, 3 skipped`。 |
 
 当前模型能够在 GT-query graph 上学习监督微分场，并使用 RGB 信息。从 GT-query
 graph 到 expanded 或 OpenMVS query graph 的迁移未产生几何改善。当前 recovery
@@ -485,12 +490,94 @@ sbatch scripts/HPC/sofa50_c2_f2_1920_50k_3gpu.slurm
 
 # OpenMVS recovery，OpenGL visibility，1,000 recovery iterations
 sbatch scripts/HPC/test_sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000.slurm
+
+# 14/28/56-view 与 query-resolution 消融，每组 20,000 steps
+sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm view 14
+sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
 ```
 
-14/28/56-view 数据准备会分别写出 14、28 和 56 views 的 GT-query 与
-expanded-inference manifests。每个 prepared graph 包含 renderer-native
-`visibility_backface_and_occlusion`。Training job 直接读取 GT-query manifests，
-不需要额外执行 visibility attach。
+### 分布式多 GPU 训练
+
+`train_multi_mesh_laplacian.py` 在通过 `torchrun` 启动时使用 PyTorch
+DistributedDataParallel。Training meshes 按 rank 分片，不能整除时执行确定性补齐；
+gradient 和 training metrics 在 ranks 间归约；仅 rank 0 写入日志、prediction 和
+checkpoint。Checkpoint 使用不含 `module.` 前缀的标准 model keys，可直接用于单卡
+evaluation。
+
+Slurm 入口默认申请单节点四张 L40：
+
+```bash
+sbatch scripts/HPC/train_multi_mesh_ddp.slurm \
+  /path/to/manifest.json \
+  /path/to/config.json \
+  /path/to/output_dir
+```
+
+同一脚本支持多节点。以下命令在两个节点上启动八个 ranks：
+
+```bash
+sbatch --nodes=2 --gres=gpu:L40:4 \
+  scripts/HPC/train_multi_mesh_ddp.slurm \
+  /path/to/manifest.json \
+  /path/to/config.json \
+  /path/to/output_dir
+```
+
+Global mesh batch 为 `world_size * gradient_accumulation_meshes`。
+`max_optimizer_steps` 统计同步后的 global optimizer updates；world size 增大后，
+每次 update 以及固定 optimizer-step budget 对应的 mesh exposures 数量会增加。
+
+已生成的 14/28/56-view 数据集位于：
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_nested_14_28_56_cpu_v3
+  gt_query_views_14_manifest.json
+  gt_query_views_28_manifest.json
+  gt_query_views_56_manifest.json
+  expanded_inference_views_14_manifest.json
+  expanded_inference_views_28_manifest.json
+  expanded_inference_views_56_manifest.json
+```
+
+已生成的 query-graph resolution 数据集位于：
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960/query_resolution_ablation_v2
+  gt_manifest.json
+  gt_sub1_manifest.json
+  gt_sub2_manifest.json
+  gt_adaptive_manifest.json
+```
+
+已生成的 28-view + GT-adaptive 组合数据集位于：
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/view_query_combo_28_gt_adaptive_v1
+  manifest.json
+  summary.json
+```
+
+每份 manifest 包含 50 个物体，train/validation/test 为 40/5/5。Prepared
+graph 包含 CUDA 生成的 `visibility_backface_and_occlusion`。Manifest 已通过
+下游 training 和 inference loader 检查。
+
+### 局部 query-position jitter 消融
+
+该消融使用 C2F2、28 views、每个物体 5 个固定 synthetic-current variants、
+seed 7 和 20,000 optimizer steps。Arm A 使用存储的 current vertex positions。
+Arm B 仅在训练时加入各分量标准差为 `0.003 h_i`、向量范数上限为
+`0.009 h_i` 的 isotropic query jitter。存储的 proxy、normalized target、
+`h_i`、connectivity 和 target-construction operator 不变。Validation 和 test
+不加入 jitter。
+
+```text
+Dataset: /networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_synthetic_current_28view_v1/manifest.json
+Runs: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
+Report: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/analysis/REPORT.md
+```
+
+Report 包含 deterministic validation/test prediction metrics、
+original-RGB/zero-RGB comparison 和 OpenMVS48 current-mesh recovery metrics。
 
 ## HPC 结果目录
 
@@ -500,6 +587,8 @@ runs/learned_laplacian/sofa50_c2_f2_50000step_3seed
 runs/learned_laplacian/sofa50_c2_f2_1920_20000step_3seed
 runs/learned_laplacian/sofa50_cf_c2f2_comparison_full
 runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
+runs/learned_laplacian/sofa50_c2f2_view_query_combo_28_gt_adaptive_20k_seed7_v1
+runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
 ```

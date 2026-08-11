@@ -1,5 +1,8 @@
 import json
 import math
+import subprocess
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -16,6 +19,7 @@ from mlr.learned_laplacian.multi_dataset import (
 )
 from mlr.learned_laplacian import multi_trainer
 from mlr.learned_laplacian.multi_trainer import (
+    _EpochIndexSampler,
     _MaterializedPreparedDataset,
     _build_lr_scheduler,
     _prepare_object_static,
@@ -192,6 +196,108 @@ def test_manifest_rejects_train_validation_path_leakage(tmp_path):
         validate_disjoint_splits(train_dataset, validation_dataset)
 
 
+def test_distributed_epoch_sampler_shards_and_pads_deterministically():
+    shards = []
+    for rank in range(3):
+        generator = torch.Generator().manual_seed(29)
+        sampler = _EpochIndexSampler(
+            7,
+            shuffle=True,
+            generator=generator,
+            rank=rank,
+            world_size=3,
+        )
+        sampler.set_epoch(4)
+        epoch_indices = list(sampler)
+        shard = [index for index, _ in epoch_indices]
+        assert all(epoch == 4 for _, epoch in epoch_indices)
+        assert len(shard) == 3
+        shards.append(shard)
+
+    flattened = [index for shard in shards for index in shard]
+    assert set(flattened) == set(range(7))
+    assert len(flattened) == 9
+
+
+def test_torchrun_two_process_training_writes_canonical_rank_zero_outputs(tmp_path):
+    training_samples = [
+        _triangle_sample(f"train_{suffix}") for suffix in ("a", "b", "c", "d")
+    ]
+    validation = _triangle_sample("validation")
+    for sample in (*training_samples, validation):
+        save_prepared_sample(sample, tmp_path / f"{sample['sample_id']}.pt")
+    manifest = {
+        "samples": [
+            *[
+                {
+                    "sample_id": sample["sample_id"],
+                    "path": f"{sample['sample_id']}.pt",
+                    "split": "train",
+                }
+                for sample in training_samples
+            ],
+            {
+                "sample_id": "validation",
+                "path": "validation.pt",
+                "split": "validation",
+            },
+        ]
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    config = _multi_config()
+    config["multi_object_training"].update(
+        {
+            "epochs": 1,
+            "gradient_accumulation_meshes": 2,
+            "validation_every_epochs": 1,
+        }
+    )
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    output_dir = tmp_path / "output"
+    repository = Path(__file__).resolve().parents[2]
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--standalone",
+            "--nproc-per-node=2",
+            str(repository / "scripts/train_multi_mesh_laplacian.py"),
+            "--manifest",
+            str(manifest_path),
+            "--config",
+            str(config_path),
+            "--output-dir",
+            str(output_dir),
+            "--device",
+            "cpu",
+        ],
+        cwd=repository,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.count("distributed training:") == 1
+    metrics = json.loads((output_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics["distributed_world_size"] == 2
+    assert metrics["global_batch_meshes"] == 4
+    assert metrics["optimizer_steps"] == 1
+    assert set(metrics["per_object_metrics"]["train"]) == {
+        sample["sample_id"] for sample in training_samples
+    }
+    assert len(list((output_dir / "predictions" / "train").glob("*_raw_delta.npy"))) == 4
+    checkpoint = torch.load(output_dir / "checkpoint_latest.pt", weights_only=False)
+    assert checkpoint["optimizer_steps"] == 1
+    assert all(
+        not name.startswith("module.") for name in checkpoint["model_state_dict"]
+    )
+
+
 def test_shared_model_trains_across_different_mesh_topologies(tmp_path):
     tetra = tiny_sample()
     tetra["sample_id"] = "tetra_train"
@@ -345,9 +451,11 @@ def test_validation_schedule_and_timing_metrics(tmp_path):
     assert result.mean_epoch_decoded_image_bytes >= 0
     assert result.mean_optimizer_step_seconds >= 0
     assert result.peak_cpu_memory_mb > 0
+    assert not result.cuda_transfer_overlap_enabled
     metrics = json.loads((tmp_path / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["mean_epoch_train_seconds"] == result.mean_epoch_train_seconds
     assert metrics["peak_cpu_memory_mb"] == result.peak_cpu_memory_mb
+    assert not metrics["cuda_transfer_overlap_enabled"]
     assert all(
         key in result.history[0]
         for key in (
@@ -415,6 +523,29 @@ def test_cuda_amp_keeps_training_loss_finite():
     assert result.amp_enabled
     assert math.isfinite(result.final_train_loss)
     assert math.isfinite(result.final_validation_loss)
+
+
+def test_cuda_transfer_overlap_requires_prefetchable_host_data():
+    settings = multi_trainer._data_loader_settings(
+        {"data_loading": {"pin_memory": True}}
+    )
+
+    assert multi_trainer._cuda_transfer_overlap_enabled(
+        torch.device("cuda"), cache_on_device=False, settings=settings
+    )
+    assert not multi_trainer._cuda_transfer_overlap_enabled(
+        torch.device("cpu"), cache_on_device=False, settings=settings
+    )
+    assert not multi_trainer._cuda_transfer_overlap_enabled(
+        torch.device("cuda"), cache_on_device=True, settings=settings
+    )
+
+    disabled = multi_trainer._data_loader_settings(
+        {"data_loading": {"pin_memory": True, "cuda_prefetch": False}}
+    )
+    assert not multi_trainer._cuda_transfer_overlap_enabled(
+        torch.device("cuda"), cache_on_device=False, settings=disabled
+    )
 
 
 def _use_constant_validation(monkeypatch, loss=1.0):

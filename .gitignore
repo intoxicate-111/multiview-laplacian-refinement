@@ -1,4 +1,5 @@
 # Data directories
+.hpc.local.md
 inputs/
 inputs_sphere/
 inputs_sphere_smoke/

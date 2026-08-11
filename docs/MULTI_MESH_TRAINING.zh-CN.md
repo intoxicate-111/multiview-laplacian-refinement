@@ -136,6 +136,7 @@ runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full
 | Prefetch factor | 2 |
 | Pinned memory | 开启 |
 | Persistent workers | 开启 |
+| CUDA transfer prefetch | 开启 |
 | CUDA AMP | FP16 开启 |
 | 主 loss | Huber，delta 0.01 |
 
@@ -150,7 +151,7 @@ runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full
   -> lazy DataLoader worker
   -> 将本次请求的 RGB view 解码为 uint8
   -> pinned CPU tensor
-  -> non-blocking CUDA transfer
+  -> 在独立 prefetch stream 上执行 non-blocking CUDA transfer
   -> 在 GPU 上转换为 float、除以 255 并 normalization
   -> AMP CNN feature extraction 与 GNN prediction
   -> FP32 target scaling、Huber loss 和 metrics
@@ -158,6 +159,9 @@ runs/learned_laplacian/sofa50_refinement_960_gt_query_5000_full
 
 系统只解码当前请求和预取的图像，不把完整图像数据集缓存到 CPU 或 GPU。每次前向
 处理一个 ragged mesh，再跨 mesh 累积梯度，避免为不同拓扑构造大量 padding。
+DataLoader workers 在 GPU 计算期间并行解码并 pin 后续 samples。在每个
+accumulation group 内，mesh `i+1` 的传输与 mesh `i` 的 forward/backward 重叠。
+该 CUDA overlap 要求 `pin_memory=true`、`cuda_prefetch=true`，并关闭 device cache。
 
 ## Validation 与模型选择
 

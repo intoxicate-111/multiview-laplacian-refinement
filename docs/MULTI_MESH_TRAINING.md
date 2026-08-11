@@ -135,6 +135,7 @@ The current long-run policy is:
 | Prefetch factor | 2 |
 | Pinned memory | enabled |
 | Persistent workers | enabled |
+| CUDA transfer prefetch | enabled |
 | CUDA AMP | FP16 enabled |
 | Primary loss | Huber, delta 0.01 |
 
@@ -151,7 +152,7 @@ static GT graph and supervision metadata
   -> lazy DataLoader worker
   -> decode requested RGB views as uint8
   -> pinned CPU tensor
-  -> non-blocking CUDA transfer
+  -> non-blocking CUDA transfer on a dedicated prefetch stream
   -> convert to float, divide by 255 and normalise on GPU
   -> AMP CNN feature extraction and GNN prediction
   -> FP32 target scaling, Huber loss and metrics
@@ -160,6 +161,10 @@ static GT graph and supervision metadata
 Only requested and prefetched images are decoded. The full image dataset is
 not cached in CPU or GPU memory. Meshes are forwarded one at a time and
 gradients are accumulated across meshes, avoiding padded ragged-graph batches.
+DataLoader workers decode and pin future samples while the GPU is computing.
+Within each accumulation group, transfer of mesh `i+1` overlaps forward and
+backward computation for mesh `i`. This CUDA overlap requires
+`pin_memory=true`, `cuda_prefetch=true`, and device caching to be disabled.
 
 ## Validation and model selection
 

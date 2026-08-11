@@ -8,9 +8,13 @@ Training guide: [Multi-mesh GT-query training](docs/MULTI_MESH_TRAINING.md)
 
 Visibility and recovery: [Visibility-aware recovery report](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
 
+Experiment metrics and run status: [Experiment data summary](docs/EXPERIMENT_DATA_SUMMARY.md)
+
+View-count and query-resolution results: [Ablation report](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
+
 ## Project status
 
-Status date: 2026-08-10.
+Status date: 2026-08-11.
 
 | Component | State | Conclusion |
 |---|---|---|
@@ -22,9 +26,10 @@ Status date: 2026-08-10.
 | Expanded-query recovery | Complete | Refinement increases Chamfer distance on all five validation meshes for the evaluated 960 and 1920 C2F2 checkpoints. |
 | OpenMVS coarse-mesh recovery | Complete for 48 of 50 meshes | Mean Chamfer distance increases after refinement. Two objects have no OpenMVS coarse mesh. |
 | Oracle residual expert | Closed | The 2,000-step diagnostic does not support this branch. |
-| 14/28/56-view ablation | Preparation contract implemented | The preparation writes a GT-query training manifest, an expanded-inference manifest and graph-specific `visibility_backface_and_occlusion` for each view count. No checkpoint or result report has been produced. |
-| Query-graph resolution ablation | Preparation contract implemented | The preparation writes GT, GT-sub1, GT-sub2 and adaptive represented-vertex-area manifests. No checkpoint or result report has been produced. |
-| Automated tests | Passing | `216 passed, 3 skipped` in the `test` Conda environment. |
+| 14/28/56-view ablation | Complete | Best validation losses are 0.0139316, 0.0130296 and 0.0138104 for 14, 28 and 56 views. |
+| Query-graph resolution ablation | Complete | Best validation losses are 0.0139316 for the GT alias, 0.0614830 for GT-sub1 and 0.0145840 for GT-adaptive. GT-sub2 was excluded from training. |
+| 28-view + GT-adaptive combination | Training | The arm uses C2F2, seed 7, full-vertex training and a 20,000-step budget. |
+| Automated tests | Passing | `219 passed, 3 skipped` in the `test` Conda environment. |
 
 The implemented model learns the supervised differential field on GT-query
 graphs and uses RGB information. Transfer from GT-query graphs to expanded or
@@ -509,12 +514,96 @@ sbatch scripts/HPC/sofa50_c2_f2_1920_50k_3gpu.slurm
 
 # OpenMVS recovery with OpenGL visibility and 1,000 recovery iterations
 sbatch scripts/HPC/test_sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000.slurm
+
+# 14/28/56-view and query-resolution ablations, 20,000 steps per arm
+sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm view 14
+sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
 ```
 
-The 14/28/56-view preparation writes GT-query and expanded-inference manifests
-for 14, 28 and 56 views. Each prepared graph contains renderer-native
-`visibility_backface_and_occlusion`. The training job consumes the GT-query
-manifests without a separate visibility attachment step.
+### Distributed multi-GPU training
+
+`train_multi_mesh_laplacian.py` supports PyTorch DistributedDataParallel when
+started with `torchrun`. Training meshes are sharded by rank with deterministic
+padding, gradients and training metrics are reduced across ranks, and only rank
+0 writes logs, predictions and checkpoints. Checkpoints retain canonical model
+keys without a `module.` prefix and remain loadable by single-GPU evaluation.
+
+The Slurm entry point defaults to one node with four L40 GPUs:
+
+```bash
+sbatch scripts/HPC/train_multi_mesh_ddp.slurm \
+  /path/to/manifest.json \
+  /path/to/config.json \
+  /path/to/output_dir
+```
+
+The same script supports multiple nodes. This example launches eight ranks on
+two nodes:
+
+```bash
+sbatch --nodes=2 --gres=gpu:L40:4 \
+  scripts/HPC/train_multi_mesh_ddp.slurm \
+  /path/to/manifest.json \
+  /path/to/config.json \
+  /path/to/output_dir
+```
+
+The global mesh batch is `world_size * gradient_accumulation_meshes`.
+`max_optimizer_steps` counts synchronized global optimizer updates; increasing
+the world size therefore increases the number of mesh exposures per update and
+per fixed optimizer-step budget.
+
+The generated 14/28/56-view dataset is located at:
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_nested_14_28_56_cpu_v3
+  gt_query_views_14_manifest.json
+  gt_query_views_28_manifest.json
+  gt_query_views_56_manifest.json
+  expanded_inference_views_14_manifest.json
+  expanded_inference_views_28_manifest.json
+  expanded_inference_views_56_manifest.json
+```
+
+The generated query-graph resolution dataset is located at:
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/multiview_960/query_resolution_ablation_v2
+  gt_manifest.json
+  gt_sub1_manifest.json
+  gt_sub2_manifest.json
+  gt_adaptive_manifest.json
+```
+
+The combined 28-view + GT-adaptive dataset is located at:
+
+```text
+/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/sofa_mesh/sofa50_refinement/view_query_combo_28_gt_adaptive_v1
+  manifest.json
+  summary.json
+```
+
+Each manifest contains 50 objects with a 40/5/5 train/validation/test split.
+Prepared graphs contain CUDA-generated `visibility_backface_and_occlusion`.
+The manifests passed the downstream training and inference loader checks.
+
+### Local query-position jitter ablation
+
+The ablation uses C2F2, 28 views, five fixed synthetic-current variants per
+object, seed 7 and 20,000 optimizer steps. Arm A uses the stored current vertex
+positions. Arm B applies training-only isotropic query jitter with component
+standard deviation `0.003 h_i` and vector-norm limit `0.009 h_i`. The stored
+proxy, normalized target, `h_i`, connectivity and target-construction operator
+are unchanged. Validation and test do not apply jitter.
+
+```text
+Dataset: /networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_synthetic_current_28view_v1/manifest.json
+Runs: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
+Report: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/analysis/REPORT.md
+```
+
+The report contains deterministic validation/test prediction metrics, the
+original-RGB/zero-RGB comparison and OpenMVS48 current-mesh recovery metrics.
 
 ## Result locations on the HPC
 
@@ -524,6 +613,8 @@ runs/learned_laplacian/sofa50_c2_f2_50000step_3seed
 runs/learned_laplacian/sofa50_c2_f2_1920_20000step_3seed
 runs/learned_laplacian/sofa50_cf_c2f2_comparison_full
 runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
+runs/learned_laplacian/sofa50_c2f2_view_query_combo_28_gt_adaptive_20k_seed7_v1
+runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
 ```

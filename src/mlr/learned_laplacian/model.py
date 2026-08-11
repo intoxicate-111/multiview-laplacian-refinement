@@ -23,8 +23,8 @@ class FourierPositionEncoding(nn.Module):
 
     def __init__(self, num_frequencies: int = 6, include_input: bool = True) -> None:
         super().__init__()
-        if num_frequencies < 1:
-            raise ValueError("num_frequencies must be positive.")
+        if num_frequencies < 0:
+            raise ValueError("num_frequencies must be non-negative.")
         self.num_frequencies = int(num_frequencies)
         self.include_input = bool(include_input)
         frequencies = torch.pi * torch.pow(2.0, torch.arange(num_frequencies))

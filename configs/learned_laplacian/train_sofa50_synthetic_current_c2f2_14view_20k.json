@@ -1,48 +1,55 @@
 {
-  "method": "absolute_gt_h2_normalized_laplacian_with_confidence",
+  "method": "synthetic_current_query_h2_normalized_laplacian_with_confidence",
   "seed": 7,
   "device": "cuda",
   "dataset": {
-    "name": "Sofa50",
+    "name": "Sofa50SyntheticCurrent",
     "expected_split_counts": {
-      "train": 40,
-      "validation": 5,
-      "test": 5
-    }
+      "train": 200,
+      "validation": 25,
+      "test": 25
+    },
+    "objects": 50,
+    "variants_per_object": 5,
+    "object_level_split": true
   },
   "input_mode": "coarse_plus_multiview",
   "target_mode": "edge_scale_normalized_laplacian",
-  "target_semantics": "absolute_gt_target_not_residual",
+  "target_semantics": "current_graph_proxy_target",
+  "target_definition": "delta_target=L_current@P_proxy",
   "target_scaling": {
     "method": "square_of_mean_incident_edge_length",
+    "source": "synthetic_current_graph",
     "epsilon": 1e-12,
     "clip_max_norm": null
   },
   "query_training": {
-    "enabled": true,
+    "enabled": false,
     "exact_fraction": 0.2,
     "normal_std_h": 0.0003,
     "tangent_std_h": 0.0003,
     "max_offset_h": 0.001,
-    "apply_to_validation": true,
-    "zero_initial_laplacian": true
+    "apply_to_validation": false,
+    "zero_initial_laplacian": false
   },
   "renderer_visibility": {
     "condition": "backface_and_occlusion",
-    "source": "precomputed_depth_tested_face_id_buffer",
+    "source": "precomputed_current_graph_depth_tested_face_id_buffer",
     "neighborhood_radius": 1,
     "front_face_winding": "ccw",
     "depth_image_used": false
   },
   "image_encoder": {
-    "feature_dim": 16,
+    "feature_dim": 64,
+    "first_stride": 1,
+    "second_stride": 1,
     "normalization": {
       "mean": [0.0, 0.0, 0.0],
       "std": [1.0, 1.0, 1.0]
     }
   },
   "model": {
-    "hidden_dim": 64,
+    "hidden_dim": 256,
     "num_graph_layers": 3,
     "dropout": 0.0,
     "geometry_mode": "query_fourier",
@@ -65,6 +72,9 @@
     "loss": "huber",
     "huber_delta": 0.01,
     "gradient_clip_norm": 1.0,
+    "vertex_sampling": {
+      "mode": "full"
+    },
     "amp": {
       "enabled": true,
       "dtype": "float16"
@@ -80,9 +90,9 @@
     }
   },
   "data_loading": {
-    "num_workers": 4,
+    "num_workers": 0,
     "pin_memory": true,
-    "persistent_workers": true,
+    "persistent_workers": false,
     "prefetch_factor": 2,
     "cuda_prefetch": true,
     "train_views_per_sample": null,
@@ -91,11 +101,11 @@
   "multi_object_training": {
     "epochs": 2000,
     "max_optimizer_steps": 20000,
-    "gradient_accumulation_meshes": 4,
+    "gradient_accumulation_meshes": 2,
     "shuffle": true,
     "validation_every_epochs": 5,
     "checkpoint_every_epochs": 100,
-    "checkpoint_epochs": [100, 250, 500, 1000, 1500, 2000],
+    "checkpoint_epochs": [100, 250, 400],
     "cache_prepared_samples_on_device": false,
     "profile_training": true,
     "early_stopping": {
@@ -116,5 +126,15 @@
     "unseen_anchor_weight": 0.0,
     "write_legacy_prediction_names": false,
     "denormalization": "delta_pred_raw=delta_hat_prediction*(h_current^2+1e-12)"
+  },
+  "experiment_metadata": {
+    "experiment": "existing_gt_query_baseline_vs_synthetic_current_query_formulation",
+    "arm": "B",
+    "capacity": "C2",
+    "feature_resolution": "F2",
+    "views": 14,
+    "input_resolution": 960,
+    "training_status": "newly_trained",
+    "comparison_type": "existing_canonical_baseline_vs_new_formulation_not_strict_paired_training"
   }
 }

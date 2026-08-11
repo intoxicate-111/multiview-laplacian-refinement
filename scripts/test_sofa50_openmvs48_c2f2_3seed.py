@@ -220,6 +220,8 @@ def _copy_source_for_current_graph(
     faces_to_edge_index,
     incident_edge_length_and_valid_mask,
     normalize_laplacian_by_edge_scale,
+    expected_views: int = 14,
+    zero_initial_laplacian: bool = True,
 ) -> dict[str, Any]:
     sample = {
         key: (value.clone() if isinstance(value, torch.Tensor) else copy.deepcopy(value))
@@ -245,9 +247,9 @@ def _copy_source_for_current_graph(
         str((Path(value) if Path(value).is_absolute() else source_dataset_root / value).resolve())
         for value in source["image_paths"]
     ]
-    if len(sample["image_paths"]) != 14:
+    if len(sample["image_paths"]) != expected_views:
         raise ValueError(
-            f"{sample_id}: expected exactly 14 original prediction views, got {len(sample['image_paths'])}"
+            f"{sample_id}: expected exactly {expected_views} prediction views, got {len(sample['image_paths'])}"
         )
 
     current_mesh.ensure_normals()
@@ -266,10 +268,10 @@ def _copy_source_for_current_graph(
         valid_scale_mask=valid,
     )
     visibility_t = torch.as_tensor(visibility, dtype=torch.bool)
-    if tuple(visibility_t.shape) != (14, current_mesh.num_vertices):
+    if tuple(visibility_t.shape) != (expected_views, current_mesh.num_vertices):
         raise ValueError(
             f"{sample_id}: visibility shape={tuple(visibility_t.shape)}, "
-            f"expected={(14, current_mesh.num_vertices)}"
+            f"expected={(expected_views, current_mesh.num_vertices)}"
         )
 
     sample.update(
@@ -280,7 +282,9 @@ def _copy_source_for_current_graph(
             "vertex_normals": normals,
             # Canonical inference does not feed the current raw Laplacian as a
             # target/input correction.  Query-training evaluation uses zeros.
-            "initial_laplacian": torch.zeros_like(vertices),
+            "initial_laplacian": (
+                torch.zeros_like(vertices) if zero_initial_laplacian else placeholder_raw
+            ),
             # Schema-only identity placeholder.  It is never evaluated as a GT
             # differential target in this script.
             "laplacian_target": placeholder_normalized,
@@ -308,8 +312,8 @@ def _copy_source_for_current_graph(
             "query_geometry_role": "openmvs48_coarse_current_graph",
             "coarse_mesh_path": str(coarse_path),
             "coarse_acquisition": "48_auxiliary_textured_views_openmvs",
-            "prediction_image_source": "original_14_view_rgb",
-            "prediction_view_count": 14,
+            "prediction_image_source": f"nested_{expected_views}_view_rgb",
+            "prediction_view_count": expected_views,
             "target_semantics": "identity_placeholder",
             "expanded_graph_oracle_available": False,
             "gt_differential_transfer_used": False,
@@ -334,6 +338,7 @@ def compute_visibility(
     Camera,
     SyntheticRenderConfig,
     compute_renderer_visibility,
+    expected_views: int = 14,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if cache_path.is_file():
         with np.load(cache_path, allow_pickle=False) as archive:
@@ -353,8 +358,8 @@ def compute_visibility(
         raise ValueError("visibility-size must be >= 64")
     intrinsics = source["intrinsics"].detach().cpu().numpy().copy()
     extrinsics = source["extrinsics"].detach().cpu().numpy()
-    if intrinsics.shape[0] != 14:
-        raise ValueError(f"Expected 14 cameras, got {intrinsics.shape[0]}")
+    if intrinsics.shape[0] != expected_views:
+        raise ValueError(f"Expected {expected_views} cameras, got {intrinsics.shape[0]}")
     if raster_size != image_size:
         scale = float(raster_size) / float(image_size)
         intrinsics[:, 0, :] *= scale
@@ -365,15 +370,15 @@ def compute_visibility(
             rotation=extrinsics[index, :3, :3],
             translation=extrinsics[index, :3, 3],
             image_size=(raster_size, raster_size),
-            name=f"original14_{index:02d}",
+            name=f"prediction_{expected_views}_{index:02d}",
         )
-        for index in range(14)
+        for index in range(expected_views)
     ]
     result = compute_renderer_visibility(
         mesh,
         cameras,
         SyntheticRenderConfig(
-            num_views=14,
+            num_views=expected_views,
             width=raster_size,
             height=raster_size,
             backend=backend,
@@ -574,6 +579,8 @@ def prepare_query_samples(
     visibility_size: int | None,
     require_all: bool,
     modules: Mapping[str, Any],
+    expected_views: int = 14,
+    zero_initial_laplacian: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     load_prepared_sample = modules["load_prepared_sample"]
     save_prepared_sample = modules["save_prepared_sample"]
@@ -608,6 +615,7 @@ def prepare_query_samples(
             Camera=modules["Camera"],
             SyntheticRenderConfig=modules["SyntheticRenderConfig"],
             compute_renderer_visibility=modules["compute_renderer_visibility"],
+            expected_views=expected_views,
         )
         prepared = _copy_source_for_current_graph(
             source=source,
@@ -621,6 +629,8 @@ def prepare_query_samples(
             faces_to_edge_index=modules["faces_to_edge_index"],
             incident_edge_length_and_valid_mask=modules["incident_edge_length_and_valid_mask"],
             normalize_laplacian_by_edge_scale=modules["normalize_laplacian_by_edge_scale"],
+            expected_views=expected_views,
+            zero_initial_laplacian=zero_initial_laplacian,
         )
         destination = output_dir / "prepared_query" / f"{sample_id}.pt"
         save_prepared_sample(prepared, destination)
@@ -706,11 +716,13 @@ def infer_seed(
     output_dir: Path,
     device: torch.device,
     modules: Mapping[str, Any],
+    expected_views: int = 14,
 ) -> list[dict[str, Any]]:
     config = read_json(config_path(seed_dir))
     query_config = copy.deepcopy(config)
     query_config.setdefault("query_training", {})["enabled"] = False
     query_config["query_training"]["zero_initial_laplacian"] = True
+    query_config.setdefault("local_query_jitter", {})["enabled"] = False
     checkpoint = checkpoint_path(seed_dir)
     model = modules["_build_model"](query_config, None, False).to(device)
     modules["load_checkpoint"](checkpoint, model, map_location=device)
@@ -744,8 +756,11 @@ def infer_seed(
                 decode_images=True,
             )
             sample = dict(prepared.sample)
-            if int(sample["images"].shape[0]) != 14:
-                raise ValueError(f"{sample_id}: model input has {sample['images'].shape[0]} views, expected 14")
+            if int(sample["images"].shape[0]) != expected_views:
+                raise ValueError(
+                    f"{sample_id}: model input has {sample['images'].shape[0]} views, "
+                    f"expected {expected_views}"
+                )
             sample["query_positions"] = sample["vertices"]
             sample["query_is_exact"] = torch.ones(
                 sample["vertices"].shape[0], dtype=torch.bool, device=device

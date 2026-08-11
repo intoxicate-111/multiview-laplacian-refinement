@@ -14,14 +14,27 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 import torch
+from torch import nn
+from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, Sampler
 
 from .dataset import validate_sample
+from .distributed import (
+    DistributedContext,
+    current_distributed_context,
+    reduce_scalar,
+)
 from .losses import (
     confidence_calibration_metrics,
     confidence_reliability_loss,
     laplacian_prediction_metrics,
     weighted_robust_laplacian_loss,
+)
+from .local_query_jitter import (
+    LocalQueryJitterSettings,
+    apply_local_query_jitter,
+    local_query_jitter_settings,
+    validate_local_query_jitter_contract,
 )
 from .model import LearnedLaplacianModel
 from .query_training import (
@@ -79,6 +92,8 @@ class MultiObjectTrainingResult:
     mean_epoch_image_decode_resize_seconds: float = 0.0
     mean_train_views_per_sample: float = 0.0
     mean_epoch_decoded_image_bytes: float = 0.0
+    distributed_world_size: int = 1
+    cuda_transfer_overlap_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,6 +114,7 @@ class _DataLoaderSettings:
     pin_memory: bool
     persistent_workers: bool
     prefetch_factor: int
+    cuda_prefetch: bool
     train_views_per_sample: int | None
     validation_views_per_sample: int | None
 
@@ -164,10 +180,22 @@ class _EpochIndexSampler(Sampler[tuple[int, int]]):
         *,
         shuffle: bool,
         generator: torch.Generator | None,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> None:
         self.size = int(size)
         self.shuffle = shuffle
         self.generator = generator
+        self.rank = int(rank)
+        self.world_size = int(world_size)
+        if self.size < 1:
+            raise ValueError("Distributed epoch sampler requires a non-empty dataset.")
+        if self.world_size < 1:
+            raise ValueError("world_size must be positive.")
+        if not 0 <= self.rank < self.world_size:
+            raise ValueError("rank must be in [0, world_size).")
+        self.num_samples = math.ceil(self.size / self.world_size)
+        self.total_size = self.num_samples * self.world_size
         self.epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -177,11 +205,15 @@ class _EpochIndexSampler(Sampler[tuple[int, int]]):
         if self.shuffle:
             indices = torch.randperm(self.size, generator=self.generator).tolist()
         else:
-            indices = range(self.size)
-        return iter((int(index), self.epoch) for index in indices)
+            indices = list(range(self.size))
+        if len(indices) < self.total_size:
+            repeats = math.ceil((self.total_size - len(indices)) / len(indices))
+            indices += (indices * repeats)[: self.total_size - len(indices)]
+        rank_indices = indices[self.rank : self.total_size : self.world_size]
+        return iter((int(index), self.epoch) for index in rank_indices)
 
     def __len__(self) -> int:
-        return self.size
+        return self.num_samples
 
 
 def train_multi_object(
@@ -204,18 +236,43 @@ def train_multi_object(
     seed = int(config.get("seed", 7))
     _seed_everything(seed)
     device = _resolve_device(device_override or str(config.get("device", "cpu")))
+    distributed = current_distributed_context(device)
+    if distributed.enabled and distributed.device != device:
+        raise ValueError(
+            f"Distributed process uses {distributed.device}, but training resolved {device}."
+        )
+    is_main_process = distributed.is_main
+    progress = progress and is_main_process
     target_mode, epsilon = _target_settings(config)
     query_settings = query_augmentation_settings(config)
+    local_jitter_settings = local_query_jitter_settings(config)
     vertex_sampling = vertex_sampling_settings(config)
+    if query_settings.enabled and local_jitter_settings.enabled:
+        raise ValueError(
+            "query_training and local_query_jitter cannot be enabled together."
+        )
     if query_settings.enabled and str(
         config.get("model", {}).get("geometry_mode", "legacy")
     ) != QUERY_FOURIER_GEOMETRY_MODE:
         raise ValueError(
             "query_training.enabled=true requires model.geometry_mode='query_fourier'."
         )
-    model = _build_model(config, input_mode_override, zero_images).to(device)
-    decode_images = model.input_mode != "coarse_only" and not model.zero_images
-    keep_projection = model.input_mode != "coarse_only"
+    base_model = _build_model(config, input_mode_override, zero_images).to(device)
+    if base_model.input_mode == "coarse_only" or base_model.zero_images:
+        base_model.image_encoder.requires_grad_(False)
+    decode_images = base_model.input_mode != "coarse_only" and not base_model.zero_images
+    keep_projection = base_model.input_mode != "coarse_only"
+    model: nn.Module
+    if distributed.enabled:
+        ddp_arguments: dict[str, Any] = {"broadcast_buffers": False}
+        if device.type == "cuda":
+            ddp_arguments.update(
+                device_ids=[distributed.local_rank],
+                output_device=distributed.local_rank,
+            )
+        model = DistributedDataParallel(base_model, **ddp_arguments)
+    else:
+        model = base_model
     training = config.get("training", {})
     multi = config.get("multi_object_training", {})
     epochs = int(multi.get("epochs", 1))
@@ -264,7 +321,9 @@ def train_multi_object(
     gradient_clip = float(training.get("gradient_clip_norm", 0.0))
     loss_kwargs = _loss_kwargs(training)
     confidence_settings = _confidence_settings(config)
-    output_path = None if output_dir is None else Path(output_dir)
+    output_path = (
+        None if output_dir is None or not is_main_process else Path(output_dir)
+    )
     if output_path is not None:
         output_path.mkdir(parents=True, exist_ok=True)
     if device.type == "cuda":
@@ -280,7 +339,7 @@ def train_multi_object(
             raise ValueError(
                 "resume_checkpoint is not an optimizer-step checkpoint."
             )
-        model.load_state_dict(resume_payload["model_state_dict"])
+        base_model.load_state_dict(resume_payload["model_state_dict"])
         optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
         if scheduler is not None and resume_payload.get("scheduler_state_dict") is not None:
             scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
@@ -335,6 +394,15 @@ def train_multi_object(
                 "to keep the static cache on CPU."
             ) from error
         device_cache_seconds = float(time.perf_counter() - cache_start)
+    initial_loading_seconds = reduce_scalar(
+        initial_loading_seconds, distributed, reduction="max"
+    )
+    static_preparation_seconds = reduce_scalar(
+        static_preparation_seconds, distributed, reduction="max"
+    )
+    device_cache_seconds = reduce_scalar(
+        device_cache_seconds, distributed, reduction="max"
+    )
     train_generator = torch.Generator()
     train_loader = None
     validation_loader = None
@@ -348,6 +416,8 @@ def train_multi_object(
             views_per_sample=loader_settings.train_views_per_sample,
             base_seed=seed,
             profile_loading=profile_training,
+            rank=distributed.rank,
+            world_size=distributed.world_size,
         )
         if prepared_validation:
             validation_loader = _build_prepared_loader(
@@ -359,6 +429,17 @@ def train_multi_object(
                 base_seed=seed,
                 profile_loading=profile_training,
             )
+    cuda_transfer_overlap_enabled = _cuda_transfer_overlap_enabled(
+        device,
+        cache_on_device=cache_on_device,
+        settings=loader_settings,
+    )
+    cuda_transfer_stream = (
+        torch.cuda.Stream(device=device) if cuda_transfer_overlap_enabled else None
+    )
+    cuda_compute_stream = (
+        torch.cuda.current_stream(device) if cuda_transfer_overlap_enabled else None
+    )
     if progress and profile_training:
         print(f"static preparation: {static_preparation_seconds:.2f}s", flush=True)
         print(f"device cache: {device_cache_seconds:.2f}s", flush=True)
@@ -373,7 +454,8 @@ def train_multi_object(
             f"prefetch_factor={loader_settings.prefetch_factor} "
             f"train_views={loader_settings.train_views_per_sample} "
             f"validation_views={loader_settings.validation_views_per_sample} "
-            f"decode_images={decode_images}",
+            f"decode_images={decode_images} "
+            f"cuda_prefetch={cuda_transfer_overlap_enabled}",
             flush=True,
         )
         print(f"AMP: {amp_enabled} ({amp_dtype})", flush=True)
@@ -388,7 +470,7 @@ def train_multi_object(
     best_selection_loss = float(resume_state.get("best_selection_loss", float("inf")))
     stored_best_state = resume_state.get("best_model_state_dict")
     best_state = (
-        copy.deepcopy(model.state_dict())
+        copy.deepcopy(base_model.state_dict())
         if stored_best_state is None
         else stored_best_state
     )
@@ -399,6 +481,13 @@ def train_multi_object(
     resume_groups_completed = int(
         resume_state.get("groups_completed_in_epoch", 0)
     )
+    resume_world_size = int(
+        resume_state.get("distributed_world_size", distributed.world_size)
+    )
+    if resume_groups_completed and resume_world_size != distributed.world_size:
+        raise ValueError(
+            "A mid-epoch distributed checkpoint must resume with the same world size."
+        )
     shuffle = bool(multi.get("shuffle", True))
     epoch_train_seconds: list[float] = []
     epoch_validation_seconds: list[float] = []
@@ -418,7 +507,8 @@ def train_multi_object(
     stopped_early = False
     stop_reason = "max_epochs"
 
-    groups_per_epoch = math.ceil(len(prepared_train) / accumulation_meshes)
+    local_train_meshes = math.ceil(len(prepared_train) / distributed.world_size)
+    groups_per_epoch = math.ceil(local_train_meshes / accumulation_meshes)
     if output_path is not None and 0 in checkpoint_optimizer_steps and optimizer_steps == 0:
         _save_optimizer_step_checkpoint(
             output_path,
@@ -450,9 +540,15 @@ def train_multi_object(
         train_generator.manual_seed(seed + epoch)
         _set_loader_epoch(train_loader, epoch)
         if train_loader is None:
-            order = torch.randperm(len(prepared_train), generator=train_generator).tolist()
-            if not shuffle:
-                order = list(range(len(prepared_train)))
+            epoch_sampler = _EpochIndexSampler(
+                len(prepared_train),
+                shuffle=shuffle,
+                generator=train_generator,
+                rank=distributed.rank,
+                world_size=distributed.world_size,
+            )
+            epoch_sampler.set_epoch(epoch)
+            order = [index for index, _ in epoch_sampler]
             epoch_items: Iterable[Any] = (prepared_train[index] for index in order)
         else:
             epoch_items = train_loader
@@ -476,6 +572,8 @@ def train_multi_object(
         confidence_value_tensors: list[torch.Tensor] = []
         exact_query_loss_tensors: list[torch.Tensor] = []
         perturbed_query_loss_tensors: list[torch.Tensor] = []
+        local_jitter_mean_ratios: list[float] = []
+        local_jitter_max_ratios: list[float] = []
         data_loading_seconds = 0.0
         gpu_transfer_seconds = 0.0
         forward_backward_seconds = 0.0
@@ -519,17 +617,60 @@ def train_multi_object(
             if not group:
                 break
             optimizer.zero_grad(set_to_none=True)
-            for cpu_prepared in group:
-                transfer_start = time.perf_counter()
-                transfer_event = _start_cuda_timing(device)
-                prepared = _prepare_item_for_use(
-                    cpu_prepared,
+            pending_cuda_transfer = None
+            if cuda_transfer_stream is not None:
+                pending_cuda_transfer = _enqueue_cuda_transfer(
+                    group[0],
                     config,
                     device,
-                    cache_on_device,
-                    non_blocking=loader_settings.pin_memory,
+                    cache_on_device=cache_on_device,
                     decode_images=decode_images,
+                    transfer_stream=cuda_transfer_stream,
                 )
+            for group_index, cpu_prepared in enumerate(group):
+                if isinstance(model, DistributedDataParallel):
+                    # Delay gradient synchronization until the final mesh in the
+                    # local accumulation group. This preserves the global batch
+                    # definition while avoiding one all-reduce per mesh.
+                    model.require_backward_grad_sync = group_index == len(group) - 1
+                if pending_cuda_transfer is not None:
+                    if cuda_transfer_stream is None or cuda_compute_stream is None:
+                        raise RuntimeError("CUDA transfer pipeline is not initialized.")
+                    prepared, transfer_event_pair = pending_cuda_transfer
+                    _, transfer_end = transfer_event_pair
+                    if transfer_end is None:
+                        raise RuntimeError("CUDA transfer completion event is missing.")
+                    cuda_compute_stream.wait_event(transfer_end)
+                    _record_prepared_stream(prepared, cuda_compute_stream)
+                    transfer_events.append(transfer_event_pair)
+                    pending_cuda_transfer = (
+                        _enqueue_cuda_transfer(
+                            group[group_index + 1],
+                            config,
+                            device,
+                            cache_on_device=cache_on_device,
+                            decode_images=decode_images,
+                            transfer_stream=cuda_transfer_stream,
+                        )
+                        if group_index + 1 < len(group)
+                        else None
+                    )
+                else:
+                    transfer_start = time.perf_counter()
+                    transfer_event = _start_cuda_timing(device)
+                    prepared = _prepare_item_for_use(
+                        cpu_prepared,
+                        config,
+                        device,
+                        cache_on_device,
+                        non_blocking=loader_settings.pin_memory,
+                        decode_images=decode_images,
+                    )
+                    transfer_events.append(
+                        _finish_cuda_timing(device, transfer_event)
+                    )
+                    if device.type != "cuda":
+                        gpu_transfer_seconds += time.perf_counter() - transfer_start
                 prepared = _with_query_augmentation(
                     prepared,
                     query_settings,
@@ -537,9 +678,22 @@ def train_multi_object(
                     epoch=epoch,
                     enabled=query_settings.enabled,
                 )
-                transfer_events.append(_finish_cuda_timing(device, transfer_event))
-                if device.type != "cuda":
-                    gpu_transfer_seconds += time.perf_counter() - transfer_start
+                prepared = _with_local_query_jitter(
+                    prepared,
+                    local_jitter_settings,
+                    base_seed=seed,
+                    epoch=epoch,
+                )
+                local_jitter_diagnostics = prepared.sample.get(
+                    "local_query_jitter_diagnostics"
+                )
+                if isinstance(local_jitter_diagnostics, Mapping):
+                    local_jitter_mean_ratios.append(
+                        float(local_jitter_diagnostics["mean_offset_norm_over_h"])
+                    )
+                    local_jitter_max_ratios.append(
+                        float(local_jitter_diagnostics["max_offset_norm_over_h"])
+                    )
                 forward_start = time.perf_counter()
                 forward_event = _start_cuda_timing(device)
                 with torch.autocast(
@@ -665,25 +819,93 @@ def train_multi_object(
                         early_stopping_bad_validations=early_stopping_bad_validations,
                     )
 
-        train_loss = float(torch.stack(mesh_loss_tensors).mean().item())
-        train_objective = float(torch.stack(objective_tensors).mean().item())
-        train_confidence_loss = _mean_optional_tensors(confidence_loss_tensors)
-        train_mean_confidence = (
-            float(torch.cat(confidence_value_tensors).mean().item())
-            if confidence_value_tensors
-            else None
+        train_loss = reduce_scalar(
+            float(torch.stack(mesh_loss_tensors).mean().item()),
+            distributed,
+            reduction="mean",
         )
-        train_exact_query_loss = _mean_optional_tensors(exact_query_loss_tensors)
-        train_perturbed_query_loss = _mean_optional_tensors(perturbed_query_loss_tensors)
+        train_objective = reduce_scalar(
+            float(torch.stack(objective_tensors).mean().item()),
+            distributed,
+            reduction="mean",
+        )
+        train_confidence_loss = _distributed_optional_mean(
+            _mean_optional_tensors(confidence_loss_tensors), distributed
+        )
+        train_mean_confidence = _distributed_optional_mean(
+            (
+                float(torch.cat(confidence_value_tensors).mean().item())
+                if confidence_value_tensors
+                else None
+            ),
+            distributed,
+        )
+        train_exact_query_loss = _distributed_optional_mean(
+            _mean_optional_tensors(exact_query_loss_tensors), distributed
+        )
+        train_perturbed_query_loss = _distributed_optional_mean(
+            _mean_optional_tensors(perturbed_query_loss_tensors), distributed
+        )
+        train_local_jitter_mean_ratio = _distributed_optional_mean(
+            (
+                float(np.mean(local_jitter_mean_ratios))
+                if local_jitter_mean_ratios
+                else None
+            ),
+            distributed,
+        )
+        train_local_jitter_max_ratio = _distributed_optional_mean(
+            (
+                float(max(local_jitter_max_ratios))
+                if local_jitter_max_ratios
+                else None
+            ),
+            distributed,
+        )
+        global_loaded_mesh_count = int(
+            reduce_scalar(loaded_mesh_count, distributed, reduction="sum")
+        )
+        global_used_view_count = reduce_scalar(
+            used_view_count, distributed, reduction="sum"
+        )
+        decoded_image_bytes = int(
+            reduce_scalar(decoded_image_bytes, distributed, reduction="sum")
+        )
+        image_decode_resize_seconds = reduce_scalar(
+            image_decode_resize_seconds, distributed, reduction="max"
+        )
+        visible_query_count = int(
+            reduce_scalar(visible_query_count, distributed, reduction="sum")
+        )
+        invisible_query_count = int(
+            reduce_scalar(invisible_query_count, distributed, reduction="sum")
+        )
         mean_image_decode_resize_seconds = (
-            image_decode_resize_seconds / loaded_mesh_count if loaded_mesh_count else 0.0
+            image_decode_resize_seconds / loaded_mesh_count
+            if loaded_mesh_count
+            else 0.0
         )
-        mean_used_view_count = used_view_count / loaded_mesh_count if loaded_mesh_count else 0.0
+        mean_used_view_count = (
+            global_used_view_count / global_loaded_mesh_count
+            if global_loaded_mesh_count
+            else 0.0
+        )
         _synchronize_device(device)
         if device.type == "cuda":
             gpu_transfer_seconds = _elapsed_cuda_seconds(transfer_events)
             forward_backward_seconds = _elapsed_cuda_seconds(forward_events)
-        train_seconds = float(time.perf_counter() - train_start)
+        data_loading_seconds = reduce_scalar(
+            data_loading_seconds, distributed, reduction="max"
+        )
+        gpu_transfer_seconds = reduce_scalar(
+            gpu_transfer_seconds, distributed, reduction="max"
+        )
+        forward_backward_seconds = reduce_scalar(
+            forward_backward_seconds, distributed, reduction="max"
+        )
+        train_seconds = reduce_scalar(
+            time.perf_counter() - train_start, distributed, reduction="max"
+        )
         epoch_train_seconds.append(train_seconds)
         epoch_data_loading_seconds.append(data_loading_seconds)
         epoch_gpu_transfer_seconds.append(gpu_transfer_seconds)
@@ -746,13 +968,20 @@ def train_multi_object(
                 "correlation_with_negative_error",
             )
             _synchronize_device(device)
-            validation_seconds = float(time.perf_counter() - validation_start)
+            validation_loss = reduce_scalar(
+                validation_loss, distributed, reduction="mean"
+            )
+            validation_seconds = reduce_scalar(
+                time.perf_counter() - validation_start,
+                distributed,
+                reduction="max",
+            )
             epoch_validation_seconds.append(validation_seconds)
         selection_loss = validation_loss if prepared_validation else train_loss
         if selection_loss is not None and selection_loss < best_selection_loss:
             best_selection_loss = selection_loss
             best_epoch = epoch
-            best_state = copy.deepcopy(model.state_dict())
+            best_state = copy.deepcopy(base_model.state_dict())
             if output_path is not None:
                 for best_name in ("best.pt", "checkpoint_best.pt"):
                     _save_multi_checkpoint(
@@ -808,6 +1037,8 @@ def train_multi_object(
             "learning_rate": current_lr,
             "train_exact_query_loss": train_exact_query_loss,
             "train_perturbed_query_loss": train_perturbed_query_loss,
+            "train_local_jitter_mean_offset_norm_over_h": train_local_jitter_mean_ratio,
+            "train_local_jitter_max_offset_norm_over_h": train_local_jitter_max_ratio,
             "validation_exact_query_loss": (
                 validation_exact_query_loss if should_validate else None
             ),
@@ -951,12 +1182,13 @@ def train_multi_object(
                 print(f"reached max optimizer steps: {optimizer_steps}", flush=True)
             break
 
-    model.load_state_dict(best_state)
-    model.eval()
+    base_model.load_state_dict(best_state)
+    base_model.eval()
     predictions_path = None if output_path is None else output_path / "predictions"
-    # Reuse persistent training workers for the final metric pass. Metric
-    # aggregation is keyed by sample_id, so shuffled evaluation order is safe.
-    final_train_loader = train_loader
+    # A distributed training loader contains only the current rank's shard.
+    # Evaluate the complete split on every rank so rank 0 writes complete
+    # per-object metrics and prediction files.
+    final_train_loader = None if distributed.enabled else train_loader
     _set_loader_epoch(final_train_loader, 0)
     final_train_loss, train_metrics = _evaluate_dataset(
         model,
@@ -974,6 +1206,9 @@ def train_multi_object(
         query_epoch=0,
         augment_queries=query_settings.enabled,
         views_per_sample=loader_settings.train_views_per_sample,
+    )
+    final_train_loss = reduce_scalar(
+        final_train_loss, distributed, reduction="mean"
     )
     final_validation_loss = None
     validation_metrics: dict[str, dict[str, Any]] = {}
@@ -997,8 +1232,15 @@ def train_multi_object(
             and query_settings.apply_to_validation,
             views_per_sample=loader_settings.validation_views_per_sample,
         )
+        final_validation_loss = reduce_scalar(
+            final_validation_loss, distributed, reduction="mean"
+        )
     _synchronize_device(device)
-    runtime_seconds = float(initial_loading_seconds + time.perf_counter() - start_time)
+    runtime_seconds = reduce_scalar(
+        initial_loading_seconds + time.perf_counter() - start_time,
+        distributed,
+        reduction="max",
+    )
     mean_epoch_train_seconds = float(np.mean(epoch_train_seconds))
     mean_validation_seconds = (
         float(np.mean(epoch_validation_seconds)) if epoch_validation_seconds else 0.0
@@ -1021,6 +1263,13 @@ def train_multi_object(
     peak_gpu_memory_mb = None
     if device.type == "cuda":
         peak_gpu_memory_mb = torch.cuda.max_memory_allocated(device) / (1024.0 * 1024.0)
+    peak_cpu_memory_mb = reduce_scalar(
+        peak_cpu_memory_mb, distributed, reduction="max"
+    )
+    if peak_gpu_memory_mb is not None:
+        peak_gpu_memory_mb = reduce_scalar(
+            peak_gpu_memory_mb, distributed, reduction="max"
+        )
     if progress and profile_training:
         peak_text = "n/a" if peak_gpu_memory_mb is None else f"{peak_gpu_memory_mb:.2f} MB"
         print(f"mean train epoch time: {mean_epoch_train_seconds:.2f}s", flush=True)
@@ -1055,6 +1304,8 @@ def train_multi_object(
             "target_mode": target_mode,
             "target_scaling_epsilon": epsilon,
             "device": str(device),
+            "distributed_world_size": distributed.world_size,
+            "global_batch_meshes": distributed.world_size * accumulation_meshes,
             "runtime_seconds": runtime_seconds,
             "initial_loading_seconds": float(initial_loading_seconds),
             "static_preparation_seconds": static_preparation_seconds,
@@ -1069,6 +1320,7 @@ def train_multi_object(
             "stopped_early": stopped_early,
             "stop_reason": stop_reason,
             "amp_enabled": amp_enabled,
+            "cuda_transfer_overlap_enabled": cuda_transfer_overlap_enabled,
             "mean_epoch_data_loading_seconds": mean_epoch_data_loading_seconds,
             "mean_epoch_gpu_transfer_seconds": mean_epoch_gpu_transfer_seconds,
             "mean_epoch_forward_backward_seconds": mean_epoch_forward_backward_seconds,
@@ -1084,7 +1336,7 @@ def train_multi_object(
             json.dumps(summary, indent=2) + "\n", encoding="utf-8"
         )
     return MultiObjectTrainingResult(
-        model=model,
+        model=base_model,
         history=history,
         best_epoch=best_epoch,
         best_selection_loss=best_selection_loss,
@@ -1117,6 +1369,8 @@ def train_multi_object(
         mean_epoch_image_decode_resize_seconds=mean_epoch_image_decode_resize_seconds,
         mean_train_views_per_sample=mean_train_views_per_sample,
         mean_epoch_decoded_image_bytes=mean_epoch_decoded_image_bytes,
+        distributed_world_size=distributed.world_size,
+        cuda_transfer_overlap_enabled=cuda_transfer_overlap_enabled,
     )
 
 
@@ -1242,6 +1496,8 @@ def _prepare_object_static(
     static_sample = _select_renderer_visibility(static_sample, config)
     if query_augmentation_settings(config).enabled:
         validate_gt_query_contract(static_sample)
+    if local_query_jitter_settings(config).enabled:
+        validate_local_query_jitter_contract(static_sample)
     target_mode, epsilon = _target_settings(config)
     target = static_sample["raw_laplacian_target"]
     if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
@@ -1489,6 +1745,57 @@ def _prepare_item_for_use(
     )
 
 
+def _enqueue_cuda_transfer(
+    prepared: _PreparedObject,
+    config: Mapping[str, Any],
+    device: torch.device,
+    *,
+    cache_on_device: bool,
+    decode_images: bool,
+    transfer_stream: torch.cuda.Stream,
+) -> tuple[
+    _PreparedObject,
+    tuple[torch.cuda.Event | None, torch.cuda.Event | None],
+]:
+    """Queue one non-blocking H2D transfer on the dedicated copy stream."""
+
+    with torch.cuda.stream(transfer_stream):
+        transfer_start = _start_cuda_timing(device)
+        moved = _prepare_item_for_use(
+            prepared,
+            config,
+            device,
+            cache_on_device,
+            non_blocking=True,
+            decode_images=decode_images,
+        )
+        transfer_events = _finish_cuda_timing(device, transfer_start)
+    return moved, transfer_events
+
+
+def _record_prepared_stream(
+    prepared: _PreparedObject, stream: torch.cuda.Stream
+) -> None:
+    """Keep copy-stream allocations alive until compute-stream work completes."""
+
+    _record_value_stream(prepared.sample, stream)
+    _record_value_stream(prepared.training_target, stream)
+
+
+def _record_value_stream(value: Any, stream: torch.cuda.Stream) -> None:
+    if isinstance(value, torch.Tensor):
+        if value.device.type == "cuda":
+            value.record_stream(stream)
+        return
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _record_value_stream(nested, stream)
+        return
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            _record_value_stream(nested, stream)
+
+
 def _materialize_prepared_images(
     prepared: _PreparedObject,
     *,
@@ -1613,6 +1920,8 @@ def _build_prepared_loader(
     views_per_sample: int | None = None,
     base_seed: int = 7,
     profile_loading: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
 ) -> DataLoader:
     worker_items = tuple(
         _PreparedObject(
@@ -1631,7 +1940,11 @@ def _build_prepared_loader(
         profile_loading=profile_loading,
     )
     sampler = _EpochIndexSampler(
-        len(dataset), shuffle=shuffle, generator=generator
+        len(dataset),
+        shuffle=shuffle,
+        generator=generator,
+        rank=rank,
+        world_size=world_size,
     )
     kwargs: dict[str, Any] = {
         "dataset": dataset,
@@ -1672,6 +1985,7 @@ def _data_loader_settings(config: Mapping[str, Any]) -> _DataLoaderSettings:
     prefetch_factor = int(loading.get("prefetch_factor", 2))
     pin_memory = bool(loading.get("pin_memory", False))
     persistent_workers = bool(loading.get("persistent_workers", False))
+    cuda_prefetch = bool(loading.get("cuda_prefetch", True))
     train_views_per_sample = _optional_positive_int(
         loading.get("train_views_per_sample"), "data_loading.train_views_per_sample"
     )
@@ -1692,8 +2006,23 @@ def _data_loader_settings(config: Mapping[str, Any]) -> _DataLoaderSettings:
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
+        cuda_prefetch=cuda_prefetch,
         train_views_per_sample=train_views_per_sample,
         validation_views_per_sample=validation_views_per_sample,
+    )
+
+
+def _cuda_transfer_overlap_enabled(
+    device: torch.device,
+    *,
+    cache_on_device: bool,
+    settings: _DataLoaderSettings,
+) -> bool:
+    return bool(
+        device.type == "cuda"
+        and not cache_on_device
+        and settings.pin_memory
+        and settings.cuda_prefetch
     )
 
 
@@ -1825,6 +2154,27 @@ def _with_query_augmentation(
     )
 
 
+def _with_local_query_jitter(
+    prepared: _PreparedObject,
+    settings: LocalQueryJitterSettings,
+    *,
+    base_seed: int,
+    epoch: int,
+) -> _PreparedObject:
+    if not settings.enabled:
+        return prepared
+    return _PreparedObject(
+        sample=apply_local_query_jitter(
+            prepared.sample, settings, base_seed=base_seed, epoch=epoch
+        ),
+        training_target=prepared.training_target,
+        clipped_target_vertices=prepared.clipped_target_vertices,
+        raw_target=prepared.raw_target,
+        face_count=prepared.face_count,
+        image_decode_resize_seconds=prepared.image_decode_resize_seconds,
+        decoded_image_bytes=prepared.decoded_image_bytes,
+        used_view_count=prepared.used_view_count,
+    )
 def _query_subset_losses(
     prediction: torch.Tensor,
     target: torch.Tensor,
@@ -1849,6 +2199,26 @@ def _mean_optional_tensors(values: Sequence[torch.Tensor]) -> float | None:
     return float(torch.stack(tuple(values)).mean().item()) if values else None
 
 
+def _distributed_optional_mean(
+    value: float | None, context: DistributedContext
+) -> float | None:
+    present = reduce_scalar(
+        0 if value is None else 1, context, reduction="sum"
+    )
+    if present == 0:
+        return None
+    if present != context.world_size:
+        raise RuntimeError("Optional distributed metric is missing on a subset of ranks.")
+    return reduce_scalar(float(value), context, reduction="mean")
+
+
+def _unwrap_model(model: nn.Module) -> LearnedLaplacianModel:
+    result = model.module if isinstance(model, DistributedDataParallel) else model
+    if not isinstance(result, LearnedLaplacianModel):
+        raise TypeError("Expected a LearnedLaplacianModel or its DDP wrapper.")
+    return result
+
+
 def _mean_metric(metrics: Mapping[str, Mapping[str, Any]], name: str) -> float | None:
     values = [float(item[name]) for item in metrics.values() if item.get(name) is not None]
     return float(np.mean(values)) if values else None
@@ -1867,7 +2237,7 @@ def _mean_nested_metric(
 
 @torch.no_grad()
 def _evaluate_dataset(
-    model: LearnedLaplacianModel,
+    model: nn.Module,
     samples: Sequence[Mapping[str, Any] | _PreparedObject],
     config: Mapping[str, Any],
     device: torch.device,
@@ -1884,7 +2254,10 @@ def _evaluate_dataset(
     views_per_sample: int | None = None,
 ) -> tuple[float, dict[str, dict[str, Any]]]:
     model.eval()
-    decode_images = model.input_mode != "coarse_only" and not model.zero_images
+    base_model = _unwrap_model(model)
+    decode_images = (
+        base_model.input_mode != "coarse_only" and not base_model.zero_images
+    )
     target_mode, epsilon = _target_settings(config)
     confidence_settings = _confidence_settings(config)
     losses = []
@@ -2027,7 +2400,7 @@ def _evaluate_dataset(
 
 def _save_multi_checkpoint(
     path: Path,
-    model: LearnedLaplacianModel,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
     train_loss: float | None,
@@ -2041,12 +2414,13 @@ def _save_multi_checkpoint(
     scaler: torch.amp.GradScaler | None = None,
     training_state: Mapping[str, Any] | None = None,
 ) -> None:
+    base_model = _unwrap_model(model)
     payload = {
         "epoch": epoch,
         "train_loss": train_loss,
         "validation_loss": validation_loss,
-        "model_config": model.architecture_config(),
-        "model_state_dict": model.state_dict(),
+        "model_config": base_model.architecture_config(),
+        "model_state_dict": base_model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "experiment_config": dict(config),
         "train_meshes": train_meshes,
@@ -2070,7 +2444,7 @@ def _save_multi_checkpoint(
 
 def _save_optimizer_step_checkpoint(
     output_path: Path,
-    model: LearnedLaplacianModel,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None,
     scaler: torch.amp.GradScaler,
@@ -2120,6 +2494,7 @@ def _save_optimizer_step_checkpoint(
             "early_stopping_bad_validations": int(
                 early_stopping_bad_validations
             ),
+            "distributed_world_size": current_distributed_context().world_size,
         },
     )
     return path
@@ -2127,7 +2502,7 @@ def _save_optimizer_step_checkpoint(
 
 def _save_resumable_checkpoint(
     path: Path,
-    model: LearnedLaplacianModel,
+    model: nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler.ReduceLROnPlateau | None,
     scaler: torch.amp.GradScaler,
@@ -2172,5 +2547,6 @@ def _save_resumable_checkpoint(
             "early_stopping_bad_validations": int(
                 early_stopping_bad_validations
             ),
+            "distributed_world_size": current_distributed_context().world_size,
         },
     )
