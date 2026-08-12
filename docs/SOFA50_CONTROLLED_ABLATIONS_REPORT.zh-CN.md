@@ -328,6 +328,55 @@ Lost-success samples：
 - v00/v04 中，50k 的 normalized EPE、top-10% normalized residual 和共享权重 normalized RMS 均低于 20k；raw residual RMS、raw maximum 和共享 50k recovery weight 下的 raw RMS 均高于 20k，且 refined Chamfer 高于 20k。两个 samples 的 solver-input raw-tail pattern 均为 true。
 - Oracle 在五个 objects 上均为 5/5，learned recovery 的单 object success pattern 未保留。
 
+### 7.5 Raw-residual Top-k oracle replacement
+
+Job 15677 使用与第 7.4 节相同的 manifest、25 个 synthetic-current test samples、checkpoint、target、confidence、visibility 和 recovery solver。每个 checkpoint/sample 按 recovery 实际接收的 raw solver-input residual
+`||delta_pred_raw[i] - delta_target_raw[i]||_2` 降序排列；normalized residual 仅作为对照字段。0/1/10/20/50/100% replacement 形成嵌套集合，正比例顶点数使用 `ceil`，并列值按 vertex index 升序处理。
+
+Manifest、50 个 checkpoint/sample 的 Top-k 选择、两个 0% learned endpoints 和 current-query 50k 的 100% exact-target endpoint 均通过契约检查。Job 状态为 `COMPLETED (0:0)`，运行时间为 2:44:22。
+
+| Checkpoint | Replacement | Raw residual energy replaced | Refined Chamfer | Chamfer oracle gap closed | Refined P2S | P2S oracle gap closed | Normal consistency | Introduced flips | Improved/25 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Current-query 20k | 0% | 0.0000% | 0.00417912 | 0.00% | 0.00423241 | 0.00% | 0.940038 | 8,421 | 5 |
+| Current-query 20k | 1% | 83.9786% | 0.00384648 | 33.20% | 0.00384780 | 36.57% | 0.942978 | 7,133 | 16 |
+| Current-query 20k | 10% | 98.5787% | 0.00358803 | 58.99% | 0.00359401 | 60.70% | 0.951773 | 4,629 | 25 |
+| Current-query 20k | 20% | 99.3648% | 0.00345724 | 72.04% | 0.00346345 | 73.11% | 0.955379 | 4,031 | 25 |
+| Current-query 20k | 50% | 99.8679% | 0.00323774 | 93.95% | 0.00324234 | 94.14% | 0.960823 | 3,503 | 25 |
+| Current-query 20k | 100% | 100.0000% | 0.00317707 | 100.00% | 0.00318069 | 100.00% | 0.963353 | 3,243 | 25 |
+| Current-query 50k | 0% | 0.0000% | 0.00422421 | 0.00% | 0.00424747 | 0.00% | 0.939335 | 8,486 | 3 |
+| Current-query 50k | 1% | 85.1477% | 0.00383752 | 36.85% | 0.00384135 | 37.99% | 0.942262 | 7,153 | 17 |
+| Current-query 50k | 10% | 98.8987% | 0.00356691 | 62.64% | 0.00357169 | 63.22% | 0.951897 | 4,490 | 25 |
+| Current-query 50k | 20% | 99.5244% | 0.00343960 | 74.77% | 0.00344401 | 75.16% | 0.955357 | 3,952 | 25 |
+| Current-query 50k | 50% | 99.9058% | 0.00322792 | 94.94% | 0.00323261 | 94.94% | 0.960826 | 3,516 | 25 |
+| Current-query 50k | 100% | 100.0000% | 0.00317485 | 100.00% | 0.00317849 | 100.00% | 0.963383 | 3,242 | 25 |
+
+两组 checkpoint 的 mean Chamfer 在 1% replacement 时低于 mean initial Chamfer；首次关闭至少 90% Chamfer oracle gap 的记录比例均为 50%。20k 的 sample-level first-improvement 分布为 0%: 5、1%: 11、10%: 9；50k 为 0%: 3、1%: 14、10%: 8。25/25 samples 均在 10% replacement 时低于各自 initial Chamfer。50 个 checkpoint/sample 的 Chamfer 和 P2S 在六个 replacement arms 上均单调不增。
+
+Baseline recovery 的 raw-residual percentile groups：
+
+| Checkpoint | Percentile group | Raw residual mean | Normalized residual mean | Initial vertex-to-GT-surface distance | Recovered vertex-to-GT-surface distance |
+|---|---|---:|---:|---:|---:|
+| Current-query 20k | Top 0–1% | 0.172977 | 0.475026 | 0.0294214 | 0.0661856 |
+| Current-query 20k | 1–10% | 0.0214065 | 0.796804 | 0.0114638 | 0.0133091 |
+| Current-query 20k | 10–20% | 0.00515213 | 1.823238 | 0.00691102 | 0.00715702 |
+| Current-query 20k | 20–50% | 0.00232813 | 2.807241 | 0.00423863 | 0.00422278 |
+| Current-query 20k | Bottom 50% | 0.000904194 | 2.580521 | 0.00229025 | 0.00231084 |
+| Current-query 50k | Top 0–1% | 0.169111 | 0.462460 | 0.0293045 | 0.0721756 |
+| Current-query 50k | 1–10% | 0.0205310 | 0.781526 | 0.0115668 | 0.0135119 |
+| Current-query 50k | 10–20% | 0.00490782 | 1.832673 | 0.00690671 | 0.00710504 |
+| Current-query 50k | 20–50% | 0.00223119 | 2.681124 | 0.00424841 | 0.00425367 |
+| Current-query 50k | Bottom 50% | 0.000849648 | 2.446157 | 0.00226908 | 0.00227088 |
+
+Top 1% raw-residual group 的 baseline recovered surface distance 分别是 bottom 50% 的 28.64 倍和 31.78 倍。两组 checkpoint 的 mean vertex-wise raw residual 与 recovered surface distance 的 baseline Spearman 相关系数分别为 0.4256 和 0.4357。
+
+结论：
+
+- High raw-residual vertices 对应较高的 recovered vertex-to-GT-surface distance；该关系在两组 checkpoint 上保留。
+- Top 1% vertices 包含 83.98–85.15% raw residual energy，replacement 后关闭 33.20–36.85% Chamfer oracle gap，并将 improved count 增加到 16/25 和 17/25。
+- Top 10% replacement 使 25/25 samples 的 Chamfer 低于 initial，但只关闭 58.99–62.64% mean Chamfer oracle gap。
+- 达到至少 90% mean Chamfer 和 P2S oracle-gap closure 需要 50% replacement。当前结果不支持 downstream gap 仅由 Top 1% 或 Top 10% raw-residual vertices 构成。
+- Raw residual percentile 与 normalized residual percentile 不等价；Top 1% raw-residual group 的 normalized residual mean 低于其余记录 groups，normalized residual 未用于该实验的 Top-k 选择。
+
 ## 8. Local query jitter 训练快照
 
 状态时间：2026-08-12 06:01 BST。单 GPU 下每个 epoch 对应 100 optimizer steps，20,000-step 上限对应 200 epochs。
@@ -378,6 +427,10 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
 | Current-query 50k 相对 GT-query 50k 改变 matched-budget downstream endpoints | Supported for recorded protocol | Chamfer -23.44%；P2S -25.13%；flips -25.44% |
 | Exact current-graph target 在固定 recovery contract 下改善 synthetic-current geometry | Supported | Chamfer 25/25；mean 相对 initial -18.87% |
 | 50k lost-success samples 的 raw solver-input tail 低于 20k | Not supported | v00/v04 的共享权重 raw RMS 均升高 |
+| Top 1% raw-residual vertices 单独构成主要 downstream oracle gap | Not supported | 20k/50k Chamfer gap closure 33.20%/36.85% |
+| Top 10% raw-residual replacement 使每个 sample 低于 initial | Supported | 20k/50k 均为 25/25 |
+| Top-k replacement 关闭至少 90% mean Chamfer oracle gap | Supported at 50% replacement | 20k/50k 为 93.95%/94.94% |
+| High raw-residual vertices 对应 high recovered geometry error | Supported for recorded percentile analysis | Top 1%/bottom 50% surface-distance ratio 28.64/31.78 |
 | Local query jitter 改善最终 synthetic 与 OpenMVS recovery | Pending | Jobs 15662_0、15662_1、15663 |
 
 ## 10. 尚需完成的判定
@@ -402,5 +455,7 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
   `runs/learned_laplacian/sofa50_synthetic_current_50k_downstream_evaluation_seed7/`
 - Synthetic-current exact-target oracle recovery：
   `runs/learned_laplacian/sofa50_synthetic_current_50k_downstream_evaluation_seed7/oracle_recovery_comparison/`
+- Synthetic-current Top-k raw-residual oracle replacement：
+  `runs/learned_laplacian/sofa50_synthetic_current_50k_downstream_evaluation_seed7/oracle_recovery_comparison/topk_prediction_error_recovery_comparison/`
 - Local-jitter runs：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/`
