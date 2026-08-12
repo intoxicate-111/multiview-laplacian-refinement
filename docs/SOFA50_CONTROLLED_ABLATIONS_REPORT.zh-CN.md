@@ -244,7 +244,46 @@ Job 15664 从 20k checkpoint 恢复，使用 2×L40 完成到 50,000 optimizer s
 结论：
 
 - 从 20k 延长到 50k 后，native validation loss 和 train loss 均下降。
-- 50k checkpoint 尚未完成与 20k 相同的 synthetic-current test、zero-RGB 和 reconstruction 评估，不能从 native validation loss 推导下游 reconstruction 变化。
+
+### 7.3 Current-query 50k downstream evaluation
+
+三个 checkpoint 使用旧 A/B comparison 的相同 synthetic-current evaluator、manifest、25 test samples、target、zero-RGB 条件和 recovery contract。旧 GT-query 50k/current-query 20k 结果通过 regression check。
+
+| Metric | GT-query 50k | Current-query 20k | Current-query 50k |
+|---|---:|---:|---:|
+| Evaluation loss | 0.0145785 | 0.0117459 | 0.0112148 |
+| Vector L2 | 2.994202 | 2.391465 | 2.285737 |
+| Global cosine | 0.883648 | 0.895147 | 0.896569 |
+| High-10% cosine | 0.967048 | 0.974082 | 0.975401 |
+| Pred/target norm | 1.006536 | 0.914148 | 0.946351 |
+| Zero-RGB loss | 0.0243697 | 0.0362934 | 0.0346068 |
+| Correct-zero gap | 0.0097912 | 0.0245475 | 0.0233920 |
+| Refined Chamfer | 0.00551716 | 0.00417940 | 0.00422413 |
+| Refined P2S | 0.00567282 | 0.00423266 | 0.00424708 |
+| Normal consistency | 0.922792 | 0.940034 | 0.939325 |
+| Introduced flips | 11,384 | 8,421 | 8,488 |
+| Improved over initial | 0/25 | 5/25 | 3/25 |
+
+Current-query 50k 相对 current-query 20k：
+
+- Evaluation loss 下降 4.52%，vector L2 下降 4.42%。
+- Global cosine 增加 0.001423，high-10% cosine 增加 0.001320。
+- Correct-zero gap 下降 4.71%，relative correct-vs-zero improvement 从 67.6362% 变为 67.5937%。
+- Refined Chamfer 增加 1.07%，P2S 增加 0.34%，normal consistency 下降 0.000709，introduced flips 增加 67。
+- Improved-over-initial sample count 从 5/25 变为 3/25；`v00` 和 `v04` 不再低于各自 initial Chamfer。
+
+Current-query 50k 相对 GT-query 50k：
+
+- Evaluation loss 与 vector L2 分别下降 23.07% 和 23.66%。
+- Refined Chamfer 与 P2S 分别下降 23.44% 和 25.13%。
+- Normal consistency 增加 0.016533，introduced flips 减少 2,896，improved-over-initial count 为 3/25 对 0/25。
+- Correct-RGB loss 低于 zero-RGB loss，image dependence 保留。
+
+结论：
+
+- 20k 延长到 50k 的 native validation 与 synthetic prediction metrics 同时下降。
+- 20k 延长到 50k 未降低 reconstruction Chamfer 或 P2S，且 improved-over-initial count 从 5 降为 3。
+- 在相同 50k budget 下，current-query 的记录 prediction 与 reconstruction endpoints 均处于 GT-query 对应值的指定方向。
 
 ## 8. Local query jitter 训练快照
 
@@ -291,14 +330,16 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
 | 28 views 与 GT-adaptive 的指标变化全部叠加 | Not supported under four-condition rule | Top-10% retention condition false |
 | Current-query 20k 相对既有 GT-query 50k 改变 synthetic-current test metrics | Supported for recorded comparison | Loss、EPE 和 reconstruction metrics 见第 7.1 节 |
 | Current-query 50k 相对 current-query 20k 降低 native validation loss | Supported | -8.26% |
+| Current-query 50k 相对 current-query 20k 降低 synthetic prediction loss/EPE | Supported | Loss -4.52%；EPE -4.42% |
+| Current-query 50k 相对 current-query 20k 降低 reconstruction Chamfer/P2S | Not supported | Chamfer +1.07%；P2S +0.34% |
+| Current-query 50k 相对 GT-query 50k 改变 matched-budget downstream endpoints | Supported for recorded protocol | Chamfer -23.44%；P2S -25.13%；flips -25.44% |
 | Local query jitter 改善最终 synthetic 与 OpenMVS recovery | Pending | Jobs 15662_0、15662_1、15663 |
 
 ## 10. 尚需完成的判定
 
 1. 对 GT 与 GT-adaptive prediction 做 common-surface paired evaluation：映射到相同 GT vertices 或固定表面采样点，使用同一 target、同一 curvature bins、同一 EPE/cosine 定义。
-2. 对 current-query 50k checkpoint 执行与 20k 相同的 synthetic-current test、zero-RGB 和 reconstruction evaluation。
-3. 等待 15662 两个 arm 完成以及 15663 输出 final local-jitter report。
-4. 在 adaptive 的 common-surface 指标与 local-jitter downstream endpoint 完成前，不从 native validation loss 或 graph-specific raw EPE 推导 Sofa50 主训练配置。
+2. 等待 15662 两个 arm 完成以及 15663 输出 final local-jitter report。
+3. 在 adaptive 的 common-surface 指标与 local-jitter downstream endpoint 完成前，不从 native validation loss 或 graph-specific raw EPE 推导 Sofa50 主训练配置。
 
 ## 11. 产物位置
 
@@ -312,5 +353,7 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
   `runs/learned_laplacian/sofa50_synthetic_current_ab_comparison_seed7/`
 - Synthetic-current 50k continuation：
   `runs/learned_laplacian/sofa50_synthetic_current_c2f2_14view_50k_resume_from_20k_seed7/`
+- Synthetic-current 50k downstream evaluation：
+  `runs/learned_laplacian/sofa50_synthetic_current_50k_downstream_evaluation_seed7/`
 - Local-jitter runs：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/`
