@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-08-11，Europe/London。
+状态日期：2026-08-12，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -43,7 +43,8 @@ $$
 | Sofa50 1920 GT-query | 50 个对象；40/5/5 | 14 / 1920 | 完成 | HPC：`sofa50_refinement/multiview_1920` |
 | 嵌套视图消融 | 50 个对象；40/5/5 | 14/28/56 / 960 | 完成 | `sofa50_refinement/multiview_nested_14_28_56_cpu_v3` |
 | Query-resolution ablation v2 | 50 个对象；40/5/5 | 14 / 960 | 完成 | `multiview_960/query_resolution_ablation_v2` |
-| Synthetic current-query B | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 14 / 960 | 完成并已复制到 HPC | `~/sofa_mesh/sofa50_synthetic_current` |
+| Synthetic current-query，14 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 14 / 960 | 完成并已复制到 HPC | `~/sofa_mesh/sofa50_synthetic_current` |
+| Synthetic current-query，28 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 28 / 960 | 完成 | HPC：`sofa50_synthetic_current_28view_v1` |
 | OpenMVS coarse-query | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成 | HPC：`openmvs_texture_test_v6_48view` |
 | Thingi10K50 开发集 | 50 个对象；40/5/5 | 960 和 1920 变体 | 仅开发与 smoke run | 本地 `thingi10k50` 运行目录 |
 
@@ -151,35 +152,69 @@ HPC 结果目录：`runs/learned_laplacian/sofa50_c2f2_query_resolution_gt_sub1_
 |---:|---|---:|---:|---:|---:|
 | 14 | 完成 | 0.0139316 | 0.00707592 | 0.0139314 | 9,095 |
 | 28 | 完成 | 0.0130296 | 0.00660375 | 0.0130341 | 18,130 |
-| 56 | 运行中快照，epoch 1941/2000 | 0.0138256 | 0.00699609 | epoch 1940 为 0.0138337 | 非最终值 |
+| 56 | 完成 | 0.0138104 | 0.006991 | 0.013812 | 31,692 |
 
-56-view 行是状态快照，不用于最终 view-count 结论。HPC 结果目录：`runs/learned_laplacian/sofa50_c2f2_views_14_28_56_20k_seed7_v4`。
+三个 view-count arms 均完成 20,000 optimizer steps。28-view arm 的 best
+validation loss 最低；56-view arm 的统一 raw EPE 和 raw Top-10% EPE 最低。
+HPC 结果目录：`runs/learned_laplacian/sofa50_c2f2_views_14_28_56_20k_seed7_v4`。
 
 ## Synthetic current-query 对比
 
-Experiment A 使用已有冻结 GT-query checkpoint：
+### Frozen GT-query 50k 与 current-query 20k
 
-```text
-runs/learned_laplacian/sofa50_c2_f2_50000step_3seed/seed_7/best.pt
-```
+最终 14-view 评估使用 25 个 matched synthetic-current test samples。两组训练
+预算不同，因此该对比不能将 formulation 与 budget 的影响分离。
 
-Experiment B 是 seed 7、20,000-step 的 C2/F2/K6/14-view current-query 训练。A 不重新训练。两个 checkpoint 将在相同的 25 个 held-out synthetic-current variants 上评估。
+| Metric | GT-query 50k | Current-query 20k |
+|---|---:|---:|
+| Evaluation loss | 0.0145788 | 0.0117459 |
+| Vector L2 | 2.994356 | 2.391482 |
+| Global cosine | 0.883605 | 0.895129 |
+| Initial Chamfer | 0.00391323 | 0.00391323 |
+| Refined Chamfer | 0.00551727 | 0.00417930 |
+| 改善 samples | 0/25 | 5/25 |
 
-训练前 recovery oracle 在五个 validation 对象上均降低 Chamfer：
+Current-query training 相对 frozen GT-query checkpoint 改善了记录中的预测与
+recovery 指标，但其 mean refined Chamfer 仍高于共享的 initial Chamfer。
 
-| 指标 | 数值 |
-|---|---:|
-| Mean initial Chamfer | 0.00324172 |
-| Mean oracle-recovered Chamfer | 0.00208458 |
-| 改善 validation 对象 | 5/5 |
-| 新增翻转面 | 总计 553 |
+### 28-view current-graph H2 target/loss-space 消融
 
-最终 A/B 预测、RGB 消融和重建结果尚未生成。配置的输出位置为：
+三个 C2F2 arms 使用相同的 28-view manifest、split IDs、seed、初始化、optimizer、
+scheduler、batching 和 20,000-step budget。Local query jitter 关闭，contract
+audit 通过。Native validation loss 位于不同 loss space，不能跨 arm 直接比较。
 
-```text
-runs/learned_laplacian/sofa50_synthetic_current_c2f2_14view_20k_seed7
-runs/learned_laplacian/sofa50_synthetic_current_ab_comparison_seed7
-```
+| Arm | Output target | Native loss space | Best native val | Runtime h |
+|---|---|---|---:|---:|
+| A：canonical H2 | `h^2` normalized | Output representation | 0.018456638 | 6.0416 |
+| B：direct raw | Raw Laplacian | Output representation | 1.5825285e-6 | 6.1807 |
+| C：normalized output/raw loss | `h^2` normalized | Raw Laplacian | 2.1655217e-6 | 6.6896 |
+
+统一 test raw-space prediction：
+
+| Arm | Raw EPE ↓ | Top-1% EPE ↓ | Top-10% EPE ↓ | Raw cosine ↑ | Weighted raw RMS ↓ |
+|---|---:|---:|---:|---:|---:|
+| A | 0.00769237 | 0.253855 | 0.0557517 | 0.933526 | 0.0427999 |
+| B | 0.00300525 | 0.0417512 | 0.0136982 | 0.998667 | 0.00611072 |
+| C | 0.00333673 | 0.0547519 | 0.0159651 | 0.997419 | 0.00815502 |
+
+Zero-replacement recovery 的共享 initial Chamfer 为 `0.00391323`：
+
+| Arm | Refined Chamfer ↓ | P2S ↓ | Normal consistency ↑ | Flips | 改善数/25 |
+|---|---:|---:|---:|---:|---:|
+| A | 0.00456011 | 0.00462286 | 0.934976 | 10,195 | 3/25 |
+| B | 0.00380671 | 0.00380587 | 0.942406 | 6,566 | 19/25 |
+| C | 0.00383121 | 0.00385409 | 0.941080 | 7,057 | 16/25 |
+
+B 是主要结果：统一 raw-space error 和 refined Chamfer 最低，并改善 19/25
+samples；C 位于 B 与 A 之间。B/C 的小 native loss 来源于 raw-Laplacian 数值单位，
+不能解释为相对 A 的 loss 直接下降四个数量级。
+
+三个 GPU shards 通过 Slurm array 15686 在三张 L40 上并行运行，每个 shard 用时
+`00:19:06`–`00:19:25`；merge job 15687 用时 `00:00:15`。本地已保存
+[报告](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md)、
+[JSON/CSV 记录](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis)、
+[75 个 OBJ meshes](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian)
+和[25 组总览图](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)。
 
 ## 其他诊断实验
 
@@ -213,15 +248,17 @@ runs/learned_laplacian/sofa50_synthetic_current_ab_comparison_seed7
 | 960 optimized one-epoch smoke | 10 | 0.305584 | 仅 smoke |
 | 1920 optimized workers-4 one-epoch smoke | 10 | 0.305584 | 仅 smoke |
 
-## HPC 状态快照
+## HPC 完成记录
 
-| Job | 实验 | 快照状态 | 当前记录 |
+| Job | 实验 | 最终状态 | 记录结果 |
 |---:|---|---|---|
-| 15625 | C2F2 56-view，20k | 运行中 | Epoch 1941/2000；best val `0.0138256`。 |
-| 15629 | C2F2 K2，14-view，20k | 运行中 | Epoch 811/2000；best val `0.0166923`。 |
-| 15630 | C2F2 K4，14-view，20k | 运行中 | Epoch 786/2000；best val `0.0159757`。 |
-| 15633 | Synthetic current-query B，20k | 等待资源 | 输出目录使用 `20k` 合同。 |
-| 15634 | Frozen-A 与 B 统一评估 | 等待依赖 | 仅在 job 15633 成功完成后启动。 |
+| 15625 | C2F2 56-view，20k | 完成 | 20,000 steps；best val `0.0138104`；elapsed `13:58:22`。 |
+| 15629 | C2F2 K2，14-view，20k | 完成 | Elapsed `03:59:59`；保留在 position-encoding 实验记录中。 |
+| 15630 | C2F2 K4，14-view，20k | 完成 | Elapsed `04:04:08`；保留在 position-encoding 实验记录中。 |
+| 15633 | 已替代的 current-query B run | 已取消 | 运行 `04:44:15` 后取消；H2 analysis 未使用该 run。 |
+| 15634 | 已替代的 A/B evaluation | 已取消 | Dependency job 未启动；H2 analysis 未使用该 job。 |
+| 15686 | H2 三分片评估 | 完成 | 三个 L40 array tasks 均约 19 分钟完成。 |
+| 15687 | H2 report merge | 完成 | 最终 JSON/CSV/report 在 15 秒内合并完成。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 
@@ -230,13 +267,17 @@ Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于�
 - 当前已完成实验中，C2F2 960 的 exact GT-query prediction error 最低。
 - 从 F0 增加到 F2 可降低 exact-query error。
 - 在 50k/20k 不等预算下，从 960 增加到 1920 不降低 mean endpoint error。
-- Canonical views 从 14 增加到 28 可降低已完成 20k 训练的 validation loss；本快照中的 56-view arm 尚未完成。
+- Canonical views 从 14 增加到 28 可降低已完成 20k 训练的 validation loss。
+  已完成的 56-view arm 相对 28 views 改善 raw errors，但 validation loss 更高，
+  runtime 为其 2.085 倍。
 - GT-sub1 的 validation loss 高于 GT 和 adaptive query-graph arms。
 - 已有 expanded-query 和 OpenMVS recovery 实验未降低 mean Chamfer。
-- 当前 synthetic-current A/B 实验用于检验 current-graph 训练是否缩小该 formulation gap。
+- Current-graph training 相对 frozen GT-query baseline 缩小了 synthetic-current
+  recovery gap。在受控 28-view H2 消融中，direct raw-Laplacian training 最优，
+  mean Chamfer 低于 initial mesh，并改善 19/25 test samples。
 
 ## 数据来源优先级
 
 1. 每个运行目录中的 `metrics.json`、`summary.json`、CSV 和 checkpoint 是数值记录源。
 2. 本文档记录汇总快照，不替代 per-object 或 per-variant 文件。
-3. 运行中表格应在对应 `metrics.json` 或 `comparison.json` 写入后更新为最终结果。
+3. HPC 完成记录反映 scheduler 终态；科学指标仍以各 run 的 analysis 文件为准。

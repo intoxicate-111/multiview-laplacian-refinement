@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-08-11, Europe/London.
+Status date: 2026-08-12, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -47,7 +47,8 @@ $$
 | Sofa50 1920 GT-query | 50 objects; 40/5/5 | 14 / 1920 | Complete | HPC: `sofa50_refinement/multiview_1920` |
 | Nested view ablation | 50 objects; 40/5/5 | 14/28/56 / 960 | Complete | `sofa50_refinement/multiview_nested_14_28_56_cpu_v3` |
 | Query-resolution ablation v2 | 50 objects; 40/5/5 | 14 / 960 | Complete | `multiview_960/query_resolution_ablation_v2` |
-| Synthetic current-query B | 50 objects, 5 variants each; 200/25/25 variants | 14 / 960 | Complete and copied to HPC | `~/sofa_mesh/sofa50_synthetic_current` |
+| Synthetic current-query, 14 views | 50 objects, 5 variants each; 200/25/25 variants | 14 / 960 | Complete and copied to HPC | `~/sofa_mesh/sofa50_synthetic_current` |
+| Synthetic current-query, 28 views | 50 objects, 5 variants each; 200/25/25 variants | 28 / 960 | Complete | HPC: `sofa50_synthetic_current_28view_v1` |
 | OpenMVS coarse-query set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete | HPC: `openmvs_texture_test_v6_48view` |
 | Thingi10K50 development set | 50 objects; 40/5/5 | 960 and 1920 variants | Development and smoke runs only | Local `thingi10k50` run directories |
 
@@ -167,40 +168,75 @@ HPC root:
 |---:|---|---:|---:|---:|---:|
 | 14 | Complete | 0.0139316 | 0.00707592 | 0.0139314 | 9,095 |
 | 28 | Complete | 0.0130296 | 0.00660375 | 0.0130341 | 18,130 |
-| 56 | Running snapshot, epoch 1941/2000 | 0.0138256 | 0.00699609 | 0.0138337 at epoch 1940 | not final |
+| 56 | Complete | 0.0138104 | 0.006991 | 0.013812 | 31,692 |
 
-The 56-view row is a status snapshot and is excluded from a final view-count
-conclusion. HPC root:
+All three view-count arms reached 20,000 optimizer steps. The 28-view arm has
+the lowest best validation loss; the 56-view arm has the lowest unified raw
+EPE and raw Top-10% EPE. HPC root:
 `runs/learned_laplacian/sofa50_c2f2_views_14_28_56_20k_seed7_v4`.
 
-## Synthetic current-query comparison
+## Synthetic current-query comparisons
 
-Experiment A is the existing frozen GT-query checkpoint:
+### Frozen GT-query 50k versus current-query 20k
 
-```text
-runs/learned_laplacian/sofa50_c2_f2_50000step_3seed/seed_7/best.pt
-```
+The final 14-view evaluation uses 25 matched synthetic-current test samples.
+The training budgets differ and the comparison therefore does not isolate the
+formulation from the budget.
 
-Experiment B is C2/F2/K6/14-view current-query training with seed 7 and a
-20,000-step budget. A is not retrained. Both checkpoints will be evaluated on
-the same 25 held-out synthetic-current variants.
+| Metric | GT-query 50k | Current-query 20k |
+|---|---:|---:|
+| Evaluation loss | 0.0145788 | 0.0117459 |
+| Vector L2 | 2.994356 | 2.391482 |
+| Global cosine | 0.883605 | 0.895129 |
+| Initial Chamfer | 0.00391323 | 0.00391323 |
+| Refined Chamfer | 0.00551727 | 0.00417930 |
+| Improved samples | 0/25 | 5/25 |
 
-The pre-training recovery oracle improves all five validation objects:
+Current-query training improves the recorded prediction and recovery metrics
+relative to the frozen GT-query checkpoint, but its mean refined Chamfer still
+exceeds the shared initial Chamfer.
 
-| Metric | Value |
-|---|---:|
-| Mean initial Chamfer | 0.00324172 |
-| Mean oracle-recovered Chamfer | 0.00208458 |
-| Improved validation objects | 5/5 |
-| Introduced flipped faces | 553 total |
+### 28-view current-graph H2 target/loss-space ablation
 
-The final A/B prediction, RGB-ablation and reconstruction results are pending.
-The configured outputs are:
+All three C2F2 arms use the same 28-view manifest, split IDs, seed,
+initialisation, optimizer, scheduler, batching and 20,000-step budget. Local
+query jitter is disabled and the contract audit passes. Native validation
+losses use different spaces and must not be compared across arms.
 
-```text
-runs/learned_laplacian/sofa50_synthetic_current_c2f2_14view_20k_seed7
-runs/learned_laplacian/sofa50_synthetic_current_ab_comparison_seed7
-```
+| Arm | Output target | Native loss space | Best native val | Runtime h |
+|---|---|---|---:|---:|
+| A: canonical H2 | `h^2`-normalised | Output representation | 0.018456638 | 6.0416 |
+| B: direct raw | Raw Laplacian | Output representation | 1.5825285e-6 | 6.1807 |
+| C: normalised output/raw loss | `h^2`-normalised | Raw Laplacian | 2.1655217e-6 | 6.6896 |
+
+Unified test raw-space prediction:
+
+| Arm | Raw EPE ↓ | Top-1% EPE ↓ | Top-10% EPE ↓ | Raw cosine ↑ | Weighted raw RMS ↓ |
+|---|---:|---:|---:|---:|---:|
+| A | 0.00769237 | 0.253855 | 0.0557517 | 0.933526 | 0.0427999 |
+| B | 0.00300525 | 0.0417512 | 0.0136982 | 0.998667 | 0.00611072 |
+| C | 0.00333673 | 0.0547519 | 0.0159651 | 0.997419 | 0.00815502 |
+
+Zero-replacement recovery uses a shared initial Chamfer of `0.00391323`:
+
+| Arm | Refined Chamfer ↓ | P2S ↓ | Normal consistency ↑ | Flips | Improved/25 |
+|---|---:|---:|---:|---:|---:|
+| A | 0.00456011 | 0.00462286 | 0.934976 | 10,195 | 3/25 |
+| B | 0.00380671 | 0.00380587 | 0.942406 | 6,566 | 19/25 |
+| C | 0.00383121 | 0.00385409 | 0.941080 | 7,057 | 16/25 |
+
+B is the primary result: it has the lowest unified raw-space error and refined
+Chamfer and improves 19/25 samples. C is between B and A. The small B/C native
+loss values result from raw-Laplacian units, not a directly comparable
+four-order-of-magnitude loss reduction.
+
+The three GPU shards ran as Slurm array 15686 on three L40 GPUs in parallel
+(`00:19:06`–`00:19:25` per shard); merge job 15687 completed in `00:00:15`.
+The local [report](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md),
+[JSON/CSV records](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis),
+[75 OBJ meshes](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian)
+and [25-case overview](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
+are available in the workspace.
 
 ## Other diagnostic experiments
 
@@ -236,15 +272,17 @@ directly with the canonical Sofa50 results.
 | 960 optimized one-epoch smoke | 10 | 0.305584 | Smoke only |
 | 1920 optimized workers-4 one-epoch smoke | 10 | 0.305584 | Smoke only |
 
-## HPC status snapshot
+## HPC completion record
 
-| Job | Experiment | State at snapshot | Current evidence |
+| Job | Experiment | Final state | Recorded result |
 |---:|---|---|---|
-| 15625 | C2F2 56-view, 20k | Running | Epoch 1941/2000; best val `0.0138256`. |
-| 15629 | C2F2 K2, 14-view, 20k | Running | Epoch 811/2000; best val `0.0166923`. |
-| 15630 | C2F2 K4, 14-view, 20k | Running | Epoch 786/2000; best val `0.0159757`. |
-| 15633 | Synthetic current-query B, 20k | Pending resources | Output directory uses the `20k` contract. |
-| 15634 | Frozen-A versus B evaluation | Pending dependency | Starts only after job 15633 succeeds. |
+| 15625 | C2F2 56-view, 20k | Completed | 20,000 steps; best val `0.0138104`; elapsed `13:58:22`. |
+| 15629 | C2F2 K2, 14-view, 20k | Completed | Elapsed `03:59:59`; retained in the position-encoding records. |
+| 15630 | C2F2 K4, 14-view, 20k | Completed | Elapsed `04:04:08`; retained in the position-encoding records. |
+| 15633 | Superseded current-query B run | Cancelled | Cancelled after `04:44:15`; not used by the H2 analysis. |
+| 15634 | Superseded A/B evaluation | Cancelled | Dependency job never started; not used by the H2 analysis. |
+| 15686 | H2 three-shard evaluation | Completed | Three L40 array tasks completed in about 19 minutes. |
+| 15687 | H2 report merge | Completed | Final JSON/CSV/report merge completed in 15 seconds. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model
@@ -257,13 +295,16 @@ or comparison result.
 - Increasing input resolution from 960 to 1920 does not reduce mean endpoint
   error under the unequal 50k/20k budgets.
 - Increasing canonical views from 14 to 28 reduces the completed 20k validation
-  loss; the 56-view arm is not final at this snapshot.
+  loss. The completed 56-view arm improves raw errors but not validation loss
+  relative to 28 views, while requiring 2.085x its runtime.
 - GT-sub1 has substantially higher validation loss than the GT and adaptive
   query-graph arms.
 - Existing expanded-query and OpenMVS recovery experiments do not reduce mean
   Chamfer.
-- The synthetic-current A/B comparison is the active experiment intended to
-  test whether training on the current graph reduces this formulation gap.
+- Current-graph training narrows the synthetic-current recovery gap relative to
+  the frozen GT-query baseline. In the controlled 28-view H2 ablation, direct
+  raw-Laplacian training is the best arm and lowers mean Chamfer below the
+  initial mesh while improving 19/25 test samples.
 
 ## Source hierarchy
 
@@ -271,5 +312,5 @@ or comparison result.
    numerical source of record.
 2. This document records an aggregate snapshot and does not replace per-object
    or per-variant files.
-3. Active-job rows must be replaced with final metrics after their `metrics.json`
-   or `comparison.json` files are written.
+3. HPC completion rows record scheduler state; per-run analysis files remain the
+   source for scientific metrics.

@@ -1,6 +1,6 @@
 # Sofa50 C2F2 受控消融报告
 
-状态时间：2026-08-12 10:03 BST
+状态时间：2026-08-12 21:20 BST
 
 训练设备：NVIDIA L40
 
@@ -15,7 +15,8 @@
 3. `views_28 + GT-adaptive` 组合 arm；
 4. GT-query 与 synthetic current-query 训练对比；
 5. synthetic current-query 从 20,000 steps 延长到 50,000 steps；
-6. 28-view synthetic current-query local jitter 对照。
+6. 28-view synthetic current-query local jitter 对照；
+7. 28-view current-graph `h^2` target/loss-space 三方案消融。
 
 已完成实验使用最终 `metrics.json` 或分析产物。
 
@@ -85,6 +86,19 @@ Arm B 的训练时 query position 为：
 其中 `eta` 为逐顶点 isotropic Gaussian，`std = 0.003 h`，L2 offset 截断在 `0.009 h`。Runtime jitter 只用于训练。Proxy、normalized target、raw target、`h_current`、graph、connectivity 和 target operator 保持不变。Validation 和 test 不使用 jitter。
 
 实现中的 contract checks 覆盖：两个 epoch 的 runtime jitter positions 不相同；对应 target tensors、graph tensors、`h_current` 和 proxy positions 完全相同；同一 sample/seed/epoch 的 jitter 可重复；jitter scale 上限为 `0.009 h`。对应测试位于 `tests/learned_laplacian/test_local_query_jitter.py`。Final evaluator 还检查两个 arm 的配置除 jitter enablement 和 arm label 外一致。
+
+### 3.5 Current-graph H2 target/loss-space 对照
+
+三个 arms 复用相同 C2F2 architecture、28 views、200/25/25 split IDs、seed、
+seeded initialization、optimizer、scheduler、batching 和 20,000-step budget，并
+关闭 local query jitter。共同 raw target 为 `L_current @ P_proxy`：
+
+- A 输出 `h^2` normalized Laplacian，并在 output representation 中计算 loss；
+- B 直接输出 raw Laplacian，并在 output representation 中计算 loss；
+- C 输出 `h^2` normalized Laplacian，但在反归一化后的 raw Laplacian space 中计算 loss。
+
+统一评估在 raw space 中计算 prediction metrics，并使用相同 confidence、visibility、
+recovery solver 和 Top-k raw solver-input residual 排序。Contract audit 通过。
 
 ## 4. View-count 结果
 
@@ -409,7 +423,39 @@ OpenMVS48 current-mesh recovery 使用 5 个 paired meshes：
 - 当前记录不支持在该 contract 下启用 training-only local query jitter。
 - 独立报告位于 `docs/SOFA50_LOCAL_QUERY_JITTER_ABLATION_REPORT.zh-CN.md`。
 
-## 9. 假设状态
+## 9. Current-graph H2 target/loss-space 最终结果
+
+Native validation loss 位于各 arm 自身的 loss space，不能横向比较：
+
+| Arm | Output target | Loss space | Best native val | Runtime |
+|---|---|---|---:|---:|
+| A: canonical H2 | `h^2` normalized | Output representation | 0.018456638 | 6.0416 h |
+| B: direct raw | Raw Laplacian | Output representation | 1.5825285e-6 | 6.1807 h |
+| C: normalized output/raw loss | `h^2` normalized | Raw Laplacian | 2.1655217e-6 | 6.6896 h |
+
+统一的 25-sample test raw-space 与 zero-replacement recovery 结果：
+
+| Arm | Raw EPE ↓ | Raw Top-1% ↓ | Raw Top-10% ↓ | Raw cosine ↑ | Refined Chamfer ↓ | Improved/25 |
+|---|---:|---:|---:|---:|---:|---:|
+| A | 0.00769237 | 0.253855 | 0.0557517 | 0.933526 | 0.00456011 | 3 |
+| B | 0.00300525 | 0.0417512 | 0.0136982 | 0.998667 | 0.00380671 | 19 |
+| C | 0.00333673 | 0.0547519 | 0.0159651 | 0.997419 | 0.00383121 | 16 |
+
+共享 initial Chamfer 为 `0.00391323`。B 的 unified raw error、recovery-weighted
+raw RMS 与 refined Chamfer 均最低，且 improved-over-initial count 最高；C 位于 B
+与 A 之间。A/B/C 的 introduced flipped faces 分别为 10,195、6,566 和 7,057。
+B/C 的 native loss 极小是 raw-Laplacian 数值单位导致，不能与 A 的 normalized
+loss 作数量级比较。
+
+Top-k exact-target replacement 的主要记录为：A 在 50% replacement 首次关闭至少
+90% mean Chamfer oracle gap；B/C 均需 100%。三个 arms 在 20% replacement 时均
+达到 25/25 samples 低于各自 initial Chamfer。
+
+最终评估由 Slurm array 15686 的三个 L40 shards 并行完成，每个 shard 用时
+`00:19:06`–`00:19:25`；merge job 15687 用时 `00:00:15`。Arm B 的 25 组
+`GT/COARSE/REFINED RESULT` 可视化和 75 个 OBJ 已导出到本地 analysis 目录。
+
+## 10. 假设状态
 
 | Hypothesis | Status | Recorded result |
 |---|---|---|
@@ -431,13 +477,15 @@ OpenMVS48 current-mesh recovery 使用 5 个 paired meshes：
 | Top-k replacement 关闭至少 90% mean Chamfer oracle gap | Supported at 50% replacement | 20k/50k 为 93.95%/94.94% |
 | High raw-residual vertices 对应 high recovered geometry error | Supported for recorded percentile analysis | Top 1%/bottom 50% surface-distance ratio 28.64/31.78 |
 | Local query jitter 降低最终 synthetic 与 OpenMVS recovery error | Not supported | Test raw EPE +0.000123442；OpenMVS Chamfer +0.000182345；5/5 paired meshes |
+| Direct raw-Laplacian training 优于 canonical H2 与 normalized-output/raw-loss | Supported under unified 28-view protocol | Raw EPE 0.00300525；Chamfer 0.00380671；19/25 improved |
+| B/C 极小 native loss 可与 A normalized loss 直接比较 | Not supported | Loss space 与数值单位不同；使用 unified raw-space endpoints 判定 |
 
-## 10. 尚需完成的判定
+## 11. 尚需完成的判定
 
 1. 对 GT 与 GT-adaptive prediction 做 common-surface paired evaluation：映射到相同 GT vertices 或固定表面采样点，使用同一 target、同一 curvature bins、同一 EPE/cosine 定义。
 2. 在 adaptive 的 common-surface 指标完成前，不从 graph-specific raw EPE 推导 Sofa50 主训练配置。
 
-## 11. 产物位置
+## 12. 产物位置
 
 - View/query-resolution analysis：
   `runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/`
@@ -459,3 +507,8 @@ OpenMVS48 current-mesh recovery 使用 5 个 paired meshes：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/`
 - Local-jitter 独立报告：
   `docs/SOFA50_LOCAL_QUERY_JITTER_ABLATION_REPORT.zh-CN.md`
+- H2 target/loss-space 三方案分析：
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/`
+- H2 Arm B 的 25 组 mesh 与对比图：
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian/`
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/`

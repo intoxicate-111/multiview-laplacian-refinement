@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -8,8 +9,14 @@ import torch
 
 from mlr.learned_laplacian.synthetic_current_h2_ablation import (
     ARMS,
+    GEOMETRY_FIELDS,
+    PERCENTAGES,
+    RAW_METRIC_FIELDS,
     _aggregate_small_h,
+    _infer_one,
     _raw_metrics,
+    _write_h2_shard,
+    merge_h2_normalization_ablation_shards,
 )
 
 
@@ -73,6 +80,179 @@ def test_three_arm_fixed_training_contract() -> None:
         assert config["confidence"]["recovery_weight"] == (
             "renderer_visible_any_times_confidence_prediction"
         )
+
+
+def test_inference_uses_explicit_faces_after_training_sample_pruning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vertices = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+    )
+    faces = torch.tensor([[0, 1, 2]])
+    prepared = SimpleNamespace(
+        sample={
+            "vertices": vertices,
+            "local_edge_length": torch.ones(3),
+            "valid_scale_mask": torch.ones(3, dtype=torch.bool),
+            "visibility": torch.ones((1, 3), dtype=torch.bool),
+            "target_confidence": torch.ones(3),
+        },
+        raw_target=torch.zeros_like(vertices),
+    )
+
+    monkeypatch.setattr(
+        "mlr.learned_laplacian.synthetic_current_h2_ablation._load_device_item",
+        lambda *_args, **_kwargs: prepared,
+    )
+
+    class _Model:
+        def __call__(self, _sample):
+            return SimpleNamespace(
+                predicted_laplacian=torch.zeros_like(vertices),
+                confidence_prediction=torch.ones(3),
+            )
+
+    inferred = _infer_one(
+        object(),
+        0,
+        {
+            "config": {
+                "target_mode": "raw_laplacian",
+                "target_scaling": {"epsilon": 1e-12},
+            },
+            "model": _Model(),
+            "amp_dtype": torch.float16,
+            "amp_enabled": False,
+        },
+        torch.device("cpu"),
+        current_faces=faces,
+    )
+
+    assert torch.equal(inferred["prediction_raw"], torch.zeros_like(vertices))
+    assert torch.equal(inferred["recovery_weight"], torch.ones(3))
+
+
+def test_three_shards_merge_into_complete_audit(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text('{"samples": []}\n', encoding="utf-8")
+    output = tmp_path / "analysis"
+    preflight = {"passed": True, "contract": "test"}
+    arm_metadata = {
+        arm: {
+            "run_dir": f"/runs/{arm}",
+            "checkpoint": f"/runs/{arm}/checkpoint_latest.pt",
+            "checkpoint_sha256": arm,
+            "optimizer_steps": 20_000,
+            "target_mode": "raw_laplacian",
+            "prediction_loss_space": "raw_laplacian",
+            "native_best_validation_loss": 1e-6,
+            "native_final_validation_loss": 2e-6,
+            "runtime_seconds": 1.0,
+        }
+        for arm in ARMS
+    }
+
+    for shard_index in range(3):
+        indices = [index for index in range(25) if index % 3 == shard_index]
+        prediction_rows = []
+        recovery_rows = []
+        selection_checks = []
+        formula_checks = []
+        roundtrip_checks = []
+        for split in ("validation", "test"):
+            for index in indices:
+                sample_id = f"{split}_{index:02d}"
+                formula_checks.append(
+                    {
+                        "sample_id": sample_id,
+                        "current_graph_proxy_raw_target_max_abs_error": 0.0,
+                    }
+                )
+                for arm in ARMS:
+                    prediction_rows.append(
+                        {
+                            "split": split,
+                            "arm": arm,
+                            "sample_id": sample_id,
+                            **{field: 1.0 for field in RAW_METRIC_FIELDS},
+                            "mean_confidence": 1.0,
+                            "visible_vertex_fraction": 1.0,
+                        }
+                    )
+                    roundtrip_checks.append(
+                        {
+                            "split": split,
+                            "arm": arm,
+                            "sample_id": sample_id,
+                            "max_abs_output_to_raw_roundtrip_error": 0.0,
+                        }
+                    )
+                    if split != "test":
+                        continue
+                    selection_checks.append(
+                        {"sample_id": sample_id, "checkpoint": arm, "passed": True}
+                    )
+                    for percentage in PERCENTAGES:
+                        recovery_rows.append(
+                            {
+                                "arm": arm,
+                                "replacement_percent": percentage,
+                                "sample_id": sample_id,
+                                "object_id": f"object_{index // 5}",
+                                "actual_replacement_percent": float(percentage),
+                                "raw_residual_energy_replaced_fraction": percentage / 100,
+                                **{field: 1.0 for field in GEOMETRY_FIELDS},
+                                "introduced_flipped_faces": 0,
+                                "new_degenerate_faces": 0,
+                                "improved_over_initial": False,
+                            }
+                        )
+
+        shard_csv = output / "shards" / f"small_h_per_vertex_shard_{shard_index}.csv"
+        shard_csv.parent.mkdir(parents=True, exist_ok=True)
+        shard_csv.write_text("sample_id,value\nshard,1\n", encoding="utf-8")
+        small_h_arrays = {
+            split: {
+                "h_current": [np.arange(1, len(indices) + 1, dtype=np.float64)],
+                "normalized_residual": [np.ones(len(indices))],
+                "raw_residual": [np.ones(len(indices))],
+                "weighted_normalized_loss": [np.ones(len(indices))],
+                "weighted_raw_residual": [np.ones(len(indices))],
+                "recovered_distance": [np.ones(len(indices))],
+                "valid": [np.ones(len(indices), dtype=bool)],
+            }
+            for split in ("validation", "test")
+        }
+        _write_h2_shard(
+            output,
+            shard_index=shard_index,
+            shard_count=3,
+            manifest=manifest,
+            preflight=preflight,
+            arm_metadata=arm_metadata,
+            prediction_rows=prediction_rows,
+            recovery_rows=recovery_rows,
+            selection_checks=selection_checks,
+            target_formula_checks=formula_checks,
+            roundtrip_checks=roundtrip_checks,
+            small_h_arrays=small_h_arrays,
+            small_h_path=shard_csv,
+        )
+
+    summary = merge_h2_normalization_ablation_shards(
+        manifest, output, shard_count=3
+    )
+
+    assert summary["contract_audit"]["passed"] is True
+    assert summary["contract_audit"]["counts"] == {
+        "prediction_rows": 150,
+        "recovery_rows": 450,
+        "formula_checks": 50,
+        "roundtrip_checks": 150,
+        "selection_checks": 75,
+    }
+    assert (output / "REPORT.md").is_file()
+    assert len((output / "small_h_per_vertex.csv").read_text().splitlines()) == 4
 
 
 def test_raw_metrics_use_residual_magnitude_for_tail_percentiles() -> None:

@@ -12,9 +12,11 @@ Experiment metrics and run status: [Experiment data summary](docs/EXPERIMENT_DAT
 
 View-count and query-resolution results: [Ablation report](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
+28-view current-graph target/loss-space results: [H2 ablation report](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25-case visual overview](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
+
 ## Project status
 
-Status date: 2026-08-11.
+Status date: 2026-08-12.
 
 | Component | State | Conclusion |
 |---|---|---|
@@ -28,7 +30,8 @@ Status date: 2026-08-11.
 | Oracle residual expert | Closed | The 2,000-step diagnostic does not support this branch. |
 | 14/28/56-view ablation | Complete | Best validation losses are 0.0139316, 0.0130296 and 0.0138104 for 14, 28 and 56 views. |
 | Query-graph resolution ablation | Complete | Best validation losses are 0.0139316 for the GT alias, 0.0614830 for GT-sub1 and 0.0145840 for GT-adaptive. GT-sub2 was excluded from training. |
-| 28-view + GT-adaptive combination | Training | The arm uses C2F2, seed 7, full-vertex training and a 20,000-step budget. |
+| 28-view + GT-adaptive combination | Complete | Best validation loss is 0.0131095; raw EPE is 0.002879 on five matched validation meshes. |
+| 28-view current-graph H2 ablation | Complete | Direct raw-Laplacian training is best in the unified test/recovery evaluation: raw EPE 0.00300525, refined Chamfer 0.00380671 and 19/25 improved samples. |
 | Automated tests | Passing | `219 passed, 3 skipped` in the `test` Conda environment. |
 
 The implemented model learns the supervised differential field on GT-query
@@ -482,6 +485,31 @@ meshes are absent.
 Increasing recovery from 200 to 1,000 iterations does not change the aggregate
 conclusion.
 
+### 28-view current-graph target and loss-space ablation
+
+Three C2F2 arms use the same 28-view synthetic-current manifest, seed,
+initialisation and 20,000-step budget. Local query jitter is disabled. Native
+validation losses are reported in each arm's own loss space and are therefore
+not comparable across rows.
+
+| Arm | Output target | Native loss space | Best native val | Test raw EPE ↓ | Test raw cosine ↑ | Refined Chamfer ↓ | Improved |
+|---|---|---|---:|---:|---:|---:|---:|
+| A | `h^2`-normalised | Normalised output | 0.0184566 | 0.00769237 | 0.933526 | 0.00456011 | 3/25 |
+| B | Raw Laplacian | Raw output | 1.58253e-6 | 0.00300525 | 0.998667 | 0.00380671 | 19/25 |
+| C | `h^2`-normalised | Raw Laplacian | 2.16552e-6 | 0.00333673 | 0.997419 | 0.00383121 | 16/25 |
+
+The shared initial Chamfer is `0.00391323`. Arm B is the primary result: it has
+the lowest unified raw-space errors and recovery Chamfer, and improves 19 of 25
+test samples. The very small B/C native losses reflect raw-Laplacian units;
+they do not imply a four-order-of-magnitude advantage over A's normalised loss.
+The contract audit passed, and the final evaluation ran as three L40 shards
+(Slurm array 15686) followed by merge job 15687.
+
+The local result bundle includes the [full report](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md),
+[source JSON/CSV tables](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis),
+[75 comparison OBJ files](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian)
+and [25 fixed-camera GT/COARSE/REFINED images](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian).
+
 ## Installation and verification
 
 ```bash
@@ -518,6 +546,9 @@ sbatch scripts/HPC/test_sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_reco
 # 14/28/56-view and query-resolution ablations, 20,000 steps per arm
 sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm view 14
 sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
+
+# Three-L40 sharded H2 evaluation and dependent merge
+bash scripts/HPC/submit_sofa50_synthetic_current_28view_h2_ablation_3gpu.sh
 ```
 
 ### Distributed multi-GPU training
@@ -620,6 +651,7 @@ runs/learned_laplacian/sofa50_cf_c2f2_comparison_full
 runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
 runs/learned_laplacian/sofa50_c2f2_view_query_combo_28_gt_adaptive_20k_seed7_v1
 runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
+runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
 ```

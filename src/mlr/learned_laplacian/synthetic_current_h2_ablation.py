@@ -82,6 +82,8 @@ def run_h2_normalization_ablation(
     output_dir: str | Path,
     *,
     device: str = "cuda",
+    shard_index: int | None = None,
+    shard_count: int = 1,
 ) -> dict[str, Any]:
     manifest = Path(manifest_path).resolve()
     output = Path(output_dir).resolve()
@@ -91,6 +93,14 @@ def run_h2_normalization_ablation(
         raise ValueError("The controlled ablation evaluator requires a CUDA device.")
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA evaluation requested but torch.cuda.is_available() is false.")
+    if shard_count < 1:
+        raise ValueError("shard_count must be positive.")
+    if shard_count == 1:
+        if shard_index not in (None, 0):
+            raise ValueError("A single-shard evaluation requires shard_index 0 or None.")
+        shard_index = 0
+    elif shard_index is None or not 0 <= shard_index < shard_count:
+        raise ValueError("A multi-shard evaluation requires 0 <= shard_index < shard_count.")
 
     datasets = {
         split: PreparedMeshDataset.from_manifest(manifest, split)
@@ -112,7 +122,12 @@ def run_h2_normalization_ablation(
     )
     preflight = _preflight_audit(manifest, datasets, specs)
     if not preflight["passed"]:
-        _write_json(output / "contract_audit.json", preflight)
+        failure_path = (
+            output / "contract_audit.json"
+            if shard_count == 1
+            else output / "shards" / f"contract_audit_shard_{shard_index}.json"
+        )
+        _write_json(failure_path, preflight)
         raise RuntimeError("H2 ablation preflight contract audit failed.")
 
     prediction_rows: list[dict[str, Any]] = []
@@ -123,7 +138,12 @@ def run_h2_normalization_ablation(
     small_h_arrays: dict[str, dict[str, list[np.ndarray]]] = {
         split: defaultdict(list) for split in ("validation", "test")
     }
-    small_h_path = output / "small_h_per_vertex.csv"
+    small_h_path = (
+        output / "small_h_per_vertex.csv"
+        if shard_count == 1
+        else output / "shards" / f"small_h_per_vertex_shard_{shard_index}.csv"
+    )
+    small_h_path.parent.mkdir(parents=True, exist_ok=True)
     small_h_fields = (
         "split",
         "sample_id",
@@ -149,6 +169,8 @@ def run_h2_normalization_ablation(
         for split in ("validation", "test"):
             dataset = datasets[split]
             for index in range(len(dataset)):
+                if index % shard_count != shard_index:
+                    continue
                 static = dataset.load_static(index)
                 sample_id = str(static["sample_id"])
                 metadata = dict(static.get("metadata", {}))
@@ -157,7 +179,13 @@ def run_h2_normalization_ablation(
                 formula["split"] = split
                 target_formula_checks.append(formula)
                 inferred = {
-                    arm: _infer_one(dataset, index, spec, resolved_device)
+                    arm: _infer_one(
+                        dataset,
+                        index,
+                        spec,
+                        resolved_device,
+                        current_faces=static["faces"],
+                    )
                     for arm, spec in specs.items()
                 }
                 for arm, values in inferred.items():
@@ -314,6 +342,120 @@ def run_h2_normalization_ablation(
                 del inferred
                 torch.cuda.empty_cache()
 
+    arm_metadata = _arm_summary(specs)
+    if shard_count > 1:
+        return _write_h2_shard(
+            output,
+            shard_index=shard_index,
+            shard_count=shard_count,
+            manifest=manifest,
+            preflight=preflight,
+            arm_metadata=arm_metadata,
+            prediction_rows=prediction_rows,
+            recovery_rows=recovery_rows,
+            selection_checks=selection_checks,
+            target_formula_checks=target_formula_checks,
+            roundtrip_checks=roundtrip_checks,
+            small_h_arrays=small_h_arrays,
+            small_h_path=small_h_path,
+        )
+
+    return _finalize_h2_results(
+        manifest,
+        output,
+        device=str(resolved_device),
+        arm_metadata=arm_metadata,
+        preflight=preflight,
+        prediction_rows=prediction_rows,
+        recovery_rows=recovery_rows,
+        selection_checks=selection_checks,
+        target_formula_checks=target_formula_checks,
+        roundtrip_checks=roundtrip_checks,
+        small_h_arrays=small_h_arrays,
+        small_h_path=small_h_path,
+    )
+
+
+def merge_h2_normalization_ablation_shards(
+    manifest_path: str | Path,
+    output_dir: str | Path,
+    *,
+    shard_count: int,
+) -> dict[str, Any]:
+    if shard_count < 2:
+        raise ValueError("Merging requires at least two shards.")
+    manifest = Path(manifest_path).resolve()
+    output = Path(output_dir).resolve()
+    shard_dir = output / "shards"
+    payloads = [
+        _read_json(shard_dir / f"shard_{index}.json")
+        for index in range(shard_count)
+    ]
+    for index, payload in enumerate(payloads):
+        if int(payload.get("shard_index", -1)) != index:
+            raise RuntimeError(f"Invalid shard index in shard_{index}.json.")
+        if int(payload.get("shard_count", -1)) != shard_count:
+            raise RuntimeError(f"Invalid shard count in shard_{index}.json.")
+        if str(payload.get("manifest_sha256")) != _sha256(manifest):
+            raise RuntimeError(f"Manifest mismatch in shard_{index}.json.")
+
+    preflight = payloads[0]["preflight"]
+    arm_metadata = payloads[0]["arm_metadata"]
+    if any(payload["preflight"] != preflight for payload in payloads[1:]):
+        raise RuntimeError("Shard preflight audits do not match.")
+    if any(payload["arm_metadata"] != arm_metadata for payload in payloads[1:]):
+        raise RuntimeError("Shard arm metadata do not match.")
+
+    prediction_rows = _concat_payload_lists(payloads, "prediction_rows")
+    recovery_rows = _concat_payload_lists(payloads, "recovery_rows")
+    selection_checks = _concat_payload_lists(payloads, "selection_checks")
+    target_formula_checks = _concat_payload_lists(payloads, "target_formula_checks")
+    roundtrip_checks = _concat_payload_lists(payloads, "roundtrip_checks")
+    small_h_arrays: dict[str, dict[str, list[np.ndarray]]] = {
+        split: defaultdict(list) for split in ("validation", "test")
+    }
+    for index in range(shard_count):
+        with np.load(shard_dir / f"small_h_arrays_shard_{index}.npz") as archive:
+            for name in archive.files:
+                split, field = name.split("__", maxsplit=1)
+                small_h_arrays[split][field].append(archive[name])
+
+    small_h_path = output / "small_h_per_vertex.csv"
+    _merge_csv_shards(
+        [shard_dir / f"small_h_per_vertex_shard_{index}.csv" for index in range(shard_count)],
+        small_h_path,
+    )
+    return _finalize_h2_results(
+        manifest,
+        output,
+        device=f"cuda ({shard_count} shards)",
+        arm_metadata=arm_metadata,
+        preflight=preflight,
+        prediction_rows=prediction_rows,
+        recovery_rows=recovery_rows,
+        selection_checks=selection_checks,
+        target_formula_checks=target_formula_checks,
+        roundtrip_checks=roundtrip_checks,
+        small_h_arrays=small_h_arrays,
+        small_h_path=small_h_path,
+    )
+
+
+def _finalize_h2_results(
+    manifest: Path,
+    output: Path,
+    *,
+    device: str,
+    arm_metadata: Mapping[str, Mapping[str, Any]],
+    preflight: Mapping[str, Any],
+    prediction_rows: Sequence[Mapping[str, Any]],
+    recovery_rows: Sequence[Mapping[str, Any]],
+    selection_checks: Sequence[Mapping[str, Any]],
+    target_formula_checks: Sequence[Mapping[str, Any]],
+    roundtrip_checks: Sequence[Mapping[str, Any]],
+    small_h_arrays: Mapping[str, Mapping[str, list[np.ndarray]]],
+    small_h_path: Path,
+) -> dict[str, Any]:
     prediction_aggregate = _aggregate_prediction(prediction_rows)
     recovery_aggregate = _aggregate_recovery(recovery_rows)
     recovery_per_object = _aggregate_recovery_by_object(recovery_rows)
@@ -335,25 +477,8 @@ def run_h2_normalization_ablation(
         "experiment": "C2F2 28-View Current-Graph Normalization Three-Arm Ablation",
         "manifest": str(manifest),
         "manifest_sha256": _sha256(manifest),
-        "device": str(resolved_device),
-        "arms": {
-            arm: {
-                "run_dir": str(spec["run_dir"]),
-                "checkpoint": str(spec["checkpoint"]),
-                "checkpoint_sha256": spec["checkpoint_sha256"],
-                "optimizer_steps": spec["optimizer_steps"],
-                "target_mode": spec["target_mode"],
-                "prediction_loss_space": spec["prediction_loss_space"],
-                "native_best_validation_loss": spec["native_metrics"].get(
-                    "best_selection_loss"
-                ),
-                "native_final_validation_loss": spec["native_metrics"].get(
-                    "final_validation_loss"
-                ),
-                "runtime_seconds": spec["native_metrics"].get("runtime_seconds"),
-            }
-            for arm, spec in specs.items()
-        },
+        "device": device,
+        "arms": dict(arm_metadata),
         "contract": {
             "model": "C2F2",
             "views": 28,
@@ -390,6 +515,91 @@ def run_h2_normalization_ablation(
     _write_csv(output / "small_h_group_summary.csv", small_h_summary)
     (output / "REPORT.md").write_text(_report(summary), encoding="utf-8")
     return summary
+
+
+def _arm_summary(specs: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {
+        arm: {
+            "run_dir": str(spec["run_dir"]),
+            "checkpoint": str(spec["checkpoint"]),
+            "checkpoint_sha256": spec["checkpoint_sha256"],
+            "optimizer_steps": spec["optimizer_steps"],
+            "target_mode": spec["target_mode"],
+            "prediction_loss_space": spec["prediction_loss_space"],
+            "native_best_validation_loss": spec["native_metrics"].get(
+                "best_selection_loss"
+            ),
+            "native_final_validation_loss": spec["native_metrics"].get(
+                "final_validation_loss"
+            ),
+            "runtime_seconds": spec["native_metrics"].get("runtime_seconds"),
+        }
+        for arm, spec in specs.items()
+    }
+
+
+def _write_h2_shard(
+    output: Path,
+    *,
+    shard_index: int,
+    shard_count: int,
+    manifest: Path,
+    preflight: Mapping[str, Any],
+    arm_metadata: Mapping[str, Mapping[str, Any]],
+    prediction_rows: Sequence[Mapping[str, Any]],
+    recovery_rows: Sequence[Mapping[str, Any]],
+    selection_checks: Sequence[Mapping[str, Any]],
+    target_formula_checks: Sequence[Mapping[str, Any]],
+    roundtrip_checks: Sequence[Mapping[str, Any]],
+    small_h_arrays: Mapping[str, Mapping[str, list[np.ndarray]]],
+    small_h_path: Path,
+) -> dict[str, Any]:
+    shard_dir = output / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    arrays = {
+        f"{split}__{field}": np.concatenate(chunks)
+        for split, fields in small_h_arrays.items()
+        for field, chunks in fields.items()
+        if chunks
+    }
+    np.savez_compressed(shard_dir / f"small_h_arrays_shard_{shard_index}.npz", **arrays)
+    payload = {
+        "shard_index": shard_index,
+        "shard_count": shard_count,
+        "manifest": str(manifest),
+        "manifest_sha256": _sha256(manifest),
+        "preflight": dict(preflight),
+        "arm_metadata": dict(arm_metadata),
+        "prediction_rows": list(prediction_rows),
+        "recovery_rows": list(recovery_rows),
+        "selection_checks": list(selection_checks),
+        "target_formula_checks": list(target_formula_checks),
+        "roundtrip_checks": list(roundtrip_checks),
+        "small_h_per_vertex": str(small_h_path),
+    }
+    _write_json(shard_dir / f"shard_{shard_index}.json", payload)
+    return payload
+
+
+def _concat_payload_lists(
+    payloads: Sequence[Mapping[str, Any]], key: str
+) -> list[dict[str, Any]]:
+    return [dict(row) for payload in payloads for row in payload[key]]
+
+
+def _merge_csv_shards(paths: Sequence[Path], output: Path) -> None:
+    header: str | None = None
+    with output.open("w", encoding="utf-8", newline="") as target:
+        for path in paths:
+            with path.open("r", encoding="utf-8", newline="") as source:
+                current_header = source.readline()
+                if header is None:
+                    header = current_header
+                    target.write(current_header)
+                elif current_header != header:
+                    raise RuntimeError(f"CSV shard header mismatch: {path}")
+                for line in source:
+                    target.write(line)
 
 
 def _load_arm_specs(
@@ -442,6 +652,8 @@ def _infer_one(
     index: int,
     spec: Mapping[str, Any],
     device: torch.device,
+    *,
+    current_faces: torch.Tensor | np.ndarray,
 ) -> dict[str, torch.Tensor | float]:
     config = spec["config"]
     prepared = _load_device_item(dataset, index, config, device)
@@ -481,7 +693,7 @@ def _infer_one(
     visibility = prepared.sample["visibility"].detach().cpu()
     canonical = canonical_current_graph_recovery_inputs(
         prepared.sample["vertices"].detach().cpu(),
-        prepared.sample["faces"].detach().cpu(),
+        current_faces,
         prediction_normalized,
         visibility,
         confidence,

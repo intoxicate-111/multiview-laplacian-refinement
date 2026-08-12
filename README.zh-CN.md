@@ -12,9 +12,11 @@
 
 View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
+28-view current-graph target/loss-space 结果：[H2 消融报告](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25 组可视化总览](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
+
 ## 项目状态
 
-状态日期：2026-08-11。
+状态日期：2026-08-12。
 
 | 组件 | 状态 | 结论 |
 |---|---|---|
@@ -28,7 +30,8 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 | Oracle residual expert | 已关闭 | 2,000-step diagnostic 不支持该分支。 |
 | 14/28/56-view 消融 | 已完成 | 14、28、56 views 的 best validation loss 分别为 0.0139316、0.0130296、0.0138104。 |
 | Query-graph resolution 消融 | 已完成 | GT alias、GT-sub1、GT-adaptive 的 best validation loss 分别为 0.0139316、0.0614830、0.0145840；GT-sub2 未训练。 |
-| 28-view + GT-adaptive 组合 | 训练中 | 该 arm 使用 C2F2、seed 7、full-vertex training 和 20,000-step budget。 |
+| 28-view + GT-adaptive 组合 | 已完成 | Best validation loss 为 0.0131095；五个 matched validation meshes 上的 raw EPE 为 0.002879。 |
+| 28-view current-graph H2 消融 | 已完成 | 统一 test/recovery 评估中 direct raw-Laplacian training 最优：raw EPE 0.00300525、refined Chamfer 0.00380671，改善 19/25 samples。 |
 | 自动化测试 | 通过 | `test` Conda 环境中为 `219 passed, 3 skipped`。 |
 
 当前模型能够在 GT-query graph 上学习监督微分场，并使用 RGB 信息。从 GT-query
@@ -459,6 +462,29 @@ Sofa50 RGB views、三个 960 C2F2 checkpoints、480 分辨率 OpenGL visibility
 
 Recovery 从 200 增加到 1,000 iterations 未改变聚合结论。
 
+### 28-view current-graph target 与 loss-space 消融
+
+三个 C2F2 arms 使用相同的 28-view synthetic-current manifest、seed、初始化和
+20,000-step budget，并关闭 local query jitter。Native validation loss 位于各自
+arm 的 loss space，因此不能跨行直接比较。
+
+| Arm | Output target | Native loss space | Best native val | Test raw EPE ↓ | Test raw cosine ↑ | Refined Chamfer ↓ | 改善数 |
+|---|---|---|---:|---:|---:|---:|---:|
+| A | `h^2` normalized | Normalized output | 0.0184566 | 0.00769237 | 0.933526 | 0.00456011 | 3/25 |
+| B | Raw Laplacian | Raw output | 1.58253e-6 | 0.00300525 | 0.998667 | 0.00380671 | 19/25 |
+| C | `h^2` normalized | Raw Laplacian | 2.16552e-6 | 0.00333673 | 0.997419 | 0.00383121 | 16/25 |
+
+三组共享的 initial Chamfer 为 `0.00391323`。Arm B 是当前主要结果：统一
+raw-space error 和 recovery Chamfer 最低，并改善 25 个 test samples 中的 19 个。
+B/C 极小的 native loss 来源于 raw-Laplacian 数值单位，不表示其相对 A 的
+normalized loss 存在四个数量级优势。Contract audit 已通过；最终评估由三个 L40
+shards（Slurm array 15686）并行完成，随后由 job 15687 合并。
+
+本地产物包括[完整报告](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md)、
+[原始 JSON/CSV 表](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis)、
+[75 个对比 OBJ](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian)
+和[25 张固定相机 GT/COARSE/REFINED 对比图](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian)。
+
 ## 安装与验证
 
 ```bash
@@ -494,6 +520,9 @@ sbatch scripts/HPC/test_sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_reco
 # 14/28/56-view 与 query-resolution 消融，每组 20,000 steps
 sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm view 14
 sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
+
+# 三张 L40 分片执行 H2 评估，并提交依赖合并作业
+bash scripts/HPC/submit_sofa50_synthetic_current_28view_h2_ablation_3gpu.sh
 ```
 
 ### 分布式多 GPU 训练
@@ -589,6 +618,7 @@ runs/learned_laplacian/sofa50_cf_c2f2_comparison_full
 runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
 runs/learned_laplacian/sofa50_c2f2_view_query_combo_28_gt_adaptive_20k_seed7_v1
 runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
+runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
 ```
