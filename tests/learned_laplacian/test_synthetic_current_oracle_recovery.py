@@ -22,7 +22,7 @@ def test_distribution_and_weighted_rms_are_vertexwise():
 def test_formula_audit_requires_all_three_exact_target_checks():
     row = {
         "raw_round_trip_max_abs_error": 0.0,
-        "current_graph_raw_target_max_abs_error": 1e-6,
+        "current_graph_proxy_raw_target_max_abs_error": 1e-6,
         "normalized_formula_max_abs_error": 2e-6,
     }
     assert _formula_audit([row])["passed"] is True

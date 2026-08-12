@@ -12,7 +12,10 @@ import numpy as np
 import torch
 
 from .canonical_experiment import _exact_query_sample, _load_device_item
-from .canonical_pipeline import canonical_current_graph_recovery_inputs
+from .canonical_pipeline import (
+    canonical_current_graph_recovery_inputs,
+    current_uniform_laplacian_raw,
+)
 from .diagnostics import _amp_settings, _loss_kwargs
 from .losses import laplacian_prediction_metrics, weighted_robust_laplacian_loss
 from .multi_dataset import PreparedMeshDataset, validate_disjoint_splits
@@ -120,6 +123,12 @@ def run_oracle_recovery_comparison(
         static = dataset.load_static(index)
         sample_id = str(static["sample_id"])
         metadata = dict(static.get("metadata", {}))
+        if metadata.get("proxy_definition") != (
+            "P_proxy=source_gt_vertices_with_exact_same_topology"
+        ):
+            raise RuntimeError(f"Unexpected P_proxy contract for {sample_id}.")
+        if metadata.get("target_constructor") != "delta_target=L_current@P_proxy":
+            raise RuntimeError(f"Unexpected target constructor for {sample_id}.")
         prepared = _load_device_item(dataset, index, config, resolved_device)
         conditioned = _exact_query_sample(prepared.sample, resolved_device)
         with torch.no_grad(), torch.autocast(
@@ -146,10 +155,14 @@ def run_oracle_recovery_comparison(
         raw_round_trip_error = float(
             torch.max(torch.abs(oracle_inputs.delta_pred_raw.cpu() - raw_saved)).item()
         )
-        current_graph_raw_error = float(
-            torch.max(torch.abs(oracle_inputs.delta_current_raw.cpu() - raw_saved)).item()
+        proxy_raw = torch.as_tensor(
+            current_uniform_laplacian_raw(static["gt_vertices"], static["faces"]),
+            dtype=raw_saved.dtype,
+        ).cpu()
+        current_graph_proxy_raw_error = float(
+            torch.max(torch.abs(proxy_raw - raw_saved)).item()
         )
-        formula_target = oracle_inputs.delta_current_raw.cpu() / (
+        formula_target = proxy_raw / (
             oracle_inputs.h_current.cpu().square() + epsilon
         ).unsqueeze(-1)
         normalized_formula_error = float(
@@ -159,7 +172,9 @@ def run_oracle_recovery_comparison(
             {
                 "sample_id": sample_id,
                 "raw_round_trip_max_abs_error": raw_round_trip_error,
-                "current_graph_raw_target_max_abs_error": current_graph_raw_error,
+                "current_graph_proxy_raw_target_max_abs_error": (
+                    current_graph_proxy_raw_error
+                ),
                 "normalized_formula_max_abs_error": normalized_formula_error,
             }
         )
@@ -380,7 +395,7 @@ def _formula_audit(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         key: max(float(row[key]) for row in rows)
         for key in (
             "raw_round_trip_max_abs_error",
-            "current_graph_raw_target_max_abs_error",
+            "current_graph_proxy_raw_target_max_abs_error",
             "normalized_formula_max_abs_error",
         )
     }
