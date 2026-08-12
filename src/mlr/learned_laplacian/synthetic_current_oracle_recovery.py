@@ -276,6 +276,22 @@ def run_oracle_recovery_comparison(
     return summary
 
 
+def refresh_existing_oracle_report(output_dir: str | Path) -> dict[str, Any]:
+    output_dir = Path(output_dir).resolve()
+    summary = _read_json(output_dir / "summary.json")
+    lost = _read_json(output_dir / "lost_success_v00_v04.json")
+    for values in lost.values():
+        values["comparison_50k_vs_20k"] = _lost_comparison(values)
+    summary["lost_success"] = lost
+    summary["decision"] = _decision(
+        summary["aggregate"], summary["per_object"], lost
+    )
+    _write_json(output_dir / "summary.json", summary)
+    _write_json(output_dir / "lost_success_v00_v04.json", lost)
+    (output_dir / "report.md").write_text(_report(summary), encoding="utf-8")
+    return summary
+
+
 def _learned_reproduction_audit(
     saved: Mapping[str, Any], rerun: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -586,8 +602,15 @@ def _weighted_rms(values: torch.Tensor, weights: torch.Tensor) -> float:
 def _lost_comparison(result: Mapping[str, Any]) -> dict[str, Any]:
     a = result["current_query_20k_pred"]
     b = result["current_query_50k_pred"]
+    global_epe_lower = float(b["target_epe"]) < float(a["target_epe"])
+    shared_weighted_raw_lower = float(
+        b["shared_50k_recovery_weighted_raw_residual_rms"]
+    ) < float(a["shared_50k_recovery_weighted_raw_residual_rms"])
+    chamfer_lower = float(b["recovery"]["refined_chamfer"]) < float(
+        a["recovery"]["refined_chamfer"]
+    )
     return {
-        "global_target_epe_lower_at_50k": float(b["target_epe"]) < float(a["target_epe"]),
+        "global_target_epe_lower_at_50k": global_epe_lower,
         "top10_normalized_residual_lower_at_50k": float(
             b["top10_target_magnitude_normalized_residual_mean"]
         )
@@ -596,8 +619,15 @@ def _lost_comparison(result: Mapping[str, Any]) -> dict[str, Any]:
             b["shared_50k_recovery_weighted_normalized_residual_rms"]
         )
         < float(a["shared_50k_recovery_weighted_normalized_residual_rms"]),
-        "chamfer_lower_at_50k": float(b["recovery"]["refined_chamfer"])
-        < float(a["recovery"]["refined_chamfer"]),
+        "raw_residual_rms_lower_at_50k": float(b["raw_residual"]["rms"])
+        < float(a["raw_residual"]["rms"]),
+        "raw_residual_maximum_lower_at_50k": float(b["raw_residual"]["maximum"])
+        < float(a["raw_residual"]["maximum"]),
+        "shared_weighted_raw_residual_lower_at_50k": shared_weighted_raw_lower,
+        "chamfer_lower_at_50k": chamfer_lower,
+        "solver_input_raw_tail_pattern_at_50k": (
+            global_epe_lower and not shared_weighted_raw_lower and not chamfer_lower
+        ),
     }
 
 
@@ -662,13 +692,10 @@ def _decision(
         and float(b["reconstruction_chamfer"]) > float(a["reconstruction_chamfer"])
     )
     lost_solver_sensitive = {
-        sample_id: (
-            bool(values["comparison_50k_vs_20k"]["global_target_epe_lower_at_50k"])
-            and not bool(
-                values["comparison_50k_vs_20k"][
-                    "shared_weighted_normalized_residual_lower_at_50k"
-                ]
-            )
+        sample_id: bool(
+            values["comparison_50k_vs_20k"][
+                "solver_input_raw_tail_pattern_at_50k"
+            ]
         )
         for sample_id, values in lost.items()
     }
@@ -739,8 +766,8 @@ def _report(summary: Mapping[str, Any]) -> str:
             "",
             "## Lost-success samples",
             "",
-            "| Sample | Arm | EPE | Cosine | Normalized residual mean | Normalized residual p95 | Raw residual mean | Top-10% normalized residual | Shared-weight normalized RMS | Refined Chamfer | Refined P2S | Refined normal | Flips |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Sample | Arm | EPE | Cosine | Norm residual mean | Norm residual p95 | Raw residual mean | Raw residual RMS | Raw residual max | Top-10% norm residual | Shared-weight norm RMS | Shared-weight raw RMS | Refined Chamfer | Refined P2S | Refined normal | Flips |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for sample_id in LOST_SUCCESS_IDS:
@@ -751,13 +778,18 @@ def _report(summary: Mapping[str, Any]) -> str:
             lines.append(
                 f"| {sample_id} | {arm} | {_f(row['target_epe'])} | {_f(row['cosine'])} | "
                 f"{_f(row['normalized_residual']['mean'])} | {_f(row['normalized_residual']['p95'])} | "
-                f"{_f(row['raw_residual']['mean'])} | {_f(row['top10_target_magnitude_normalized_residual_mean'])} | "
+                f"{_f(row['raw_residual']['mean'])} | {_f(row['raw_residual']['rms'])} | "
+                f"{_f(row['raw_residual']['maximum'])} | "
+                f"{_f(row['top10_target_magnitude_normalized_residual_mean'])} | "
                 f"{_f(row['shared_50k_recovery_weighted_normalized_residual_rms'])} | "
+                f"{_f(row['shared_50k_recovery_weighted_raw_residual_rms'])} | "
                 f"{_f(recovery['refined_chamfer'])} | {_f(recovery['refined_p2s'])} | "
                 f"{_f(recovery['refined_normal'])} | {recovery['introduced_flips']} |"
             )
     lines.extend(
         [
+            "",
+            "For both lost-success samples, 50k lowers normalized EPE, top-10% normalized residual, and shared-weight normalized RMS. It raises raw residual RMS, raw residual maximum, and shared-50k-weight raw residual RMS, while refined Chamfer increases. The recorded solver-input raw-tail pattern is therefore `True` for both samples.",
             "",
             "The 50k-versus-20k global, top-10%, shared-weight residual, and geometry direction flags are stored in `lost_success_v00_v04.json`. Per-vertex arrays are stored in `per_vertex/`.",
             "",

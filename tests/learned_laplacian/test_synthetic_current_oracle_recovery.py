@@ -60,14 +60,18 @@ def test_lost_comparison_separates_global_and_shared_weighted_error():
     payload = {
         "current_query_20k_pred": {
             "target_epe": 2.0,
+            "raw_residual": {"rms": 2.0, "maximum": 4.0},
             "top10_target_magnitude_normalized_residual_mean": 3.0,
             "shared_50k_recovery_weighted_normalized_residual_rms": 2.0,
+            "shared_50k_recovery_weighted_raw_residual_rms": 2.0,
             "recovery": {"refined_chamfer": 0.003},
         },
         "current_query_50k_pred": {
             "target_epe": 1.0,
+            "raw_residual": {"rms": 3.0, "maximum": 5.0},
             "top10_target_magnitude_normalized_residual_mean": 4.0,
             "shared_50k_recovery_weighted_normalized_residual_rms": 3.0,
+            "shared_50k_recovery_weighted_raw_residual_rms": 3.0,
             "recovery": {"refined_chamfer": 0.004},
         },
     }
@@ -75,7 +79,11 @@ def test_lost_comparison_separates_global_and_shared_weighted_error():
     assert result["global_target_epe_lower_at_50k"] is True
     assert result["top10_normalized_residual_lower_at_50k"] is False
     assert result["shared_weighted_normalized_residual_lower_at_50k"] is False
+    assert result["raw_residual_rms_lower_at_50k"] is False
+    assert result["raw_residual_maximum_lower_at_50k"] is False
+    assert result["shared_weighted_raw_residual_lower_at_50k"] is False
     assert result["chamfer_lower_at_50k"] is False
+    assert result["solver_input_raw_tail_pattern_at_50k"] is True
 
 
 def test_decision_uses_required_oracle_logic():
@@ -105,7 +113,7 @@ def test_decision_uses_required_oracle_logic():
         "sample": {
             "comparison_50k_vs_20k": {
                 "global_target_epe_lower_at_50k": True,
-                "shared_weighted_normalized_residual_lower_at_50k": False,
+                "solver_input_raw_tail_pattern_at_50k": True,
             }
         }
     }
