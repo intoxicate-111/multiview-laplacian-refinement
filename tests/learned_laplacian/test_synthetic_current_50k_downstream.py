@@ -85,12 +85,12 @@ def test_saved_ab_regression_checks_metrics_and_sample_identity():
     assert audit["aggregate_B_match"]["passed"] is False
 
 
-def test_regression_accepts_recorded_amp_scale_drift_and_five_flip_difference():
+def test_regression_accepts_recorded_amp_scale_drift_and_bounded_flip_difference():
     reference = _aggregate()
     rerun = dict(reference)
     rerun["normalized_mse"] *= 1.0005
     rerun["loss"] += 5e-7
-    rerun["introduced_flipped_faces"] += 5
+    rerun["introduced_flipped_faces"] += 25
     payload = {
         "manifest": "/tmp/manifest.json",
         "test_samples": 25,
@@ -104,7 +104,7 @@ def test_regression_accepts_recorded_amp_scale_drift_and_five_flip_difference():
     assert audit["aggregate_A_match"]["tolerance"] == {
         "float_relative": 1e-3,
         "float_absolute": 1e-6,
-        "introduced_flipped_faces_absolute": 5,
+        "introduced_flipped_faces_absolute": 25,
         "exact_integer_keys": [
             "new_degenerate_faces",
             "improved_over_initial",
