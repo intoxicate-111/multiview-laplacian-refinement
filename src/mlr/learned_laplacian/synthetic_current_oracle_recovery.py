@@ -35,6 +35,7 @@ LOST_SUCCESS_IDS = (
     "43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v00",
     "43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v04",
 )
+NORMALIZED_MSE_AMP_REL_TOL = 2e-3
 GEOMETRY_KEYS = (
     "initial_chamfer",
     "reconstruction_chamfer",
@@ -280,10 +281,10 @@ def _learned_reproduction_audit(
 ) -> dict[str, Any]:
     saved_ids = set(map(str, saved.get("test_sample_ids", [])))
     rerun_ids = {str(row["sample_id"]) for row in rerun["per_variant"]}
-    current20 = _model_repeat_audit(
+    current20 = _learned_model_repeat_audit(
         saved["aggregate"]["current_query_20k"], rerun["aggregate"]["A"]
     )
-    current50 = _model_repeat_audit(
+    current50 = _learned_model_repeat_audit(
         saved["aggregate"]["current_query_50k"], rerun["aggregate"]["B"]
     )
     return {
@@ -292,6 +293,26 @@ def _learned_reproduction_audit(
         "current_query_20k": current20,
         "current_query_50k": current50,
     }
+
+
+def _learned_model_repeat_audit(
+    reference: Mapping[str, Any], rerun: Mapping[str, Any]
+) -> dict[str, Any]:
+    audit = _model_repeat_audit(reference, rerun)
+    normalized_mse = audit["metrics"]["normalized_mse"]
+    normalized_mse["match"] = math.isclose(
+        float(normalized_mse["reference"]),
+        float(normalized_mse["rerun"]),
+        rel_tol=NORMALIZED_MSE_AMP_REL_TOL,
+        abs_tol=1e-6,
+    )
+    audit["tolerance"]["normalized_mse_float_relative"] = (
+        NORMALIZED_MSE_AMP_REL_TOL
+    )
+    audit["passed"] = all(
+        bool(metric["match"]) for metric in audit["metrics"].values()
+    )
+    return audit
 
 
 def _index_learned_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, list[dict[str, Any]]]:

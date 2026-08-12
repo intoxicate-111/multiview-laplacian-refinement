@@ -5,8 +5,13 @@ from mlr.learned_laplacian.synthetic_current_oracle_recovery import (
     _distribution,
     _formula_audit,
     _geometry_changes,
+    _learned_model_repeat_audit,
     _lost_comparison,
     _weighted_rms,
+)
+from mlr.learned_laplacian.synthetic_current_50k_downstream import (
+    FLOAT_REGRESSION_KEYS,
+    INTEGER_REGRESSION_KEYS,
 )
 
 
@@ -28,6 +33,19 @@ def test_formula_audit_requires_all_three_exact_target_checks():
     assert _formula_audit([row])["passed"] is True
     row["normalized_formula_max_abs_error"] = 2e-5
     assert _formula_audit([row])["passed"] is False
+
+
+def test_learned_repeat_allows_only_bounded_normalized_mse_amp_drift():
+    reference = {key: 1.0 for key in FLOAT_REGRESSION_KEYS}
+    reference.update({key: 1 for key in INTEGER_REGRESSION_KEYS})
+    reference["introduced_flipped_faces"] = 10
+    rerun = dict(reference)
+    rerun["normalized_mse"] = 0.9985
+    audit = _learned_model_repeat_audit(reference, rerun)
+    assert audit["passed"] is True
+    assert audit["tolerance"]["normalized_mse_float_relative"] == 2e-3
+    rerun["normalized_mse"] = 0.997
+    assert _learned_model_repeat_audit(reference, rerun)["passed"] is False
 
 
 def test_geometry_change_sign_is_refined_minus_initial():
