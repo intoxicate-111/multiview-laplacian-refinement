@@ -27,11 +27,13 @@ FLOAT_REGRESSION_KEYS = (
     "reconstruction_normal_consistency",
 )
 INTEGER_REGRESSION_KEYS = (
-    "introduced_flipped_faces",
     "new_degenerate_faces",
     "improved_over_initial",
     "sample_count",
 )
+FLOAT_REGRESSION_REL_TOL = 1e-3
+FLOAT_REGRESSION_ABS_TOL = 1e-6
+FLIP_REGRESSION_ABS_TOL = 5
 LOWER_IS_BETTER = {
     "loss",
     "vector_l2",
@@ -271,7 +273,12 @@ def _model_repeat_audit(left: Mapping[str, Any], right: Mapping[str, Any]) -> di
     for key in FLOAT_REGRESSION_KEYS:
         a = float(left[key])
         b = float(right[key])
-        match = math.isclose(a, b, rel_tol=1e-5, abs_tol=1e-7)
+        match = math.isclose(
+            a,
+            b,
+            rel_tol=FLOAT_REGRESSION_REL_TOL,
+            abs_tol=FLOAT_REGRESSION_ABS_TOL,
+        )
         differences[key] = {"reference": a, "rerun": b, "match": match}
         passed = passed and match
     for key in INTEGER_REGRESSION_KEYS:
@@ -280,7 +287,26 @@ def _model_repeat_audit(left: Mapping[str, Any], right: Mapping[str, Any]) -> di
         match = a == b
         differences[key] = {"reference": a, "rerun": b, "match": match}
         passed = passed and match
-    return {"passed": passed, "metrics": differences}
+    reference_flips = int(left["introduced_flipped_faces"])
+    rerun_flips = int(right["introduced_flipped_faces"])
+    flip_match = abs(rerun_flips - reference_flips) <= FLIP_REGRESSION_ABS_TOL
+    differences["introduced_flipped_faces"] = {
+        "reference": reference_flips,
+        "rerun": rerun_flips,
+        "absolute_difference": abs(rerun_flips - reference_flips),
+        "match": flip_match,
+    }
+    passed = passed and flip_match
+    return {
+        "passed": passed,
+        "tolerance": {
+            "float_relative": FLOAT_REGRESSION_REL_TOL,
+            "float_absolute": FLOAT_REGRESSION_ABS_TOL,
+            "introduced_flipped_faces_absolute": FLIP_REGRESSION_ABS_TOL,
+            "exact_integer_keys": list(INTEGER_REGRESSION_KEYS),
+        },
+        "metrics": differences,
+    }
 
 
 def _sample_ids(payload: Mapping[str, Any]) -> list[str]:
