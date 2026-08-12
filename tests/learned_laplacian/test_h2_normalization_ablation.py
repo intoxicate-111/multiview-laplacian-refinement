@@ -2,6 +2,16 @@ import copy
 import json
 from pathlib import Path
 
+import numpy as np
+import pytest
+import torch
+
+from mlr.learned_laplacian.synthetic_current_h2_ablation import (
+    ARMS,
+    _aggregate_small_h,
+    _raw_metrics,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = ROOT / "configs" / "learned_laplacian"
@@ -63,3 +73,60 @@ def test_three_arm_fixed_training_contract() -> None:
         assert config["confidence"]["recovery_weight"] == (
             "renderer_visible_any_times_confidence_prediction"
         )
+
+
+def test_raw_metrics_use_residual_magnitude_for_tail_percentiles() -> None:
+    target = torch.zeros((100, 3))
+    prediction = torch.zeros((100, 3))
+    prediction[:, 0] = torch.arange(1, 101, dtype=torch.float32)
+    weight = torch.ones(100)
+    weight[-1] = 4.0
+
+    metrics = _raw_metrics(prediction, target, weight, torch.ones(100, dtype=torch.bool))
+
+    assert metrics["raw_epe"] == pytest.approx(50.5)
+    assert metrics["raw_top_1_percent_epe"] == pytest.approx(100.0)
+    assert metrics["raw_top_10_percent_epe"] == pytest.approx(95.5)
+    assert metrics["raw_top_20_percent_epe"] == pytest.approx(90.5)
+    assert metrics["raw_top_50_percent_epe"] == pytest.approx(75.5)
+    expected_weighted_rms = np.sqrt(
+        (sum(value * value for value in range(1, 100)) + 4 * 100**2) / 103
+    )
+    assert metrics["recovery_weighted_raw_residual_rms"] == pytest.approx(
+        expected_weighted_rms
+    )
+
+
+def test_small_h_groups_are_disjoint_and_loss_contributions_sum_to_one() -> None:
+    count = 100
+    split_values = {
+        "h_current": [np.arange(1, count + 1, dtype=np.float64)],
+        "normalized_residual": [np.arange(1, count + 1, dtype=np.float64)],
+        "raw_residual": [np.ones(count)],
+        "weighted_normalized_loss": [np.arange(1, count + 1, dtype=np.float64)],
+        "weighted_raw_residual": [np.full(count, 2.0)],
+        "recovered_distance": [np.full(count, 3.0)],
+        "valid": [np.ones(count, dtype=bool)],
+    }
+
+    rows = _aggregate_small_h(
+        {"validation": split_values, "test": copy.deepcopy(split_values)}
+    )
+
+    for split in ("validation", "test"):
+        selected = [row for row in rows if row["split"] == split]
+        assert [row["vertex_count"] for row in selected] == [1, 9, 15, 25, 50]
+        assert sum(row["vertex_count"] for row in selected) == count
+        assert sum(
+            row["normalized_loss_contribution_fraction"] for row in selected
+        ) == pytest.approx(1.0)
+        assert selected[0]["normalized_residual_mean"] == pytest.approx(1.0)
+        assert selected[-1]["recovered_vertex_to_gt_surface_distance_mean"] == 3.0
+
+
+def test_arm_labels_are_fixed() -> None:
+    assert ARMS == (
+        "A_canonical_h2_normalized",
+        "B_direct_raw_laplacian",
+        "C_normalized_output_raw_loss",
+    )

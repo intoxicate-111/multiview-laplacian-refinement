@@ -170,7 +170,9 @@ class _MaterializedPreparedDataset(Dataset[dict[str, Any]]):
         return {
             "sample": prepared.sample,
             "training_target": prepared.training_target,
+            "raw_target": prepared.raw_target,
             "clipped_target_vertices": prepared.clipped_target_vertices,
+            "face_count": prepared.face_count,
             "image_decode_resize_seconds": prepared.image_decode_resize_seconds,
             "decoded_image_bytes": prepared.decoded_image_bytes,
             "used_view_count": prepared.used_view_count,
@@ -1760,11 +1762,16 @@ def _move_prepared_object_to_device(
     if "images" in moved_sample:
         moved_sample["images"] = _normalize_images(moved_sample["images"], config)
     moved_target = prepared.training_target.to(device, non_blocking=non_blocking)
+    moved_raw_target = (
+        None
+        if prepared.raw_target is None
+        else prepared.raw_target.to(device, non_blocking=non_blocking)
+    )
     return _PreparedObject(
         sample=moved_sample,
         training_target=moved_target,
         clipped_target_vertices=prepared.clipped_target_vertices,
-        raw_target=prepared.raw_target,
+        raw_target=moved_raw_target,
         face_count=prepared.face_count,
         image_decode_resize_seconds=prepared.image_decode_resize_seconds,
         decoded_image_bytes=prepared.decoded_image_bytes,
@@ -1970,6 +1977,12 @@ def _prepared_from_loader_item(item: Any) -> _PreparedObject:
         sample=dict(sample),
         training_target=training_target,
         clipped_target_vertices=int(item.get("clipped_target_vertices", 0)),
+        raw_target=(
+            item.get("raw_target")
+            if isinstance(item.get("raw_target"), torch.Tensor)
+            else None
+        ),
+        face_count=int(item.get("face_count", 0)),
         image_decode_resize_seconds=float(item.get("image_decode_resize_seconds", 0.0)),
         decoded_image_bytes=int(item.get("decoded_image_bytes", 0)),
         used_view_count=int(item.get("used_view_count", sample.get("num_views", 0))),
@@ -1994,6 +2007,8 @@ def _build_prepared_loader(
             sample=item.sample,
             training_target=item.training_target,
             clipped_target_vertices=item.clipped_target_vertices,
+            raw_target=item.raw_target,
+            face_count=item.face_count,
             used_view_count=item.used_view_count,
         )
         for item in items

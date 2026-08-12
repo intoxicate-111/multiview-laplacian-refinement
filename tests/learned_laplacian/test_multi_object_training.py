@@ -150,6 +150,26 @@ def test_raw_output_is_not_rescaled_for_raw_loss_space() -> None:
     assert torch.equal(target, target_raw)
 
 
+def test_normalized_output_raw_loss_trains_through_prepared_loader() -> None:
+    config = _multi_config()
+    config["training"]["prediction_loss_space"] = "raw_laplacian"
+    config["multi_object_training"].update(
+        {"epochs": 1, "validation_every_epochs": 1}
+    )
+
+    result = train_multi_object(
+        [_triangle_sample("raw_loss_train")],
+        [_triangle_sample("raw_loss_validation")],
+        config,
+        progress=False,
+    )
+
+    assert result.prediction_loss_space == "raw_laplacian"
+    assert math.isfinite(result.final_train_loss)
+    assert result.final_validation_loss is not None
+    assert math.isfinite(result.final_validation_loss)
+
+
 def _multi_view_sample(num_views: int = 14) -> dict:
     sample = tiny_sample()
     sample["sample_id"] = "multi_view"
@@ -883,7 +903,11 @@ def test_default_view_selection_uses_all_views_and_pruned_worker_sample():
 
     assert item["sample"]["images"].shape[0] == 14
     assert item["used_view_count"] == 14
-    assert "raw_target" not in item
+    assert torch.equal(item["raw_target"], prepared.raw_target)
+    assert item["face_count"] == prepared.face_count
+    reconstructed = multi_trainer._prepared_from_loader_item(item)
+    assert torch.equal(reconstructed.raw_target, prepared.raw_target)
+    assert reconstructed.face_count == prepared.face_count
     for removed in (
         "gt_vertices",
         "gt_faces",
