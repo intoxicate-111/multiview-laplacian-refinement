@@ -599,11 +599,16 @@ are unchanged. Validation and test do not apply jitter.
 ```text
 Dataset: /networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_synthetic_current_28view_v1/manifest.json
 Runs: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
-Report: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/analysis/REPORT.md
+Repository report: docs/SOFA50_LOCAL_QUERY_JITTER_ABLATION_REPORT.zh-CN.md
+HPC report: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/analysis/REPORT.md
 ```
 
 The report contains deterministic validation/test prediction metrics, the
 original-RGB/zero-RGB comparison and OpenMVS48 current-mesh recovery metrics.
+Arm B records higher best validation loss, test raw endpoint, test raw Top-10%
+endpoint, test raw Top-1% endpoint, OpenMVS refined Chamfer and OpenMVS P2S than
+Arm A. Arm B records lower test raw global cosine and OpenMVS refined normal
+consistency. Neither arm improves OpenMVS Chamfer over the initial meshes.
 
 ## Result locations on the HPC
 

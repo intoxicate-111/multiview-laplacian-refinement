@@ -1,6 +1,6 @@
 # Sofa50 C2F2 受控消融报告
 
-状态时间：2026-08-12 06:01 BST
+状态时间：2026-08-12 10:03 BST
 
 训练设备：NVIDIA L40
 
@@ -17,7 +17,7 @@
 5. synthetic current-query 从 20,000 steps 延长到 50,000 steps；
 6. 28-view synthetic current-query local jitter 对照。
 
-已完成实验使用最终 `metrics.json` 或分析产物。Local jitter 使用状态时间对应的训练快照，不作为最终对照结果。
+已完成实验使用最终 `metrics.json` 或分析产物。
 
 ## 2. 指标定义
 
@@ -377,38 +377,37 @@ Top 1% raw-residual group 的 baseline recovered surface distance 分别是 bott
 - 达到至少 90% mean Chamfer 和 P2S oracle-gap closure 需要 50% replacement。当前结果不支持 downstream gap 仅由 Top 1% 或 Top 10% raw-residual vertices 构成。
 - Raw residual percentile 与 normalized residual percentile 不等价；Top 1% raw-residual group 的 normalized residual mean 低于其余记录 groups，normalized residual 未用于该实验的 Top-k 选择。
 
-## 8. Local query jitter 训练快照
+## 8. Local query jitter 最终结果
 
-状态时间：2026-08-12 06:01 BST。单 GPU 下每个 epoch 对应 100 optimizer steps，20,000-step 上限对应 200 epochs。
+Jobs 15662_0、15662_1 和 15663 均以 exit code `0:0` 完成。两个训练 arm 均达到 20,000 optimizer steps。
 
-| Arm | Job | Epoch | Approx. steps | Latest train loss | Latest validation loss | Best validation loss | LR |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| A: no jitter | 15662_0 | 90/200 | 9,000/20,000 | 0.0250877 | 0.0217246 | 0.0217145 | 1e-3 |
-| B: local jitter | 15662_1 | 72/200 | 7,200/20,000 | 0.0269448 | 0.0243396 | 0.0243396 | 1e-3 |
+| Metric | A: no jitter | B: local jitter | B − A |
+|---|---:|---:|---:|
+| Best validation loss | 0.018456638 | 0.018836601 | +0.000379964 |
+| Test raw endpoint | 0.007681539 | 0.007804981 | +0.000123442 |
+| Test raw Top-10% endpoint | 0.053443110 | 0.054163195 | +0.000720084 |
+| Test raw Top-1% endpoint | 0.202496550 | 0.225826787 | +0.023330238 |
+| Test raw global cosine | 0.957896502 | 0.928684516 | -0.029211986 |
+| Runtime | 6.0416 h | 6.1807 h | +0.1391 h |
+| Runtime ratio | 1.0000 | 1.0230 | +2.3023% |
 
-在相同 epoch 70：
+OpenMVS48 current-mesh recovery 使用 5 个 paired meshes：
 
-| Arm | Validation loss |
-|---|---:|
-| A: no jitter | 0.0217145 |
-| B: local jitter | 0.0243396 |
-
-该快照中 B 比 A 高 `12.1%`。两个 arm 的 scheduler 均未降低学习率。两个 stderr 为空。
-
-实时资源快照：
-
-| Arm | GPU | GPU memory | GPU utilization snapshot |
-|---|---|---:|---:|
-| A | L40 | 30,387 MiB | 97% |
-| B | L40 | 30,387 MiB | 34% |
-
-GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image decode/data 阶段和约 62–63 秒 forward/backward 阶段。
+| Metric | A: no jitter | B: local jitter | B − A |
+|---|---:|---:|---:|
+| Mean initial Chamfer | 0.024729284 | 0.024729284 | 0 |
+| Mean refined Chamfer | 0.025067426 | 0.025249771 | +0.000182345 |
+| Mean refined P2S | 0.024900180 | 0.025077573 | +0.000177393 |
+| Mean refined normal consistency | 0.819698948 | 0.819023295 | -0.000675653 |
+| Improved-over-initial meshes | 0/5 | 0/5 | 0 |
+| Introduced flipped faces | 329 | 370 | +41 |
 
 结论：
 
-- 当前 epoch-aligned validation loss 未显示 local jitter 相对 no-jitter 的下降。
-- 两个 arm 尚未完成，当前差异不作为最终结果。
-- Job 15663 依赖两个训练 arm，完成后执行 deterministic synthetic validation/test、zero-RGB、OpenMVS48 recovery 和汇总分析。
+- Arm B 的 best validation loss、test raw endpoint、raw Top-10% endpoint 和 raw Top-1% endpoint 均高于 Arm A，test raw global cosine 低于 Arm A。
+- Arm B 的 OpenMVS refined Chamfer 在 5/5 paired meshes 上高于 Arm A；两个 arm 均为 0/5 meshes 低于各自 initial Chamfer。
+- 当前记录不支持在该 contract 下启用 training-only local query jitter。
+- 独立报告位于 `docs/SOFA50_LOCAL_QUERY_JITTER_ABLATION_REPORT.zh-CN.md`。
 
 ## 9. 假设状态
 
@@ -431,13 +430,12 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
 | Top 10% raw-residual replacement 使每个 sample 低于 initial | Supported | 20k/50k 均为 25/25 |
 | Top-k replacement 关闭至少 90% mean Chamfer oracle gap | Supported at 50% replacement | 20k/50k 为 93.95%/94.94% |
 | High raw-residual vertices 对应 high recovered geometry error | Supported for recorded percentile analysis | Top 1%/bottom 50% surface-distance ratio 28.64/31.78 |
-| Local query jitter 改善最终 synthetic 与 OpenMVS recovery | Pending | Jobs 15662_0、15662_1、15663 |
+| Local query jitter 降低最终 synthetic 与 OpenMVS recovery error | Not supported | Test raw EPE +0.000123442；OpenMVS Chamfer +0.000182345；5/5 paired meshes |
 
 ## 10. 尚需完成的判定
 
 1. 对 GT 与 GT-adaptive prediction 做 common-surface paired evaluation：映射到相同 GT vertices 或固定表面采样点，使用同一 target、同一 curvature bins、同一 EPE/cosine 定义。
-2. 等待 15662 两个 arm 完成以及 15663 输出 final local-jitter report。
-3. 在 adaptive 的 common-surface 指标与 local-jitter downstream endpoint 完成前，不从 native validation loss 或 graph-specific raw EPE 推导 Sofa50 主训练配置。
+2. 在 adaptive 的 common-surface 指标完成前，不从 graph-specific raw EPE 推导 Sofa50 主训练配置。
 
 ## 11. 产物位置
 
@@ -459,3 +457,5 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
   `runs/learned_laplacian/sofa50_synthetic_current_50k_downstream_evaluation_seed7/oracle_recovery_comparison/topk_prediction_error_recovery_comparison/`
 - Local-jitter runs：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/`
+- Local-jitter 独立报告：
+  `docs/SOFA50_LOCAL_QUERY_JITTER_ABLATION_REPORT.zh-CN.md`
