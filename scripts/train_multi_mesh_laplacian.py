@@ -118,6 +118,7 @@ def main() -> int:
                 "final_validation_loss": result.final_validation_loss,
                 "optimizer_steps": result.optimizer_steps,
                 "target_mode": result.target_mode,
+                "prediction_loss_space": result.prediction_loss_space,
                 "device": result.device,
                 "distributed_world_size": result.distributed_world_size,
                 "runtime_seconds": result.runtime_seconds,

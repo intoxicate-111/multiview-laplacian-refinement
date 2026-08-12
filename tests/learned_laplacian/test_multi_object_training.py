@@ -22,6 +22,8 @@ from mlr.learned_laplacian.multi_trainer import (
     _EpochIndexSampler,
     _MaterializedPreparedDataset,
     _build_lr_scheduler,
+    _prediction_loss_inputs,
+    _prediction_loss_space,
     _prepare_object_static,
     _select_prepared_views,
     train_multi_object,
@@ -91,6 +93,61 @@ def _multi_config() -> dict:
             "checkpoint_every_epochs": 0,
         },
     }
+
+
+def test_prediction_loss_space_defaults_to_output_representation() -> None:
+    assert _prediction_loss_space({}) == "output_representation"
+    with pytest.raises(ValueError, match="prediction_loss_space"):
+        _prediction_loss_space({"prediction_loss_space": "unknown"})
+
+
+def test_normalized_output_can_be_compared_in_raw_loss_space() -> None:
+    h = torch.tensor([0.5, 2.0])
+    prediction_hat = torch.tensor([[2.0, -1.0, 0.5], [3.0, 4.0, -2.0]], requires_grad=True)
+    target_raw = torch.tensor([[0.4, -0.3, 0.2], [8.0, 12.0, -4.0]])
+    prepared = multi_trainer._PreparedObject(
+        sample={"local_edge_length": h},
+        training_target=target_raw / h.square().unsqueeze(-1),
+        clipped_target_vertices=0,
+        raw_target=target_raw,
+    )
+
+    prediction, target = _prediction_loss_inputs(
+        prediction_hat,
+        prepared,
+        target_mode="edge_scale_normalized_laplacian",
+        epsilon=1e-12,
+        prediction_loss_space="raw_laplacian",
+    )
+
+    assert torch.allclose(prediction, prediction_hat * h.square().unsqueeze(-1))
+    assert torch.equal(target, target_raw)
+    prediction.sum().backward()
+    assert torch.allclose(
+        prediction_hat.grad, h.square().unsqueeze(-1).expand_as(prediction_hat)
+    )
+
+
+def test_raw_output_is_not_rescaled_for_raw_loss_space() -> None:
+    prediction_raw = torch.randn(4, 3)
+    target_raw = torch.randn(4, 3)
+    prepared = multi_trainer._PreparedObject(
+        sample={"local_edge_length": torch.ones(4)},
+        training_target=target_raw,
+        clipped_target_vertices=0,
+        raw_target=target_raw,
+    )
+
+    prediction, target = _prediction_loss_inputs(
+        prediction_raw,
+        prepared,
+        target_mode="raw_laplacian",
+        epsilon=1e-12,
+        prediction_loss_space="raw_laplacian",
+    )
+
+    assert prediction is prediction_raw
+    assert torch.equal(target, target_raw)
 
 
 def _multi_view_sample(num_views: int = 14) -> dict:

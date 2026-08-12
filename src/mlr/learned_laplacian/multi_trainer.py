@@ -57,6 +57,11 @@ from .trainer import _resolve_device, _seed_everything
 from .vertex_sampling import sample_training_vertices, vertex_sampling_settings
 
 
+OUTPUT_REPRESENTATION_LOSS = "output_representation"
+RAW_LAPLACIAN_LOSS = "raw_laplacian"
+PREDICTION_LOSS_SPACES = {OUTPUT_REPRESENTATION_LOSS, RAW_LAPLACIAN_LOSS}
+
+
 @dataclass
 class MultiObjectTrainingResult:
     model: LearnedLaplacianModel
@@ -71,6 +76,7 @@ class MultiObjectTrainingResult:
     runtime_seconds: float
     peak_gpu_memory_mb: float | None
     target_mode: str
+    prediction_loss_space: str
     static_preparation_seconds: float = 0.0
     device_cache_seconds: float = 0.0
     mean_epoch_train_seconds: float = 0.0
@@ -274,6 +280,7 @@ def train_multi_object(
     else:
         model = base_model
     training = config.get("training", {})
+    prediction_loss_space = _prediction_loss_space(training)
     multi = config.get("multi_object_training", {})
     epochs = int(multi.get("epochs", 1))
     accumulation_meshes = int(multi.get("gradient_accumulation_meshes", 1))
@@ -703,16 +710,23 @@ def train_multi_object(
                 ):
                     model_output = model(prepared.sample)
                 prediction_fp32 = model_output.predicted_laplacian.float()
+                full_loss_prediction, full_loss_target = _prediction_loss_inputs(
+                    prediction_fp32,
+                    prepared,
+                    target_mode=target_mode,
+                    epsilon=epsilon,
+                    prediction_loss_space=prediction_loss_space,
+                )
                 sampled_vertices = sample_training_vertices(
-                    prepared.training_target.float(),
+                    full_loss_target,
                     prepared.sample["valid_scale_mask"],
                     vertex_sampling,
                     sample_id=str(prepared.sample["sample_id"]),
                     base_seed=seed,
                     epoch=epoch,
                 )
-                loss_prediction = prediction_fp32
-                loss_target = prepared.training_target.float()
+                loss_prediction = full_loss_prediction
+                loss_target = full_loss_target
                 loss_weight = prepared.sample["target_confidence"].float()
                 if sampled_vertices.indices is not None:
                     loss_prediction = loss_prediction.index_select(
@@ -771,8 +785,8 @@ def train_multi_object(
                 invisible_query_count += int((~visible).sum().item())
                 with torch.no_grad():
                     exact_loss, perturbed_loss = _query_subset_losses(
-                        prediction_fp32,
-                        prepared.training_target.float(),
+                        full_loss_prediction,
+                        full_loss_target,
                         prepared.sample["target_confidence"].float(),
                         prepared.sample.get("query_is_exact"),
                         loss_kwargs,
@@ -1302,6 +1316,7 @@ def train_multi_object(
             "train_meshes": len(prepared_train),
             "validation_meshes": len(prepared_validation),
             "target_mode": target_mode,
+            "prediction_loss_space": prediction_loss_space,
             "target_scaling_epsilon": epsilon,
             "device": str(device),
             "distributed_world_size": distributed.world_size,
@@ -1348,6 +1363,7 @@ def train_multi_object(
         runtime_seconds=runtime_seconds,
         peak_gpu_memory_mb=peak_gpu_memory_mb,
         target_mode=target_mode,
+        prediction_loss_space=prediction_loss_space,
         static_preparation_seconds=static_preparation_seconds,
         device_cache_seconds=device_cache_seconds,
         mean_epoch_train_seconds=mean_epoch_train_seconds,
@@ -1437,6 +1453,56 @@ def _target_settings(config: Mapping[str, Any]) -> tuple[str, float]:
     if epsilon <= 0:
         raise ValueError("target_scaling.epsilon must be positive.")
     return target_mode, epsilon
+
+
+def _prediction_loss_space(training_config: Mapping[str, Any]) -> str:
+    value = str(
+        training_config.get("prediction_loss_space", OUTPUT_REPRESENTATION_LOSS)
+    )
+    if value not in PREDICTION_LOSS_SPACES:
+        raise ValueError(
+            "training.prediction_loss_space must be one of "
+            f"{sorted(PREDICTION_LOSS_SPACES)}."
+        )
+    return value
+
+
+def _prediction_loss_inputs(
+    prediction: torch.Tensor,
+    prepared: _PreparedObject,
+    *,
+    target_mode: str,
+    epsilon: float,
+    prediction_loss_space: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return prediction and target in the configured loss space.
+
+    The model output representation remains controlled by ``target_mode``.
+    Converting a normalized output to raw space here changes only the tensors
+    entering the prediction/confidence losses; it does not alter the model or
+    the stored current-graph target.
+    """
+
+    if prediction_loss_space == OUTPUT_REPRESENTATION_LOSS:
+        return prediction, prepared.training_target.float()
+    if prediction_loss_space != RAW_LAPLACIAN_LOSS:
+        raise ValueError(f"Unsupported prediction loss space: {prediction_loss_space!r}.")
+    if prepared.raw_target is None:
+        raise ValueError("Raw-space prediction loss requires prepared.raw_target.")
+    if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
+        raw_prediction = denormalize_laplacian_by_edge_scale(
+            prediction,
+            prepared.sample["local_edge_length"],
+            eps=epsilon,
+        )
+    elif target_mode == RAW_LAPLACIAN:
+        raw_prediction = prediction
+    else:
+        raise ValueError(f"Unsupported target mode: {target_mode!r}.")
+    raw_target = prepared.raw_target.to(
+        device=raw_prediction.device, dtype=raw_prediction.dtype
+    )
+    return raw_prediction, raw_target
 
 
 def _build_lr_scheduler(
@@ -2259,6 +2325,7 @@ def _evaluate_dataset(
         base_model.input_mode != "coarse_only" and not base_model.zero_images
     )
     target_mode, epsilon = _target_settings(config)
+    prediction_loss_space = _prediction_loss_space(config.get("training", {}))
     confidence_settings = _confidence_settings(config)
     losses = []
     metrics: dict[str, dict[str, Any]] = {}
@@ -2310,16 +2377,23 @@ def _evaluate_dataset(
         ):
             model_output = model(prepared.sample)
         prediction = model_output.predicted_laplacian.float()
-        loss = weighted_robust_laplacian_loss(
+        loss_prediction, loss_target = _prediction_loss_inputs(
             prediction,
-            prepared.training_target.float(),
+            prepared,
+            target_mode=target_mode,
+            epsilon=epsilon,
+            prediction_loss_space=prediction_loss_space,
+        )
+        loss = weighted_robust_laplacian_loss(
+            loss_prediction,
+            loss_target,
             prepared.sample["target_confidence"].float(),
             **loss_kwargs,
         )
         loss_value = float(loss.item())
         exact_loss, perturbed_loss = _query_subset_losses(
-            prediction,
-            prepared.training_target.float(),
+            loss_prediction,
+            loss_target,
             prepared.sample["target_confidence"].float(),
             prepared.sample.get("query_is_exact"),
             loss_kwargs,
@@ -2352,8 +2426,8 @@ def _evaluate_dataset(
             confidence_prediction = model_output.confidence_prediction.float()
             confidence_metrics = confidence_calibration_metrics(
                 confidence_prediction,
-                prediction,
-                prepared.training_target.float(),
+                loss_prediction,
+                loss_target,
                 valid_mask=valid_mask,
                 quantile_bins=confidence_settings["quantile_bins"],
             )
@@ -2361,6 +2435,7 @@ def _evaluate_dataset(
         visible = model_output.valid_views.any(dim=0)
         metrics[sample_id] = {
             "loss": loss_value,
+            "prediction_loss_space": prediction_loss_space,
             "exact_query_loss": None if exact_loss is None else float(exact_loss.item()),
             "perturbed_query_loss": (
                 None if perturbed_loss is None else float(perturbed_loss.item())
