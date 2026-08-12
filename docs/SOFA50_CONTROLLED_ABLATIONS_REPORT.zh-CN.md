@@ -285,6 +285,49 @@ Current-query 50k 相对 GT-query 50k：
 - 20k 延长到 50k 未降低 reconstruction Chamfer 或 P2S，且 improved-over-initial count 从 5 降为 3。
 - 在相同 50k budget 下，current-query 的记录 prediction 与 reconstruction endpoints 均处于 GT-query 对应值的指定方向。
 
+### 7.4 Current-graph exact-target oracle recovery
+
+Job 15675 在固定 manifest 的 25 个 test variants 上比较 current-query 20k、current-query 50k 和 current-graph exact-target oracle。Oracle 使用 current-query 50k 的 predicted confidence、保存的 visibility 和相同 recovery weight，只将 recovery 输入从 `delta_pred_hat` 替换为保存的 `delta_target_hat`。未执行训练、数据生成、target 生成、graph 修改或 solver 修改。
+
+Manifest SHA-256 为 `b28e133c277032cceee05ac10115d11ee3007bbd2c3983c31cfa41992159eba3`。20k/50k learned replay、`L_current @ P_proxy` target 公式和 oracle 两次重复恢复均通过检查。两次 oracle recovery 的 recorded metrics 最大绝对差为 0，25 个 OBJ 文件的 SHA-256 相同。Raw target round-trip 最大绝对误差为 `5.96e-8`；current-graph proxy raw target 与 normalized formula 的最大绝对误差为 0。
+
+| Metric | Current-query 20k | Current-query 50k | Exact-target oracle |
+|---|---:|---:|---:|
+| Evaluation loss | 0.0117434 | 0.0112163 | 0 |
+| Target EPE | 2.390879 | 2.286041 | 0 |
+| Global cosine | 0.895213 | 0.896632 | 1.000021 |
+| High-10% cosine | 0.974112 | 0.975400 | 1.000000 |
+| Pred/target norm | 0.914106 | 0.946364 | 1.000000 |
+| Initial Chamfer | 0.00391323 | 0.00391323 | 0.00391323 |
+| Refined Chamfer | 0.00417977 | 0.00422430 | 0.00317485 |
+| Initial P2S | 0.00393459 | 0.00393459 | 0.00393459 |
+| Refined P2S | 0.00423260 | 0.00424771 | 0.00317849 |
+| Initial normal consistency | 0.955191 | 0.955191 | 0.955191 |
+| Refined normal consistency | 0.940028 | 0.939283 | 0.963383 |
+| Introduced flips | 8,424 | 8,495 | 3,242 |
+| Improved over initial | 5/25 | 3/25 | 25/25 |
+
+Exact-target oracle 相对 initial 的 mean Chamfer 变化为 `-18.87%`，P2S 变化为 `-19.22%`。Oracle refined Chamfer 相对 20k 和 50k 分别为 `-24.04%` 和 `-24.84%`；P2S 分别为 `-24.90%` 和 `-25.17%`；introduced flips 分别为 `-61.51%` 和 `-61.84%`。五个 objects 各有 5/5 variants 的 oracle Chamfer 低于 initial。
+
+Lost-success samples：
+
+| Sample | Checkpoint | Normalized EPE | Top-10% normalized residual | Shared-weight normalized RMS | Raw residual RMS | Raw residual max | Shared-weight raw RMS | Refined Chamfer | Flips |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `43bd...__v00` | 20k | 1.824392 | 7.293408 | 2.404215 | 0.0172963 | 1.185689 | 0.0104527 | 0.00436591 | 263 |
+| `43bd...__v00` | 50k | 1.679789 | 6.691750 | 2.243700 | 0.0229498 | 1.696373 | 0.0127689 | 0.00467236 | 299 |
+| `43bd...__v00` | oracle | 0 | 0 | 0 | 0 | 0 | 0 | 0.00355531 | 106 |
+| `43bd...__v04` | 20k | 1.767634 | 6.858504 | 2.350372 | 0.0177445 | 1.213729 | 0.0188273 | 0.00442270 | 254 |
+| `43bd...__v04` | 50k | 1.670313 | 6.434657 | 2.237047 | 0.0237216 | 1.724809 | 0.0253384 | 0.00451079 | 272 |
+| `43bd...__v04` | oracle | 0 | 0 | 0 | 0 | 0 | 0 | 0.00344048 | 90 |
+
+结论：
+
+- Exact-target oracle 在 25/25 samples 和 5/5 objects 上降低 Chamfer；固定 `P_proxy`/target 与 recovery objective 在 zero-prediction-error 输入下产生低于 initial 的结果。
+- 该对照把当前 synthetic-current downstream 差异定位到 learned Laplacian prediction error 与 recovery 的交互。
+- 20k 与 50k 的两个非零 error endpoints 不能给出因果 prediction-error threshold。
+- v00/v04 中，50k 的 normalized EPE、top-10% normalized residual 和共享权重 normalized RMS 均低于 20k；raw residual RMS、raw maximum 和共享 50k recovery weight 下的 raw RMS 均高于 20k，且 refined Chamfer 高于 20k。两个 samples 的 solver-input raw-tail pattern 均为 true。
+- Oracle 在五个 objects 上均为 5/5，learned recovery 的单 object success pattern 未保留。
+
 ## 8. Local query jitter 训练快照
 
 状态时间：2026-08-12 06:01 BST。单 GPU 下每个 epoch 对应 100 optimizer steps，20,000-step 上限对应 200 epochs。
@@ -333,6 +376,8 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
 | Current-query 50k 相对 current-query 20k 降低 synthetic prediction loss/EPE | Supported | Loss -4.52%；EPE -4.42% |
 | Current-query 50k 相对 current-query 20k 降低 reconstruction Chamfer/P2S | Not supported | Chamfer +1.07%；P2S +0.34% |
 | Current-query 50k 相对 GT-query 50k 改变 matched-budget downstream endpoints | Supported for recorded protocol | Chamfer -23.44%；P2S -25.13%；flips -25.44% |
+| Exact current-graph target 在固定 recovery contract 下改善 synthetic-current geometry | Supported | Chamfer 25/25；mean 相对 initial -18.87% |
+| 50k lost-success samples 的 raw solver-input tail 低于 20k | Not supported | v00/v04 的共享权重 raw RMS 均升高 |
 | Local query jitter 改善最终 synthetic 与 OpenMVS recovery | Pending | Jobs 15662_0、15662_1、15663 |
 
 ## 10. 尚需完成的判定
@@ -355,5 +400,7 @@ GPU utilization 是单次采样。每个 epoch 同时包含约 55–64 秒 image
   `runs/learned_laplacian/sofa50_synthetic_current_c2f2_14view_50k_resume_from_20k_seed7/`
 - Synthetic-current 50k downstream evaluation：
   `runs/learned_laplacian/sofa50_synthetic_current_50k_downstream_evaluation_seed7/`
+- Synthetic-current exact-target oracle recovery：
+  `runs/learned_laplacian/sofa50_synthetic_current_50k_downstream_evaluation_seed7/oracle_recovery_comparison/`
 - Local-jitter runs：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7/`
