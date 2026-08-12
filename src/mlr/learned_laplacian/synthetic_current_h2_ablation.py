@@ -206,6 +206,10 @@ def run_h2_normalization_ablation(
                         recovery_dir,
                         specs[ARMS[0]]["config"],
                     )
+                    print(
+                        f"small_h validation {sample_id} recovered",
+                        flush=True,
+                    )
                 else:
                     recovered_a = np.empty((0, 3), dtype=np.float64)
                     for arm, values in inferred.items():
@@ -278,6 +282,12 @@ def run_h2_normalization_ablation(
                                     ),
                                     **recovery,
                                 }
+                            )
+                            print(
+                                f"{arm} {sample_id} replace={percentage}% "
+                                f"chamfer={recovery['reconstruction_chamfer']:.9g} "
+                                f"improved={recovery['improved_over_initial']}",
+                                flush=True,
                             )
                             if arm == ARMS[0] and percentage == 0:
                                 recovered_a = recovered_vertices
@@ -851,6 +861,13 @@ def _preflight_audit(
     split_ids = {
         split: list(dataset.sample_ids) for split, dataset in datasets.items()
     }
+    run_split_ids = {
+        arm: _manifest_split_ids(spec["run_dir"] / "dataset_manifest.json")
+        for arm, spec in specs.items()
+    }
+    run_manifests_match = all(
+        ids == split_ids for ids in run_split_ids.values()
+    )
     arm_semantics = {
         ARMS[0]: (
             specs[ARMS[0]]["target_mode"] == EDGE_SCALE_NORMALIZED_LAPLACIAN
@@ -882,6 +899,7 @@ def _preflight_audit(
         and all(value == 20_000 for value in optimizer_steps.values())
         and all(no_jitter.values())
         and all(arm_semantics.values())
+        and run_manifests_match
         and {name: len(ids) for name, ids in split_ids.items()}
         == {"train": 200, "validation": 25, "test": 25}
     )
@@ -891,6 +909,7 @@ def _preflight_audit(
         "manifest_sha256": _sha256(manifest),
         "split_counts": {name: len(ids) for name, ids in split_ids.items()},
         "split_sample_ids": split_ids,
+        "run_manifest_sample_ids_match": run_manifests_match,
         "controlled_configs_equal": all_configs_equal,
         "initial_state_hashes": initial_hashes,
         "initial_states_equal": len(set(initial_hashes.values())) == 1,
@@ -967,6 +986,21 @@ def _initial_state_hash(config: Mapping[str, Any]) -> str:
         digest.update(name.encode("utf-8"))
         digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
+
+
+def _manifest_split_ids(path: Path) -> dict[str, list[str]]:
+    value = _read_json(path)
+    samples = value.get("samples")
+    if not isinstance(samples, list):
+        raise ValueError(f"Manifest has no samples list: {path}")
+    result = {split: [] for split in ("train", "validation", "test")}
+    for item in samples:
+        if not isinstance(item, Mapping):
+            raise ValueError(f"Manifest contains a non-object sample: {path}")
+        split = str(item.get("split"))
+        if split in result:
+            result[split].append(str(item.get("sample_id")))
+    return result
 
 
 def _validate_sample_contract(sample_id: str, metadata: Mapping[str, Any]) -> None:
