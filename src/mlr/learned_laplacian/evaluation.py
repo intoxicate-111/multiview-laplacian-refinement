@@ -10,7 +10,7 @@ from mlr.coarse_lap_oracle import (
     apply_uniform_laplacian,
     apply_uniform_laplacian_transpose,
     build_uniform_laplacian_data,
-    point_to_surface_stats as numpy_point_to_surface_stats,
+    closest_points_on_mesh,
 )
 from mlr.data import Mesh
 from mlr.io import save_mesh
@@ -402,9 +402,28 @@ def _refine_sparse_uniform(
 
 
 def _point_to_surface_stats(points: np.ndarray, surface_mesh: Mesh) -> dict[str, float | str]:
+    distances, engine = _point_to_surface_distances(points, surface_mesh)
+    return {
+        "mean": float(np.mean(distances)),
+        "rmse": float(np.sqrt(np.mean(distances * distances))),
+        "median": float(np.median(distances)),
+        "p95": float(np.quantile(distances, 0.95)),
+        "max": float(np.max(distances)),
+        "engine": engine,
+    }
+
+
+def _point_to_surface_distances(
+    points: np.ndarray, surface_mesh: Mesh
+) -> tuple[np.ndarray, str]:
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or len(points) < 1:
+        raise ValueError("Point-to-surface queries must have shape [N, 3] with N > 0.")
     if len(points) <= 5000 and surface_mesh.num_faces <= 10000:
-        result = numpy_point_to_surface_stats(points, surface_mesh)
-        return {**result, "engine": "numpy_exact"}
+        distances = closest_points_on_mesh(
+            points, surface_mesh.vertices, surface_mesh.faces
+        ).distances
+        return np.asarray(distances, dtype=np.float64), "numpy_exact"
     try:
         import trimesh
     except ImportError as exc:
@@ -439,14 +458,77 @@ def _point_to_surface_stats(points: np.ndarray, surface_mesh: Mesh) -> dict[str,
                 raise
             distances = _nearest_vertex_distances(points, surface_mesh.vertices)
             engine = "scipy_nearest_vertex_upper_bound_error_fallback"
-    distances = np.asarray(distances, dtype=np.float64)
+    return np.asarray(distances, dtype=np.float64), engine
+
+
+def evaluate_mesh_geometry(
+    mesh: Mesh,
+    gt_mesh: Mesh,
+    *,
+    surface_samples: int = 10_000,
+    seed: int = 7,
+    fscore_threshold: float = 0.01,
+) -> dict[str, Any]:
+    """Evaluate any method output under one deterministic surface protocol."""
+
+    if surface_samples < 1:
+        raise ValueError("surface_samples must be positive.")
+    if fscore_threshold <= 0:
+        raise ValueError("fscore_threshold must be positive.")
+    predicted_points = _sample_mesh_surface(mesh, surface_samples, seed)
+    gt_points = _sample_mesh_surface(gt_mesh, surface_samples, seed + 1)
+    forward, forward_engine = _point_to_surface_distances(predicted_points, gt_mesh)
+    reverse, reverse_engine = _point_to_surface_distances(gt_points, mesh)
+    precision = float(np.mean(forward <= fscore_threshold))
+    recall = float(np.mean(reverse <= fscore_threshold))
+    fscore = (
+        0.0
+        if precision + recall == 0.0
+        else float(2.0 * precision * recall / (precision + recall))
+    )
+    combined = np.concatenate((forward, reverse))
     return {
-        "mean": float(np.mean(distances)),
-        "rmse": float(np.sqrt(np.mean(distances * distances))),
-        "median": float(np.median(distances)),
-        "max": float(np.max(distances)),
-        "engine": engine,
+        "surface_samples": int(surface_samples),
+        "surface_sampling_seed": int(seed),
+        "chamfer": float(0.5 * (forward.mean() + reverse.mean())),
+        "point_to_surface_forward_mean": float(forward.mean()),
+        "point_to_surface_forward_p95": float(np.quantile(forward, 0.95)),
+        "point_to_surface_reverse_mean": float(reverse.mean()),
+        "point_to_surface_reverse_p95": float(np.quantile(reverse, 0.95)),
+        "point_to_surface_bidirectional_mean": float(combined.mean()),
+        "point_to_surface_bidirectional_p95": float(np.quantile(combined, 0.95)),
+        "fscore_threshold": float(fscore_threshold),
+        "fscore_precision": precision,
+        "fscore_recall": recall,
+        "fscore": fscore,
+        "normal_consistency": float(_normal_consistency(mesh, gt_mesh)),
+        "forward_engine": forward_engine,
+        "reverse_engine": reverse_engine,
     }
+
+
+def _sample_mesh_surface(mesh: Mesh, count: int, seed: int) -> np.ndarray:
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    faces = np.asarray(mesh.faces, dtype=np.int64)
+    if faces.ndim != 2 or faces.shape[1] != 3 or len(faces) < 1:
+        raise ValueError("Surface sampling requires a non-empty triangular mesh.")
+    triangles = vertices[faces]
+    cross = np.cross(
+        triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]
+    )
+    areas = 0.5 * np.linalg.norm(cross, axis=1)
+    total_area = float(areas.sum())
+    if not np.isfinite(total_area) or total_area <= 0:
+        raise ValueError("Surface sampling requires positive finite mesh area.")
+    rng = np.random.default_rng(seed)
+    face_indices = rng.choice(len(faces), size=count, replace=True, p=areas / total_area)
+    selected = triangles[face_indices]
+    uv = rng.random((count, 2))
+    root_u = np.sqrt(uv[:, 0])
+    weights = np.column_stack(
+        (1.0 - root_u, root_u * (1.0 - uv[:, 1]), root_u * uv[:, 1])
+    )
+    return np.einsum("ni,nij->nj", weights, selected)
 
 
 def _nearest_vertex_distances(points: np.ndarray, vertices: np.ndarray) -> np.ndarray:

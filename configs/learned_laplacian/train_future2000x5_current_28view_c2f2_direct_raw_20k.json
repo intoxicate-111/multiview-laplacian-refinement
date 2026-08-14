@@ -1,11 +1,11 @@
 {
-  "method": "synthetic_current_28view_h2_normalization_ablation",
+  "method": "future2000x5_gt_adaptive_current_28view_c2f2_direct_raw_20k",
   "seed": 7,
   "device": "cuda",
   "dataset": {
-    "name": "Sofa50SyntheticCurrent28View",
-    "expected_split_counts": {"train": 200, "validation": 25, "test": 25},
-    "objects": 50,
+    "name": "Future2000GTAdaptiveSyntheticCurrent28View",
+    "expected_split_counts": {"train": 8000, "validation": 1000, "test": 1000},
+    "objects": 2000,
     "variants_per_object": 5,
     "object_level_split": true
   },
@@ -94,13 +94,14 @@
     "validation_views_per_sample": null
   },
   "multi_object_training": {
-    "epochs": 2000,
+    "epochs": 50,
     "max_optimizer_steps": 20000,
-    "gradient_accumulation_meshes": 2,
+    "gradient_accumulation_meshes": 1,
     "shuffle": true,
-    "validation_every_epochs": 5,
-    "checkpoint_every_epochs": 100,
-    "checkpoint_epochs": [100, 250, 400],
+    "validation_every_epochs": 1,
+    "checkpoint_every_epochs": 0,
+    "checkpoint_optimizer_steps": [5000, 10000, 15000, 20000],
+    "checkpoint_epochs": [],
     "cache_prepared_samples_on_device": false,
     "profile_training": true,
     "early_stopping": {"enabled": false, "patience_validations": 15, "min_delta": 0.0001}
@@ -119,12 +120,13 @@
     "denormalization": "none; model output is delta_pred_raw"
   },
   "experiment_metadata": {
-    "experiment": "current_graph_h2_normalization_three_arm_ablation",
-    "arm": "B_direct_raw_laplacian",
+    "experiment": "future2000x5_gt_adaptive_current_graph_scale_up",
     "capacity": "C2",
     "feature_resolution": "F2",
     "views": 28,
+    "query_graph": "gt_adaptive_sub2_represented_vertex_area",
     "input_resolution": 960,
-    "comparison_type": "strict_paired_training"
+    "comparison_source": "latest_sofa50_direct_raw_pipeline",
+    "distributed_batch_policy": "one_mesh_per_rank_per_optimizer_step"
   }
 }

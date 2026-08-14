@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-08-12, Europe/London.
+Status date: 2026-08-14 09:49 BST, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -49,6 +49,7 @@ $$
 | Query-resolution ablation v2 | 50 objects; 40/5/5 | 14 / 960 | Complete | `multiview_960/query_resolution_ablation_v2` |
 | Synthetic current-query, 14 views | 50 objects, 5 variants each; 200/25/25 variants | 14 / 960 | Complete and copied to HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query, 28 views | 50 objects, 5 variants each; 200/25/25 variants | 28 / 960 | Complete | HPC: `sofa50_synthetic_current_28view_v1` |
+| Future2000 GT-adaptive expanded current | 2,000 objects, 5 variants each; 8000/1000/1000 variants | 28 / 960 | Prepared; primary training running | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete | HPC: `openmvs_texture_test_v6_48view` |
 | Thingi10K50 development set | 50 objects; 40/5/5 | 960 and 1920 variants | Development and smoke runs only | Local `thingi10k50` run directories |
 
@@ -238,6 +239,56 @@ The local [report](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_
 and [25-case overview](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
 are available in the workspace.
 
+### Stage-2 distribution adaptation and Huber saturation
+
+The three matched continuation arms add 20,000 steps to the same frozen Arm-B
+checkpoint. None exceeds the original result:
+
+| Arm, best checkpoint | Raw EPE | Chamfer | Normal | Improved | Retained | Gained | Lost |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Frozen stage-1 B | 0.00300521 | **0.00380687** | **0.942463** | **19/25** | 19/19 | 0/6 | 0/19 |
+| Continue X0 | 0.00369851 | 0.00390257 | 0.931793 | 16/25 | 14/19 | 2/6 | 5/19 |
+| Continue X1 | **0.00349257** | **0.00384032** | **0.936939** | 16/25 | 14/19 | 2/6 | 5/19 |
+| Continue 50/50 | 0.00363284 | 0.00388119 | 0.934341 | 16/25 | 14/19 | 2/6 | 5/19 |
+
+The X1 arm is the best continuation but remains worse than frozen stage-1 in
+mean Chamfer, P2S, normal consistency and improved count. The result rejects
+the current stage-2 recipe, not the general idea of distribution adaptation.
+
+The Arm-B validation Huber diagnostic covers 243,000 vertices. GT raw-
+Laplacian top-1% vertices have `13.071x` the bottom-90% mean raw error,
+`66.049%` any-component saturation, `58.436%` gradient retention, `34.931%`
+of Huber loss and `5.785%` of output-gradient L1. The compression is strongly
+concentrated in the top 1%, rather than uniformly across the full top 10%.
+
+## Future2000 GT-adaptive scale-up
+
+Snapshot: 2026-08-14 09:49 BST. The dataset contains 2,000 source objects and
+five deterministic expanded-current variants per object. Object-level splits
+contain 8,000 train, 1,000 validation and 1,000 test samples. The primary arm
+uses 28 views, GT-adaptive subdivision, C2F2 and the raw current-graph target
+`L_current @ P_proxy`; the paired control predicts direct vertex displacement.
+
+| Step | Train loss | Validation loss | Record |
+|---:|---:|---:|---|
+| 20,000 | 5.30099e-6 | 4.99851e-6 | resumed 200k run |
+| 30,000 | 4.82400e-6 | **4.19731e-6** | current best validation |
+| 32,000 | **4.77203e-6** | — | latest intact checkpoint |
+
+Job 15794 used four L40 GPUs and reached about `3.076` optimiser steps/s, but
+failed at step 32,000 after a persistent DataLoader worker exhausted the
+51,200-descriptor limit. The remaining ranks timed out in NCCL `ALLREDUCE`
+30 minutes later. Training loss fell `9.98%` from 20k to 32k and validation
+improved `16.03%` from 20k to 30k before the infrastructure failure.
+
+The repaired path uses `multiprocessing_sharing_strategy=file_system`, four
+non-persistent workers per rank and the preserved step-32k optimizer state.
+Replacement job 15795 started on four L40 GPUs at 09:41 BST. Jobs 15759 and
+15760 now depend on its successful completion. The existing external-baseline
+array 15791 is incomplete and has a high sample-level failure fraction; no
+external comparison metric is treated as final. New comparison launches are
+local-only through `scripts/local/run_future2000_comparisons.sh`.
+
 ## Other diagnostic experiments
 
 | Diagnostic | Main recorded result | Detailed local report |
@@ -272,7 +323,7 @@ directly with the canonical Sofa50 results.
 | 960 optimized one-epoch smoke | 10 | 0.305584 | Smoke only |
 | 1920 optimized workers-4 one-epoch smoke | 10 | 0.305584 | Smoke only |
 
-## HPC completion record
+## HPC execution record
 
 | Job | Experiment | Final state | Recorded result |
 |---:|---|---|---|
@@ -283,6 +334,9 @@ directly with the canonical Sofa50 results.
 | 15634 | Superseded A/B evaluation | Cancelled | Dependency job never started; not used by the H2 analysis. |
 | 15686 | H2 three-shard evaluation | Completed | Three L40 array tasks completed in about 19 minutes. |
 | 15687 | H2 report merge | Completed | Final JSON/CSV/report merge completed in 15 seconds. |
+| 15794 | Future2000 raw-Laplacian 200k | Failed, recoverable | Reached step 32,000; `Too many open files` caused a downstream NCCL timeout. |
+| 15795 | Future2000 raw-Laplacian 200k resume | Running at snapshot | Four L40 GPUs; resumed the intact step-32k checkpoint with the low-FD worker configuration. |
+| 15791 | Future2000 external diagnostic array | Running at snapshot | Incomplete; high sample-level failure count, so no final baseline result is recorded. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model
@@ -314,3 +368,5 @@ or comparison result.
    or per-variant files.
 3. HPC completion rows record scheduler state; per-run analysis files remain the
    source for scientific metrics.
+4. Rows marked as running are dated snapshots and must not be read as final
+   experiment outcomes.

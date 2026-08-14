@@ -218,6 +218,35 @@ def test_manifest_lazily_loads_variable_topology_splits(tmp_path):
     validate_disjoint_splits(train_dataset, validation_dataset)
 
 
+def test_manifest_dataset_root_preserves_lazy_image_resolution(tmp_path):
+    dataset_root = tmp_path / "source_dataset"
+    dataset_root.mkdir()
+    train = tiny_sample()
+    train["sample_id"] = "portable_train"
+    save_prepared_sample(train, dataset_root / "train.pt")
+    relocated = tmp_path / "relocated"
+    relocated.mkdir()
+    manifest_path = relocated / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_root": str(dataset_root),
+                "samples": [
+                    {
+                        "sample_id": "portable_train",
+                        "path": str(dataset_root / "train.pt"),
+                        "split": "train",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    dataset = PreparedMeshDataset.from_manifest(manifest_path, "train")
+    assert dataset.records[0].dataset_root == dataset_root.resolve()
+
+
 def test_manifest_dataset_loads_each_file_only_once(tmp_path, monkeypatch):
     train = tiny_sample()
     train["sample_id"] = "train"
@@ -625,6 +654,44 @@ def test_cuda_transfer_overlap_requires_prefetchable_host_data():
     )
 
 
+def test_data_loader_supports_low_fd_multiprocessing_sharing_strategy(monkeypatch):
+    settings = multi_trainer._data_loader_settings(
+        {
+            "data_loading": {
+                "num_workers": 4,
+                "multiprocessing_sharing_strategy": "file_system",
+            }
+        }
+    )
+    configured = []
+    monkeypatch.setattr(
+        torch.multiprocessing,
+        "get_sharing_strategy",
+        lambda: "file_descriptor",
+    )
+    monkeypatch.setattr(
+        torch.multiprocessing,
+        "set_sharing_strategy",
+        configured.append,
+    )
+
+    multi_trainer._configure_multiprocessing_sharing(settings)
+
+    assert settings.multiprocessing_sharing_strategy == "file_system"
+    assert configured == ["file_system"]
+
+
+def test_data_loader_rejects_unknown_multiprocessing_sharing_strategy():
+    with pytest.raises(ValueError, match="multiprocessing_sharing_strategy"):
+        multi_trainer._data_loader_settings(
+            {
+                "data_loading": {
+                    "multiprocessing_sharing_strategy": "unknown",
+                }
+            }
+        )
+
+
 def _use_constant_validation(monkeypatch, loss=1.0):
     calls = []
 
@@ -861,6 +928,40 @@ def test_max_optimizer_steps_can_stop_mid_epoch():
     assert result.completed_epochs == 2
     assert result.stop_reason == "max_optimizer_steps"
     assert result.history[-1]["optimizer_steps_this_epoch"] == 1
+
+
+def test_optimizer_step_reporting_writes_live_history(tmp_path, capsys):
+    config = _multi_config()
+    config["multi_object_training"].update(
+        {
+            "epochs": 10,
+            "gradient_accumulation_meshes": 1,
+            "max_optimizer_steps": 4,
+            "report_every_optimizer_steps": 2,
+        }
+    )
+
+    result = train_multi_object(
+        [_triangle_sample("train_a"), _triangle_sample("train_b")],
+        [_triangle_sample("validation")],
+        config,
+        output_dir=tmp_path,
+        progress=True,
+    )
+
+    assert result.optimizer_steps == 4
+    step_history = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )
+    assert [item["optimizer_steps"] for item in step_history] == [2, 4]
+    assert [item["progress_percent"] for item in step_history] == [50.0, 100.0]
+    assert all(math.isfinite(item["train_loss"]) for item in step_history)
+    assert all(item["interval_seconds"] > 0 for item in step_history)
+    assert all(item["validation_loss"] is not None for item in step_history)
+    output = capsys.readouterr().out
+    assert "step progress progress=50.00% step=2" in output
+    assert "step progress progress=100.00% step=4" in output
+    assert "epoch=" not in output
 
 
 def test_early_stopping_counts_validation_events(monkeypatch):

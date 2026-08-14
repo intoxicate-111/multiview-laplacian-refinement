@@ -10,13 +10,17 @@
 
 实验指标与运行状态：[实验数据汇总](docs/EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
+Future2000 本地对比任务：[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
+
+近期 commit 与实验记录：[8 月 4–14 日报告](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
+
 View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
 28-view current-graph target/loss-space 结果：[H2 消融报告](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25 组可视化总览](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
 
 ## 项目状态
 
-状态日期：2026-08-12。
+状态日期：2026-08-14 09:49 BST。
 
 | 组件 | 状态 | 结论 |
 |---|---|---|
@@ -32,11 +36,20 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 | Query-graph resolution 消融 | 已完成 | GT alias、GT-sub1、GT-adaptive 的 best validation loss 分别为 0.0139316、0.0614830、0.0145840；GT-sub2 未训练。 |
 | 28-view + GT-adaptive 组合 | 已完成 | Best validation loss 为 0.0131095；五个 matched validation meshes 上的 raw EPE 为 0.002879。 |
 | 28-view current-graph H2 消融 | 已完成 | 统一 test/recovery 评估中 direct raw-Laplacian training 最优：raw EPE 0.00300525、refined Chamfer 0.00380671，改善 19/25 samples。 |
-| 自动化测试 | 通过 | `test` Conda 环境中为 `219 passed, 3 skipped`。 |
+| 冻结模型三轮递归 | 已完成 | 改善数从 Arm-B 基线 `19/25` 降为 `12/25`、`7/25`、`2/25`；重复 inference 不是有效提升路径。 |
+| Stage-2 分布适配 | 已完成 | X1 训练分支的最好结果为 `16/25`、Chamfer `0.00384032`，未超过冻结 Arm-B 基线。 |
+| Arm-B Huber 饱和诊断 | 已完成 | GT 曲率 top 1% 中，66.049% vertex 至少一个分量饱和，gradient retention 为 58.436%。 |
+| Future2000 GT-adaptive 扩展 | 运行中 | 2,000 个物体 × 5 个固定 current-mesh variants、28 views、C2F2、current-graph raw-Laplacian 监督；job 15795 已从 32,000 step 恢复。 |
+| Future2000 外部基线 | 运行中，尚无结论 | 已存在的分片诊断尚未完成，且样本级失败数较高；新对比任务使用本地脚本，不提前报告外部方法结论。 |
+| 自动化测试 | 当前文档改动对应检查通过 | 84 项相关测试通过，包括双进程 DDP；本地 GPU 被占用，因此 4 项纯 CUDA 用例未复跑。Python、JSON 与 Slurm 静态检查通过。 |
 
 当前模型能够在 GT-query graph 上学习监督微分场，并使用 RGB 信息。从 GT-query
 graph 到 expanded 或 OpenMVS query graph 的迁移未产生几何改善。当前 recovery
 流程未达到端到端 coarse-mesh refinement 目标。
+
+当前扩展实验采用另一个明确的 current-graph 合同：query mesh 与 connectivity
+属于模型输入，监督 raw target 为 `L_current @ P_proxy`；配对分支改为直接预测
+vertex displacement。这些 target 是监督信号，不是额外的 inference 输入。
 
 ## 方法
 
@@ -485,6 +498,39 @@ shards（Slurm array 15686）并行完成，随后由 job 15687 合并。
 [75 个对比 OBJ](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian)
 和[25 张固定相机 GT/COARSE/REFINED 对比图](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian)。
 
+### Stage-2 适配与 Huber 尾部诊断
+
+三个严格配对的 continuation arms 均从同一个 20k Arm-B checkpoint 出发，再训练
+20,000 steps。继续使用原 X0、recovered X1 或 X0/X1 各 50% 的三组最终都只改善
+`16/25` samples。X1 训练分支的 best checkpoint Chamfer 为 `0.00384032`，高于
+冻结 stage-1 的 `0.00380687`；它找回原来 6 个失败样本中的 2 个，却丢失原来
+19 个成功样本中的 5 个。因此额外训练和当前 X1 分布适配都没有超过 stage-1。
+
+本地 validation 诊断按 243,000 个 vertex 的 GT raw-Laplacian magnitude 分组。
+Top 1% 的平均 raw error 是 bottom 90% 的 `13.071x`，其中 `66.049%` 的 vertex
+至少一个 Huber 分量饱和。该组承担 `34.931%` 的 Huber loss，却只贡献 `5.785%`
+的 output-gradient L1，gradient retention 为 `58.436%`。这证明极端尾部存在集中
+梯度压缩；若要建立其与 Chamfer 的完整因果关系，仍需 surface-sensitivity 对照。
+
+### Future2000 GT-adaptive 扩展实验
+
+当前扩展实验包含 2,000 个上游 meshes，每个物体生成 5 个确定性 current-mesh
+variants，按物体执行 80/10/10 split（`8000/1000/1000` samples），使用 28 个标定
+views、GT-adaptive subdivision、C2F2 和 current-graph direct-raw target。HPC 启动
+参数把配置中的开发预算覆盖为 200,000 个 global optimizer steps，并使用四张 L40。
+
+| Step | Rolling train loss | Validation loss |
+|---:|---:|---:|
+| 20,000 | 5.30099e-6 | 4.99851e-6 |
+| 30,000 | 4.82400e-6 | **4.19731e-6** |
+| 32,000 | **4.77203e-6** | — |
+
+Job 15794 在 32,000 step 停止：DataLoader worker 耗尽 51,200 个文件描述符，
+其余 DDP ranks 随后触发 30 分钟 NCCL watchdog timeout。Checkpoint 完整保留。
+修复后使用 PyTorch `file_system` sharing strategy，并在 epoch 边界重建每个 rank
+的 4 个 workers。替代作业 15795 已于 2026-08-14 09:41 BST 在 `gpu-03` 从
+`checkpoint_latest.pt` 恢复。这里记录的是训练中快照，不是最终 geometry 结论。
+
 ## 安装与验证
 
 ```bash
@@ -523,6 +569,12 @@ sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
 
 # 三张 L40 分片执行 H2 评估，并提交依赖合并作业
 bash scripts/HPC/submit_sofa50_synthetic_current_28view_h2_ablation_3gpu.sh
+
+# Future2000 合同审计与四张 L40 current-graph 训练
+sbatch scripts/HPC/audit_future2000_gt_adaptive_2000mesh.slurm
+sbatch scripts/HPC/train_future2000_gt_adaptive_fast_io.slurm \
+  configs/learned_laplacian/train_future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k.json \
+  runs/learned_laplacian/future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k_seed7
 ```
 
 ### 分布式多 GPU 训练
@@ -555,6 +607,12 @@ sbatch --nodes=2 --gres=gpu:L40:4 \
 Global mesh batch 为 `world_size * gradient_accumulation_meshes`。
 `max_optimizer_steps` 统计同步后的 global optimizer updates；world size 增大后，
 每次 update 以及固定 optimizer-step budget 对应的 mesh exposures 数量会增加。
+
+使用 worker 的 lazy-image 训练支持
+`data_loading.multiprocessing_sharing_strategy`。Future2000 使用 `file_system`
+和 non-persistent workers，避免 persistent workers 传递 tensor 时持续累积文件
+描述符。外部方法对比由[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
+管理，不应重新通过 Slurm 提交。
 
 已生成的 14/28/56-view 数据集位于：
 
@@ -619,6 +677,8 @@ runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
 runs/learned_laplacian/sofa50_c2f2_view_query_combo_28_gt_adaptive_20k_seed7_v1
 runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
 runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7
+runs/learned_laplacian/sofa50_synthetic_current_28view_b_stage2_adaptation_20k_seed7
+runs/learned_laplacian/future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k_seed7
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
 ```

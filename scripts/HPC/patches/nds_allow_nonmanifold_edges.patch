@@ -1,0 +1,16 @@
+diff --git a/nds/utils/geometry.py b/nds/utils/geometry.py
+index 01539ce..50a18b2 100644
+--- a/nds/utils/geometry.py
++++ b/nds/utils/geometry.py
+@@ -31,7 +31,10 @@ def find_connected_faces(indices: torch.Tensor, use_legacy_impl: bool = False):
+     # Find unique edges (i.e., with the same vertices) and ensure manifoldness (no more than two faces share the same edge)
+     edges, _ = torch.sort(edges, dim=1)
+     _, unique_index, counts = torch.unique(edges, dim=0, sorted=False, return_inverse=True, return_counts=True)
+-    assert counts.max() == 2
++    # Adaptive input meshes may contain non-manifold edges. Such edges do not
++    # define an unambiguous face pair; the implementations below already keep
++    # only edges with exactly two incident faces, so omit them from this loss.
++    # The input vertices and faces themselves remain unchanged.
+ 
+     if use_legacy_impl:
+         # Legacy implementation that uses a Python loop

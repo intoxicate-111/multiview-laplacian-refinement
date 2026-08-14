@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,6 +29,35 @@ REQUIRED_TENSOR_FIELDS = (
     "laplacian_target",
     "target_confidence",
 )
+
+
+def resolve_lazy_image_paths(
+    image_paths: list[str], dataset_root: str | Path
+) -> list[Path]:
+    """Resolve lazy RGB paths, optionally remapping one root to node-local storage."""
+
+    remap_from_value = os.environ.get("MLR_IMAGE_PATH_REMAP_FROM")
+    remap_to_value = os.environ.get("MLR_IMAGE_PATH_REMAP_TO")
+    if bool(remap_from_value) != bool(remap_to_value):
+        raise ValueError(
+            "MLR_IMAGE_PATH_REMAP_FROM and MLR_IMAGE_PATH_REMAP_TO must be set together."
+        )
+    root = Path(dataset_root).resolve()
+    remap_from = Path(remap_from_value).resolve() if remap_from_value else None
+    remap_to = Path(remap_to_value).resolve() if remap_to_value else None
+    resolved: list[Path] = []
+    for value in image_paths:
+        path = Path(value)
+        path = (path if path.is_absolute() else root / path).resolve()
+        if remap_from is not None and remap_to is not None:
+            try:
+                relative = path.relative_to(remap_from)
+            except ValueError:
+                pass
+            else:
+                path = remap_to / relative
+        resolved.append(path)
+    return resolved
 
 
 def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
@@ -245,10 +275,7 @@ def _materialize_lazy_images(
 ) -> dict[str, Any]:
     from .sample_io import load_and_resize_images
 
-    resolved_paths = [
-        Path(value) if Path(value).is_absolute() else dataset_root / value
-        for value in sample["image_paths"]
-    ]
+    resolved_paths = resolve_lazy_image_paths(sample["image_paths"], dataset_root)
     images, _ = load_and_resize_images(resolved_paths, int(sample["prepared_image_size"]))
     sample["images"] = images.to(map_location)
     sample["_dataset_root"] = str(dataset_root)

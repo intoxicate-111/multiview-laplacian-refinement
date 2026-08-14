@@ -18,7 +18,13 @@ from torch import nn
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from .dataset import validate_sample
+from .dataset import resolve_lazy_image_paths, validate_sample
+from .controlled_displacement import (
+    CURRENT_GRAPH_LAPLACIAN,
+    DIRECT_VERTEX_DISPLACEMENT,
+    displacement_target,
+    prediction_semantics,
+)
 from .distributed import (
     DistributedContext,
     current_distributed_context,
@@ -60,6 +66,7 @@ from .vertex_sampling import sample_training_vertices, vertex_sampling_settings
 OUTPUT_REPRESENTATION_LOSS = "output_representation"
 RAW_LAPLACIAN_LOSS = "raw_laplacian"
 PREDICTION_LOSS_SPACES = {OUTPUT_REPRESENTATION_LOSS, RAW_LAPLACIAN_LOSS}
+MULTIPROCESSING_SHARING_STRATEGIES = {"file_descriptor", "file_system"}
 
 
 @dataclass
@@ -72,10 +79,12 @@ class MultiObjectTrainingResult:
     final_validation_loss: float | None
     per_object_metrics: dict[str, dict[str, dict[str, Any]]]
     optimizer_steps: int
+    continuation_optimizer_steps: int
     device: str
     runtime_seconds: float
     peak_gpu_memory_mb: float | None
     target_mode: str
+    prediction_semantics: str
     prediction_loss_space: str
     static_preparation_seconds: float = 0.0
     device_cache_seconds: float = 0.0
@@ -120,6 +129,7 @@ class _DataLoaderSettings:
     pin_memory: bool
     persistent_workers: bool
     prefetch_factor: int
+    multiprocessing_sharing_strategy: str
     cuda_prefetch: bool
     train_views_per_sample: int | None
     validation_views_per_sample: int | None
@@ -235,6 +245,7 @@ def train_multi_object(
     progress: bool = True,
     initial_loading_seconds: float = 0.0,
     resume_checkpoint: str | Path | None = None,
+    reset_resume_tracking: bool = False,
 ) -> MultiObjectTrainingResult:
     """Train one shared model over ragged mesh samples, one mesh forward at a time."""
 
@@ -252,6 +263,7 @@ def train_multi_object(
     is_main_process = distributed.is_main
     progress = progress and is_main_process
     target_mode, epsilon = _target_settings(config)
+    output_semantics = prediction_semantics(config)
     query_settings = query_augmentation_settings(config)
     local_jitter_settings = local_query_jitter_settings(config)
     vertex_sampling = vertex_sampling_settings(config)
@@ -295,10 +307,17 @@ def train_multi_object(
     max_optimizer_steps = (
         None if max_optimizer_steps_value is None else int(max_optimizer_steps_value)
     )
+    report_every_optimizer_steps_value = multi.get("report_every_optimizer_steps")
+    report_every_optimizer_steps = (
+        None
+        if report_every_optimizer_steps_value is None
+        else int(report_every_optimizer_steps_value)
+    )
     cache_on_device = bool(multi.get("cache_prepared_samples_on_device", False))
     profile_training = bool(multi.get("profile_training", False))
     early_stopping = _early_stopping_settings(multi)
     loader_settings = _data_loader_settings(config)
+    _configure_multiprocessing_sharing(loader_settings)
     if early_stopping.enabled and not validation_samples:
         raise ValueError("Early stopping requires at least one validation sample.")
     if epochs < 1 or accumulation_meshes < 1 or validation_every < 1:
@@ -307,6 +326,10 @@ def train_multi_object(
         )
     if max_optimizer_steps is not None and max_optimizer_steps < 1:
         raise ValueError("max_optimizer_steps must be positive when provided.")
+    if report_every_optimizer_steps is not None and report_every_optimizer_steps < 1:
+        raise ValueError(
+            "report_every_optimizer_steps must be positive when provided."
+        )
     if checkpoint_optimizer_steps and checkpoint_optimizer_steps[0] < 0:
         raise ValueError("checkpoint_optimizer_steps cannot contain negative values.")
     if (
@@ -339,6 +362,8 @@ def train_multi_object(
         torch.cuda.reset_peak_memory_stats(device)
 
     resume_payload: dict[str, Any] | None = None
+    if reset_resume_tracking and resume_checkpoint is None:
+        raise ValueError("reset_resume_tracking requires resume_checkpoint.")
     if resume_checkpoint is not None:
         resume_path = Path(resume_checkpoint)
         resume_payload = torch.load(
@@ -354,6 +379,7 @@ def train_multi_object(
             scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
         if resume_payload.get("scaler_state_dict") is not None:
             scaler.load_state_dict(resume_payload["scaler_state_dict"])
+    initial_learning_rate = float(optimizer.param_groups[0]["lr"])
 
     start_time = time.perf_counter()
     static_start = time.perf_counter()
@@ -461,6 +487,8 @@ def train_multi_object(
             f"pin_memory={loader_settings.pin_memory} "
             f"persistent_workers={loader_settings.persistent_workers} "
             f"prefetch_factor={loader_settings.prefetch_factor} "
+            "multiprocessing_sharing_strategy="
+            f"{loader_settings.multiprocessing_sharing_strategy} "
             f"train_views={loader_settings.train_views_per_sample} "
             f"validation_views={loader_settings.validation_views_per_sample} "
             f"decode_images={decode_images} "
@@ -472,6 +500,16 @@ def train_multi_object(
     resume_state = {} if resume_payload is None else dict(
         resume_payload.get("training_state", {})
     )
+    if reset_resume_tracking:
+        resume_state = {
+            "next_epoch": resume_state.get("next_epoch", 1),
+            "groups_completed_in_epoch": resume_state.get(
+                "groups_completed_in_epoch", 0
+            ),
+            "distributed_world_size": resume_state.get(
+                "distributed_world_size", distributed.world_size
+            ),
+        }
     history: list[dict[str, float | int | None]] = list(
         resume_state.get("history", [])
     )
@@ -486,6 +524,66 @@ def train_multi_object(
     optimizer_steps = int(
         0 if resume_payload is None else resume_payload["optimizer_steps"]
     )
+    starting_optimizer_steps = optimizer_steps
+    step_history: list[dict[str, float | int | None]] = []
+    if output_path is not None:
+        step_history_path = output_path / "training_step_history.json"
+        if step_history_path.is_file():
+            loaded_step_history = json.loads(
+                step_history_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(loaded_step_history, list):
+                raise ValueError("training_step_history.json must contain a list.")
+            step_history = loaded_step_history
+        elif report_every_optimizer_steps is not None:
+            previous_step = 0
+            for epoch_record in history:
+                recorded_step = int(epoch_record.get("optimizer_steps", 0))
+                if recorded_step <= 0:
+                    continue
+                step_count = recorded_step - previous_step
+                train_seconds = float(epoch_record.get("train_seconds", 0.0))
+                step_history.append(
+                    {
+                        "optimizer_steps": recorded_step,
+                        "interval_start_optimizer_steps": previous_step,
+                        "optimizer_steps_in_interval": step_count,
+                        "progress_percent": (
+                            100.0 * recorded_step / max_optimizer_steps
+                            if max_optimizer_steps is not None
+                            else None
+                        ),
+                        "train_loss": epoch_record.get("train_loss"),
+                        "train_objective": epoch_record.get("train_objective"),
+                        "train_confidence_loss": epoch_record.get(
+                            "train_confidence_loss"
+                        ),
+                        "validation_loss": epoch_record.get("validation_loss"),
+                        "validation_seconds": epoch_record.get(
+                            "validation_seconds"
+                        ),
+                        "learning_rate": epoch_record.get("learning_rate"),
+                        "interval_seconds": train_seconds,
+                        "optimizer_steps_per_second": (
+                            step_count / train_seconds if train_seconds > 0 else None
+                        ),
+                    }
+                )
+                previous_step = recorded_step
+            if step_history:
+                _write_step_history(output_path, step_history)
+    next_report_step = (
+        None
+        if report_every_optimizer_steps is None
+        else (
+            optimizer_steps // report_every_optimizer_steps + 1
+        )
+        * report_every_optimizer_steps
+    )
+    report_mesh_loss_tensors: list[torch.Tensor] = []
+    report_objective_tensors: list[torch.Tensor] = []
+    report_confidence_loss_tensors: list[torch.Tensor] = []
+    report_started_at = time.perf_counter()
     start_epoch = int(resume_state.get("next_epoch", 1))
     resume_groups_completed = int(
         resume_state.get("groups_completed_in_epoch", 0)
@@ -715,6 +813,7 @@ def train_multi_object(
                 full_loss_prediction, full_loss_target = _prediction_loss_inputs(
                     prediction_fp32,
                     prepared,
+                    output_semantics=output_semantics,
                     target_mode=target_mode,
                     epsilon=epsilon,
                     prediction_loss_space=prediction_loss_space,
@@ -782,6 +881,10 @@ def train_multi_object(
                     forward_backward_seconds += time.perf_counter() - forward_start
                 mesh_loss_tensors.append(prediction_loss.detach())
                 objective_tensors.append(objective.detach())
+                report_mesh_loss_tensors.append(prediction_loss.detach())
+                report_objective_tensors.append(objective.detach())
+                if confidence_loss is not None:
+                    report_confidence_loss_tensors.append(confidence_loss.detach())
                 visible = model_output.valid_views.any(dim=0)
                 visible_query_count += int(visible.sum().item())
                 invisible_query_count += int((~visible).sum().item())
@@ -804,6 +907,110 @@ def train_multi_object(
             scaler.update()
             optimizer_steps += 1
             groups_completed_in_epoch += 1
+            should_report_step = (
+                next_report_step is not None
+                and (
+                    optimizer_steps >= next_report_step
+                    or (
+                        max_optimizer_steps is not None
+                        and optimizer_steps >= max_optimizer_steps
+                    )
+                )
+            )
+            if should_report_step:
+                rolling_train_loss = reduce_scalar(
+                    float(
+                        torch.stack(report_mesh_loss_tensors)
+                        .mean()
+                        .item()
+                    ),
+                    distributed,
+                    reduction="mean",
+                )
+                rolling_objective = reduce_scalar(
+                    float(
+                        torch.stack(
+                            report_objective_tensors
+                        )
+                        .mean()
+                        .item()
+                    ),
+                    distributed,
+                    reduction="mean",
+                )
+                rolling_confidence_loss = _distributed_optional_mean(
+                    _mean_optional_tensors(
+                        report_confidence_loss_tensors
+                    ),
+                    distributed,
+                )
+                report_seconds = reduce_scalar(
+                    time.perf_counter() - report_started_at,
+                    distributed,
+                    reduction="max",
+                )
+                report_start_step = max(
+                    starting_optimizer_steps,
+                    optimizer_steps - report_every_optimizer_steps,
+                )
+                report_step_count = optimizer_steps - report_start_step
+                progress_percent = (
+                    100.0 * optimizer_steps / max_optimizer_steps
+                    if max_optimizer_steps is not None
+                    else None
+                )
+                report_record: dict[str, float | int | None] = {
+                    "optimizer_steps": optimizer_steps,
+                    "interval_start_optimizer_steps": report_start_step,
+                    "optimizer_steps_in_interval": report_step_count,
+                    "progress_percent": progress_percent,
+                    "train_loss": rolling_train_loss,
+                    "train_objective": rolling_objective,
+                    "train_confidence_loss": rolling_confidence_loss,
+                    "validation_loss": None,
+                    "validation_seconds": None,
+                    "learning_rate": float(optimizer.param_groups[0]["lr"]),
+                    "interval_seconds": report_seconds,
+                    "optimizer_steps_per_second": (
+                        report_step_count / report_seconds
+                        if report_seconds > 0
+                        else None
+                    ),
+                }
+                if output_path is not None:
+                    step_history.append(report_record)
+                    _write_step_history(output_path, step_history)
+                if progress:
+                    progress_text = (
+                        "n/a"
+                        if progress_percent is None
+                        else f"{progress_percent:.2f}%"
+                    )
+                    confidence_text = (
+                        "n/a"
+                        if rolling_confidence_loss is None
+                        else f"{rolling_confidence_loss:.8f}"
+                    )
+                    print(
+                        "step progress "
+                        f"progress={progress_text} "
+                        f"step={optimizer_steps} "
+                        f"train={rolling_train_loss:.8f} "
+                        f"objective={rolling_objective:.8f} "
+                        f"confidence={confidence_text} "
+                        f"lr={optimizer.param_groups[0]['lr']:.8e} "
+                        f"seconds={report_seconds:.2f}",
+                        flush=True,
+                    )
+                report_mesh_loss_tensors.clear()
+                report_objective_tensors.clear()
+                report_confidence_loss_tensors.clear()
+                report_started_at = time.perf_counter()
+                while (
+                    next_report_step is not None
+                    and next_report_step <= optimizer_steps
+                ):
+                    next_report_step += report_every_optimizer_steps
             if (
                 output_path is not None
                 and optimizer_steps in checkpoint_optimizer_steps
@@ -993,6 +1200,29 @@ def train_multi_object(
                 reduction="max",
             )
             epoch_validation_seconds.append(validation_seconds)
+            if (
+                output_path is not None
+                and step_history
+                and step_history[-1]["optimizer_steps"] == optimizer_steps
+            ):
+                step_history[-1]["validation_loss"] = validation_loss
+                step_history[-1]["validation_seconds"] = validation_seconds
+                _write_step_history(output_path, step_history)
+                if progress:
+                    progress_percent = step_history[-1]["progress_percent"]
+                    progress_text = (
+                        "n/a"
+                        if progress_percent is None
+                        else f"{float(progress_percent):.2f}%"
+                    )
+                    print(
+                        "step validation "
+                        f"progress={progress_text} "
+                        f"step={optimizer_steps} "
+                        f"validation={validation_loss:.8f} "
+                        f"seconds={validation_seconds:.2f}",
+                        flush=True,
+                    )
         selection_loss = validation_loss if prepared_validation else train_loss
         if selection_loss is not None and selection_loss < best_selection_loss:
             best_selection_loss = selection_loss
@@ -1104,7 +1334,7 @@ def train_multi_object(
                 early_stopping_best=early_stopping_best,
                 early_stopping_bad_validations=early_stopping_bad_validations,
             )
-        if progress:
+        if progress and report_every_optimizer_steps is None:
             val_text = "n/a" if validation_loss is None else f"{validation_loss:.8f}"
             print(
                 f"epoch={epoch:04d} train={train_loss:.8f} validation={val_text} "
@@ -1271,8 +1501,11 @@ def train_multi_object(
     )
     mean_train_views_per_sample = float(np.mean(epoch_mean_used_view_count))
     mean_epoch_decoded_image_bytes = float(np.mean(epoch_decoded_image_bytes))
+    continuation_optimizer_steps = optimizer_steps - starting_optimizer_steps
     mean_optimizer_step_seconds = (
-        float(sum(epoch_train_seconds) / optimizer_steps) if optimizer_steps else 0.0
+        float(sum(epoch_train_seconds) / continuation_optimizer_steps)
+        if continuation_optimizer_steps
+        else 0.0
     )
     final_learning_rate = float(optimizer.param_groups[0]["lr"])
     peak_cpu_memory_mb = _peak_cpu_memory_mb()
@@ -1315,9 +1548,12 @@ def train_multi_object(
             "final_train_loss": final_train_loss,
             "final_validation_loss": final_validation_loss,
             "optimizer_steps": optimizer_steps,
+            "starting_optimizer_steps": starting_optimizer_steps,
+            "continuation_optimizer_steps": continuation_optimizer_steps,
             "train_meshes": len(prepared_train),
             "validation_meshes": len(prepared_validation),
             "target_mode": target_mode,
+            "prediction_semantics": output_semantics,
             "prediction_loss_space": prediction_loss_space,
             "target_scaling_epsilon": epsilon,
             "device": str(device),
@@ -1361,10 +1597,12 @@ def train_multi_object(
         final_validation_loss=final_validation_loss,
         per_object_metrics=per_object_metrics,
         optimizer_steps=optimizer_steps,
+        continuation_optimizer_steps=continuation_optimizer_steps,
         device=str(device),
         runtime_seconds=runtime_seconds,
         peak_gpu_memory_mb=peak_gpu_memory_mb,
         target_mode=target_mode,
+        prediction_semantics=output_semantics,
         prediction_loss_space=prediction_loss_space,
         static_preparation_seconds=static_preparation_seconds,
         device_cache_seconds=device_cache_seconds,
@@ -1389,6 +1627,14 @@ def train_multi_object(
         mean_epoch_decoded_image_bytes=mean_epoch_decoded_image_bytes,
         distributed_world_size=distributed.world_size,
         cuda_transfer_overlap_enabled=cuda_transfer_overlap_enabled,
+    )
+
+
+def _write_step_history(
+    output_path: Path, history: list[dict[str, float | int | None]]
+) -> None:
+    (output_path / "training_step_history.json").write_text(
+        json.dumps(history, indent=2) + "\n", encoding="utf-8"
     )
 
 
@@ -1473,6 +1719,7 @@ def _prediction_loss_inputs(
     prediction: torch.Tensor,
     prepared: _PreparedObject,
     *,
+    output_semantics: str = CURRENT_GRAPH_LAPLACIAN,
     target_mode: str,
     epsilon: float,
     prediction_loss_space: str,
@@ -1485,6 +1732,15 @@ def _prediction_loss_inputs(
     the stored current-graph target.
     """
 
+    if output_semantics == DIRECT_VERTEX_DISPLACEMENT:
+        if prediction_loss_space != OUTPUT_REPRESENTATION_LOSS:
+            raise ValueError(
+                "direct_vertex_displacement requires "
+                "training.prediction_loss_space='output_representation'."
+            )
+        return prediction, prepared.training_target.float()
+    if output_semantics != CURRENT_GRAPH_LAPLACIAN:
+        raise ValueError(f"Unsupported prediction semantics: {output_semantics!r}.")
     if prediction_loss_space == OUTPUT_REPRESENTATION_LOSS:
         return prediction, prepared.training_target.float()
     if prediction_loss_space != RAW_LAPLACIAN_LOSS:
@@ -1567,8 +1823,16 @@ def _prepare_object_static(
     if local_query_jitter_settings(config).enabled:
         validate_local_query_jitter_contract(static_sample)
     target_mode, epsilon = _target_settings(config)
-    target = static_sample["raw_laplacian_target"]
-    if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
+    output_semantics = prediction_semantics(config)
+    target = (
+        displacement_target(static_sample)
+        if output_semantics == DIRECT_VERTEX_DISPLACEMENT
+        else static_sample["raw_laplacian_target"]
+    )
+    if (
+        output_semantics == CURRENT_GRAPH_LAPLACIAN
+        and target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN
+    ):
         prepared_epsilon = float(
             static_sample.get("metadata", {}).get("edge_scale_epsilon", 1e-12)
         )
@@ -1592,7 +1856,11 @@ def _prepare_object_static(
         clipped_count = int(clipped.sum().item())
         factors = (clip_max_norm / magnitudes.clamp_min(1e-12)).clamp_max(1.0)
         target = target * factors.unsqueeze(-1)
-    raw_target = static_sample["raw_laplacian_target"]
+    raw_target = (
+        static_sample["raw_laplacian_target"]
+        if output_semantics == CURRENT_GRAPH_LAPLACIAN
+        else None
+    )
     expert_config = config.get("model", {}).get("oracle_residual_expert", {})
     if not isinstance(expert_config, Mapping):
         raise ValueError("model.oracle_residual_expert must be an object.")
@@ -1878,10 +2146,9 @@ def _materialize_prepared_images(
     if "images" in prepared.sample or not prepared.sample.get("image_paths"):
         return prepared
     dataset_root = Path(str(prepared.sample["_dataset_root"]))
-    image_paths = [
-        Path(value) if Path(value).is_absolute() else dataset_root / value
-        for value in prepared.sample["image_paths"]
-    ]
+    image_paths = resolve_lazy_image_paths(
+        prepared.sample["image_paths"], dataset_root
+    )
     decode_start = time.perf_counter() if profile_loading else 0.0
     images, _ = load_and_resize_images(
         image_paths,
@@ -2066,6 +2333,9 @@ def _data_loader_settings(config: Mapping[str, Any]) -> _DataLoaderSettings:
     prefetch_factor = int(loading.get("prefetch_factor", 2))
     pin_memory = bool(loading.get("pin_memory", False))
     persistent_workers = bool(loading.get("persistent_workers", False))
+    multiprocessing_sharing_strategy = str(
+        loading.get("multiprocessing_sharing_strategy", "file_descriptor")
+    )
     cuda_prefetch = bool(loading.get("cuda_prefetch", True))
     train_views_per_sample = _optional_positive_int(
         loading.get("train_views_per_sample"), "data_loading.train_views_per_sample"
@@ -2082,15 +2352,36 @@ def _data_loader_settings(config: Mapping[str, Any]) -> _DataLoaderSettings:
         raise ValueError(
             "data_loading.persistent_workers requires data_loading.num_workers > 0."
         )
+    if multiprocessing_sharing_strategy not in MULTIPROCESSING_SHARING_STRATEGIES:
+        allowed = ", ".join(sorted(MULTIPROCESSING_SHARING_STRATEGIES))
+        raise ValueError(
+            "data_loading.multiprocessing_sharing_strategy must be one of "
+            f"{allowed}."
+        )
     return _DataLoaderSettings(
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=persistent_workers,
         prefetch_factor=prefetch_factor,
+        multiprocessing_sharing_strategy=multiprocessing_sharing_strategy,
         cuda_prefetch=cuda_prefetch,
         train_views_per_sample=train_views_per_sample,
         validation_views_per_sample=validation_views_per_sample,
     )
+
+
+def _configure_multiprocessing_sharing(settings: _DataLoaderSettings) -> None:
+    """Avoid per-tensor file descriptor growth in worker-backed DataLoaders."""
+
+    if settings.num_workers == 0:
+        return
+    if (
+        torch.multiprocessing.get_sharing_strategy()
+        != settings.multiprocessing_sharing_strategy
+    ):
+        torch.multiprocessing.set_sharing_strategy(
+            settings.multiprocessing_sharing_strategy
+        )
 
 
 def _cuda_transfer_overlap_enabled(
@@ -2340,6 +2631,7 @@ def _evaluate_dataset(
         base_model.input_mode != "coarse_only" and not base_model.zero_images
     )
     target_mode, epsilon = _target_settings(config)
+    output_semantics = prediction_semantics(config)
     prediction_loss_space = _prediction_loss_space(config.get("training", {}))
     confidence_settings = _confidence_settings(config)
     losses = []
@@ -2395,6 +2687,7 @@ def _evaluate_dataset(
         loss_prediction, loss_target = _prediction_loss_inputs(
             prediction,
             prepared,
+            output_semantics=output_semantics,
             target_mode=target_mode,
             epsilon=epsilon,
             prediction_loss_space=prediction_loss_space,
@@ -2418,19 +2711,23 @@ def _evaluate_dataset(
         target_metrics = laplacian_prediction_metrics(
             prediction, prepared.training_target.float(), valid_mask=valid_mask
         )
-        if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
+        if output_semantics == DIRECT_VERTEX_DISPLACEMENT:
+            raw_prediction = prediction
+            raw_metrics = None
+        elif target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
             raw_prediction = denormalize_laplacian_by_edge_scale(
                 prediction, prepared.sample["local_edge_length"], eps=epsilon
             )
         else:
             raw_prediction = prediction
-        if prepared.raw_target is None:
-            raise ValueError("Evaluation requires an explicit raw Laplacian target.")
-        raw_metrics = laplacian_prediction_metrics(
-            raw_prediction,
-            prepared.raw_target.to(device=raw_prediction.device),
-            valid_mask=valid_mask,
-        )
+        if output_semantics == CURRENT_GRAPH_LAPLACIAN:
+            if prepared.raw_target is None:
+                raise ValueError("Evaluation requires an explicit raw Laplacian target.")
+            raw_metrics = laplacian_prediction_metrics(
+                raw_prediction,
+                prepared.raw_target.to(device=raw_prediction.device),
+                valid_mask=valid_mask,
+            )
         raw_prediction_cpu = raw_prediction.detach().cpu()
         sample_id = str(prepared.sample["sample_id"])
         if sample_id in metrics:
@@ -2450,6 +2747,7 @@ def _evaluate_dataset(
         visible = model_output.valid_views.any(dim=0)
         metrics[sample_id] = {
             "loss": loss_value,
+            "prediction_semantics": output_semantics,
             "prediction_loss_space": prediction_loss_space,
             "exact_query_loss": None if exact_loss is None else float(exact_loss.item()),
             "perturbed_query_loss": (
@@ -2474,10 +2772,16 @@ def _evaluate_dataset(
                 prediction_dir / f"{safe_id}_target_space_delta.npy",
                 prediction.detach().cpu().numpy(),
             )
-            np.save(
-                prediction_dir / f"{safe_id}_raw_delta.npy",
-                raw_prediction_cpu.numpy(),
-            )
+            if output_semantics == DIRECT_VERTEX_DISPLACEMENT:
+                np.save(
+                    prediction_dir / f"{safe_id}_displacement.npy",
+                    raw_prediction_cpu.numpy(),
+                )
+            else:
+                np.save(
+                    prediction_dir / f"{safe_id}_raw_delta.npy",
+                    raw_prediction_cpu.numpy(),
+                )
             if confidence_prediction_cpu is not None:
                 np.save(
                     prediction_dir / f"{safe_id}_confidence.npy",

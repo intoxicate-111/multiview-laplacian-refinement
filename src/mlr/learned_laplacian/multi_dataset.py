@@ -40,6 +40,16 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping) or not isinstance(payload.get("samples"), list):
             raise ValueError("Manifest must be an object containing a 'samples' list.")
+        dataset_root_value = payload.get("dataset_root")
+        if dataset_root_value is None:
+            dataset_root = manifest_path.parent.resolve()
+        elif not isinstance(dataset_root_value, str) or not dataset_root_value:
+            raise ValueError("Manifest dataset_root must be a non-empty string.")
+        else:
+            dataset_root_path = Path(dataset_root_value)
+            if not dataset_root_path.is_absolute():
+                dataset_root_path = manifest_path.parent / dataset_root_path
+            dataset_root = dataset_root_path.resolve()
         records: list[PreparedMeshRecord] = []
         for index, item in enumerate(payload["samples"]):
             if not isinstance(item, Mapping):
@@ -63,7 +73,7 @@ class PreparedMeshDataset(Sequence[dict[str, Any]]):
                     path=path.resolve(),
                     split=item_split,
                     sample_id=sample_id,
-                    dataset_root=manifest_path.parent.resolve(),
+                    dataset_root=dataset_root,
                 )
             )
         if not records:

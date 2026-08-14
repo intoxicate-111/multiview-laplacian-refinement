@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import hashlib
 import json
 import sys
 import time
@@ -39,6 +40,13 @@ def main() -> int:
     parser.add_argument("--zero-images", action="store_true")
     parser.add_argument("--train-views-per-sample", type=int)
     parser.add_argument("--validation-views-per-sample", type=int)
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--prefetch-factor", type=int)
+    parser.add_argument(
+        "--persistent-workers",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     parser.add_argument(
         "--epochs", type=int, help="Override multi_object_training.epochs."
     )
@@ -48,9 +56,27 @@ def main() -> int:
         help="Override multi_object_training.max_optimizer_steps.",
     )
     parser.add_argument(
+        "--gradient-accumulation-meshes",
+        type=int,
+        help="Override multi_object_training.gradient_accumulation_meshes.",
+    )
+    parser.add_argument(
+        "--report-every-optimizer-steps",
+        type=int,
+        help="Write and print rolling training metrics at this optimizer-step interval.",
+    )
+    parser.add_argument(
         "--resume-checkpoint",
         type=Path,
         help="Resume a canonical checkpoint_latest.pt or optimizer-step checkpoint.",
+    )
+    parser.add_argument(
+        "--reset-resume-tracking",
+        action="store_true",
+        help=(
+            "Keep resumed model/optimizer/scheduler/scaler and global step, but reset "
+            "run-local history and best-validation tracking for a continuation stage."
+        ),
     )
     args = parser.parse_args()
 
@@ -63,9 +89,25 @@ def main() -> int:
             if argument < 1:
                 parser.error(f"--{key.replace('_', '-')} must be positive")
             config.setdefault("data_loading", {})[key] = argument
+    if args.num_workers is not None:
+        if args.num_workers < 0:
+            parser.error("--num-workers must be non-negative")
+        config.setdefault("data_loading", {})["num_workers"] = args.num_workers
+    if args.prefetch_factor is not None:
+        if args.prefetch_factor < 1:
+            parser.error("--prefetch-factor must be positive")
+        config.setdefault("data_loading", {})[
+            "prefetch_factor"
+        ] = args.prefetch_factor
+    if args.persistent_workers is not None:
+        config.setdefault("data_loading", {})[
+            "persistent_workers"
+        ] = args.persistent_workers
     for argument, key in (
         (args.epochs, "epochs"),
         (args.max_optimizer_steps, "max_optimizer_steps"),
+        (args.gradient_accumulation_meshes, "gradient_accumulation_meshes"),
+        (args.report_every_optimizer_steps, "report_every_optimizer_steps"),
     ):
         if argument is not None:
             if argument < 1:
@@ -76,7 +118,13 @@ def main() -> int:
     try:
         _validate_expected_split_counts(args.manifest, config)
         if distributed.is_main:
-            _write_run_metadata(args.output_dir, args.manifest, config)
+            _write_run_metadata(
+                args.output_dir,
+                args.manifest,
+                config,
+                resume_checkpoint=args.resume_checkpoint,
+                reset_resume_tracking=args.reset_resume_tracking,
+            )
         distributed_barrier(distributed)
 
         train_dataset = PreparedMeshDataset.from_manifest(args.manifest, "train")
@@ -107,6 +155,7 @@ def main() -> int:
             zero_images=args.zero_images,
             initial_loading_seconds=loading_seconds,
             resume_checkpoint=args.resume_checkpoint,
+            reset_resume_tracking=args.reset_resume_tracking,
         )
         if distributed.is_main:
             summary = {
@@ -117,7 +166,9 @@ def main() -> int:
                 "final_train_loss": result.final_train_loss,
                 "final_validation_loss": result.final_validation_loss,
                 "optimizer_steps": result.optimizer_steps,
+                "continuation_optimizer_steps": result.continuation_optimizer_steps,
                 "target_mode": result.target_mode,
+                "prediction_semantics": result.prediction_semantics,
                 "prediction_loss_space": result.prediction_loss_space,
                 "device": result.device,
                 "distributed_world_size": result.distributed_world_size,
@@ -182,13 +233,21 @@ def _validate_expected_split_counts(manifest_path: Path, config: dict) -> None:
         raise ValueError(f"Manifest split counts do not match config ({details}).")
 
 
-def _write_run_metadata(output_dir: Path, manifest_path: Path, config: dict) -> None:
+def _write_run_metadata(
+    output_dir: Path,
+    manifest_path: Path,
+    config: dict,
+    *,
+    resume_checkpoint: Path | None = None,
+    reset_resume_tracking: bool = False,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_path.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(manifest, dict) or not isinstance(manifest.get("samples"), list):
         raise ValueError("Manifest must be an object containing a 'samples' list.")
     portable_manifest = dict(manifest)
+    portable_manifest["dataset_root"] = str(manifest_path.parent.resolve())
     portable_samples = []
     for item in manifest["samples"]:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
@@ -203,12 +262,23 @@ def _write_run_metadata(output_dir: Path, manifest_path: Path, config: dict) -> 
     (output_dir / "config.json").write_text(
         json.dumps(config, indent=2) + "\n", encoding="utf-8"
     )
+    resume_path = None if resume_checkpoint is None else resume_checkpoint.resolve()
+    resume_sha256 = None
+    if resume_path is not None:
+        digest = hashlib.sha256()
+        with resume_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        resume_sha256 = digest.hexdigest()
     (output_dir / "run_config.json").write_text(
         json.dumps(
             {
                 "experiment_config": config,
                 "manifest_path": "dataset_manifest.json",
                 "source_manifest": str(manifest_path),
+                "resume_checkpoint": None if resume_path is None else str(resume_path),
+                "resume_checkpoint_sha256": resume_sha256,
+                "reset_resume_tracking": bool(reset_resume_tracking),
             },
             indent=2,
         )

@@ -10,13 +10,17 @@ Visibility and recovery: [Visibility-aware recovery report](docs/VISIBILITY_AWAR
 
 Experiment metrics and run status: [Experiment data summary](docs/EXPERIMENT_DATA_SUMMARY.md)
 
+Future2000 local comparisons: [Local task guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
+
+Recent commit and experiment record: [4–14 August report](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
+
 View-count and query-resolution results: [Ablation report](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
 28-view current-graph target/loss-space results: [H2 ablation report](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25-case visual overview](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
 
 ## Project status
 
-Status date: 2026-08-12.
+Status date: 2026-08-14 09:49 BST.
 
 | Component | State | Conclusion |
 |---|---|---|
@@ -32,12 +36,23 @@ Status date: 2026-08-12.
 | Query-graph resolution ablation | Complete | Best validation losses are 0.0139316 for the GT alias, 0.0614830 for GT-sub1 and 0.0145840 for GT-adaptive. GT-sub2 was excluded from training. |
 | 28-view + GT-adaptive combination | Complete | Best validation loss is 0.0131095; raw EPE is 0.002879 on five matched validation meshes. |
 | 28-view current-graph H2 ablation | Complete | Direct raw-Laplacian training is best in the unified test/recovery evaluation: raw EPE 0.00300525, refined Chamfer 0.00380671 and 19/25 improved samples. |
-| Automated tests | Passing | `219 passed, 3 skipped` in the `test` Conda environment. |
+| Three-round frozen-model recursion | Complete | Improvement count falls from the Arm-B baseline `19/25` to `12/25`, `7/25` and `2/25`; repeated inference is not a valid improvement path. |
+| Stage-2 distribution adaptation | Complete | The best X1-trained arm reaches `16/25` and Chamfer `0.00384032`; it does not exceed the frozen Arm-B baseline. |
+| Arm-B Huber saturation diagnostic | Complete | In the top 1% GT-curvature group, 66.049% of vertices have at least one saturated component and gradient retention is 58.436%. |
+| Future2000 GT-adaptive scale-up | Running | 2,000 objects × 5 fixed current-mesh variants, 28 views, C2F2 and current-graph raw-Laplacian supervision. Job 15795 resumed from step 32,000 after the input-worker fix. |
+| Future2000 external baselines | Running, not final | The existing sharded diagnostic is incomplete and has a high sample-level failure count; no external-method conclusion is reported yet. New comparison launches use the local task scripts. |
+| Automated tests | Passing for the documented changes | 84 relevant tests pass, including the two-process DDP test; four local CUDA-only cases were not rerun because the local GPU was occupied. Python, JSON and Slurm static checks pass. |
 
 The implemented model learns the supervised differential field on GT-query
 graphs and uses RGB information. Transfer from GT-query graphs to expanded or
 OpenMVS query graphs has not produced a geometry improvement. The end-to-end
 coarse-mesh refinement objective is not met by the current recovery path.
+
+The current scale-up experiment uses a different, explicit current-graph
+contract: the query mesh and connectivity are model inputs and the supervised
+raw target is `L_current @ P_proxy`. A paired branch predicts direct vertex
+displacement instead. These targets are supervision, not additional inference
+inputs.
 
 ## Method
 
@@ -510,6 +525,46 @@ The local result bundle includes the [full report](runs/learned_laplacian/sofa50
 [75 comparison OBJ files](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian)
 and [25 fixed-camera GT/COARSE/REFINED images](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian).
 
+### Stage-2 adaptation and Huber-tail diagnostics
+
+Three matched 20,000-step continuation arms started from the same 20k Arm-B
+checkpoint. Continuing on original X0 inputs, recovered X1 inputs, or a 50/50
+mixture all finish at `16/25` improved samples. The best X1-trained checkpoint
+has Chamfer `0.00384032`, versus `0.00380687` for the frozen stage-1 model; it
+gains two of the six original failures but loses five of the original nineteen
+successes. Extra training and X1 distribution adaptation therefore do not beat
+the stage-1 result.
+
+A local validation diagnostic over 243,000 vertices groups errors by GT raw
+Laplacian magnitude. The top 1% has `13.071x` the bottom-90% mean raw error;
+`66.049%` of those vertices have at least one Huber-saturated component. This
+group contributes `34.931%` of Huber loss but only `5.785%` of output-gradient
+L1, with `58.436%` gradient retention. The result identifies concentrated
+tail-gradient compression; linking it causally to Chamfer still requires a
+surface-sensitivity experiment.
+
+### Future2000 GT-adaptive scale-up
+
+The running scale-up uses 2,000 upstream meshes, five deterministic current-mesh
+variants per object, an object-level 80/10/10 split (`8000/1000/1000` samples),
+28 calibrated views, GT-adaptive subdivision, C2F2 and the current-graph
+direct-raw target. The launch overrides the stored development budget to
+200,000 global optimiser steps on four L40 GPUs.
+
+| Step | Rolling train loss | Validation loss |
+|---:|---:|---:|
+| 20,000 | 5.30099e-6 | 4.99851e-6 |
+| 30,000 | 4.82400e-6 | **4.19731e-6** |
+| 32,000 | **4.77203e-6** | — |
+
+Job 15794 stopped at step 32,000 after a DataLoader worker exhausted 51,200
+file descriptors; the other DDP ranks then reached the 30-minute NCCL watchdog
+timeout. The checkpoint is intact. The fix selects PyTorch's `file_system`
+sharing strategy and recreates four workers per rank at epoch boundaries.
+Replacement job 15795 resumed from `checkpoint_latest.pt` on `gpu-03` at
+09:41 BST on 14 August 2026. This is a running training snapshot, not a final
+geometry result.
+
 ## Installation and verification
 
 ```bash
@@ -549,6 +604,12 @@ sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
 
 # Three-L40 sharded H2 evaluation and dependent merge
 bash scripts/HPC/submit_sofa50_synthetic_current_28view_h2_ablation_3gpu.sh
+
+# Future2000 contract audit and four-L40 current-graph training
+sbatch scripts/HPC/audit_future2000_gt_adaptive_2000mesh.slurm
+sbatch scripts/HPC/train_future2000_gt_adaptive_fast_io.slurm \
+  configs/learned_laplacian/train_future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k.json \
+  runs/learned_laplacian/future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k_seed7
 ```
 
 ### Distributed multi-GPU training
@@ -583,6 +644,13 @@ The global mesh batch is `world_size * gradient_accumulation_meshes`.
 `max_optimizer_steps` counts synchronized global optimizer updates; increasing
 the world size therefore increases the number of mesh exposures per update and
 per fixed optimizer-step budget.
+
+Worker-backed lazy-image training accepts
+`data_loading.multiprocessing_sharing_strategy`. The Future2000 run uses
+`file_system` and non-persistent workers to prevent the per-tensor descriptor
+growth seen with persistent workers. External-method comparison jobs are
+documented in the [local runner guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
+and should not be resubmitted through Slurm.
 
 The generated 14/28/56-view dataset is located at:
 
@@ -652,6 +720,8 @@ runs/learned_laplacian/sofa50_c2f2_960_vs_1920_full
 runs/learned_laplacian/sofa50_c2f2_view_query_combo_28_gt_adaptive_20k_seed7_v1
 runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_seed7
 runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7
+runs/learned_laplacian/sofa50_synthetic_current_28view_b_stage2_adaptation_20k_seed7
+runs/learned_laplacian/future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k_seed7
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480
 runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recovery1000
 ```

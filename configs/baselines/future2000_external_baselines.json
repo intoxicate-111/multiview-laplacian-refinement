@@ -1,0 +1,115 @@
+{
+  "experiment": "future2000_gt_adaptive_2000mesh_external_baselines",
+  "test_samples": 1000,
+  "input_contract": "same current mesh, same 28 RGB images, same cameras, no GT mesh",
+  "no_test_tuning": true,
+  "mask_source": "foreground inferred from the fixed black RGB background; no GT geometry",
+  "environment_pins": {
+    "torch_runtime": "2.5.1+cu124 (cluster driver-compatible replacement for packages requesting newer CUDA)",
+    "nvdiffrast_nds_v0.3.5": "20c4135fda78ae29d7658bea28b6c1d5b5e103e5",
+    "nvdiffrast_other": "253ac4fcea7de5f396371124af597e6cc957bfae",
+    "pytorch3d": "3143b3baf8ef8b1023ed76f225af59e2e8a71e06",
+    "tiny_cuda_nn": "749dd70c5afc5a9dadb85e5652ed65d55e0ba187",
+    "meshzoo": "c2767359737f4a76a4f65da4bd4a694d61303f7b"
+  },
+  "methods": {
+    "openmvs_refinemesh": {
+      "repository": "https://github.com/cdcseacave/openMVS",
+      "commit": "b2f21a032376972dcafc3a402a4618ecd6f35b73",
+      "arguments": {
+        "resolution_level": 0,
+        "min_resolution": 640,
+        "max_views": 8,
+        "decimate": 1.0,
+        "close_holes": 0,
+        "ensure_edge_size": 1,
+        "max_face_area": 16,
+        "scales": 2,
+        "scale_step": 0.5,
+        "regularity_weight": 0.2,
+        "rigidity_elasticity_ratio": 0.9,
+        "gradient_step": 45.05,
+        "reduce_memory": 1
+      },
+      "initial_mesh_argument": "--mesh-file initial_current.ply"
+    },
+    "nds": {
+      "repository": "https://github.com/fraunhoferhhi/neural-deferred-shading",
+      "commit": "760e4549f59adaed9adf1bd705599786a00ba6b8",
+      "arguments": {
+        "iterations": 2000,
+        "image_scale": 1,
+        "lr_vertices": 0.001,
+        "lr_shader": 0.001,
+        "upsample_iterations": [500, 1000, 1500],
+        "weight_mask": 2.0,
+        "weight_normal": 0.1,
+        "weight_laplacian": 40.0,
+        "weight_shading": 1.0
+      },
+      "initial_mesh_argument": "--initial_mesh initial_current.obj"
+    },
+    "nerf2mesh": {
+      "repository": "https://github.com/ashawkey/nerf2mesh",
+      "commit": "ec7f930ccf768ba4d6e602360b4a6ff0300fe9c8",
+      "stage0_arguments": {
+        "stage": 0,
+        "iters": 10000,
+        "bound": 1,
+        "scale": 1,
+        "dt_gamma": 0,
+        "sdf": true,
+        "decimate_target": 100000,
+        "lambda_tv": 1e-8
+      },
+      "stage1_arguments": {
+        "stage": 1,
+        "iters": 5000,
+        "bound": 1,
+        "scale": 1,
+        "sdf": true,
+        "lambda_normal": 0.01,
+        "refine_remesh_size": 0.01
+      },
+      "initial_mesh_argument": "--mesh initial_current.ply",
+      "note": "Official stage 1 also loads the same-scene stage-0 NeRF checkpoint."
+    },
+    "exmesh": {
+      "repository": "https://github.com/Fan-Treasure/ExMesh",
+      "commit": "09950d283fc5372a09079e30c88d998f1c40b2d0",
+      "arguments": {
+        "iterations": 10000,
+        "position_lr_max_steps": 10000,
+        "feature_lr": 0.0025,
+        "lambda_dssim": 0.2,
+        "split_from_iter": 1000,
+        "split_until_iter": 7000,
+        "lambda_dist": 0.01,
+        "lambda_smooth": 3000,
+        "lambda_deviation": 10000,
+        "lambda_silhouette": 0.005,
+        "lambda_depth": 0.003
+      },
+      "initial_mesh_path": "<scene>/mesh.ply",
+      "required_image_only_prior": "Depth Anything 3 depth for the same 28 RGB views",
+      "depth_prior": {
+        "repository": "https://github.com/ByteDance-Seed/depth-anything-3",
+        "commit": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
+        "model": "depth-anything/DA3NESTED-GIANT-LARGE",
+        "input_contract": "same 28 RGB images and cameras only; no GT"
+      }
+    }
+  },
+  "evaluation": {
+    "surface_samples": 3000,
+    "surface_sampling_seed": 7,
+    "fscore_threshold": 0.01,
+    "metrics": [
+      "chamfer",
+      "point_to_surface_mean",
+      "point_to_surface_p95",
+      "fscore",
+      "normal_consistency"
+    ]
+  }
+}

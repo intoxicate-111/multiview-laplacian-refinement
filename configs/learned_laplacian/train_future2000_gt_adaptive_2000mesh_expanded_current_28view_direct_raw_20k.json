@@ -1,11 +1,11 @@
 {
-  "method": "synthetic_current_28view_h2_normalization_ablation",
+  "method": "future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k",
   "seed": 7,
   "device": "cuda",
   "dataset": {
-    "name": "Sofa50SyntheticCurrent28View",
-    "expected_split_counts": {"train": 200, "validation": 25, "test": 25},
-    "objects": 50,
+    "name": "Future2000GTAdaptiveExpandedCurrent28View",
+    "expected_split_counts": {"train": 8000, "validation": 1000, "test": 1000},
+    "objects": 2000,
     "variants_per_object": 5,
     "object_level_split": true
   },
@@ -119,12 +119,14 @@
     "denormalization": "none; model output is delta_pred_raw"
   },
   "experiment_metadata": {
-    "experiment": "current_graph_h2_normalization_three_arm_ablation",
-    "arm": "B_direct_raw_laplacian",
+    "experiment": "future2000_gt_adaptive_2000mesh_expanded_current_main",
+    "arm": "learned_current_graph_raw_laplacian",
     "capacity": "C2",
     "feature_resolution": "F2",
     "views": 28,
     "input_resolution": 960,
-    "comparison_type": "strict_paired_training"
+    "query_graph": "gt_adaptive_sub2_represented_vertex_area",
+    "comparison_type": "strict_paired_training",
+    "stage_2_adaptation": false
   }
 }

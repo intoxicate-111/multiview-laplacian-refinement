@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-08-12，Europe/London。
+状态日期：2026-08-14 09:49 BST，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -45,6 +45,7 @@ $$
 | Query-resolution ablation v2 | 50 个对象；40/5/5 | 14 / 960 | 完成 | `multiview_960/query_resolution_ablation_v2` |
 | Synthetic current-query，14 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 14 / 960 | 完成并已复制到 HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query，28 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 28 / 960 | 完成 | HPC：`sofa50_synthetic_current_28view_v1` |
+| Future2000 GT-adaptive expanded current | 2,000 个对象，每个 5 个变体；变体划分 8000/1000/1000 | 28 / 960 | 数据完成，主训练运行中 | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成 | HPC：`openmvs_texture_test_v6_48view` |
 | Thingi10K50 开发集 | 50 个对象；40/5/5 | 960 和 1920 变体 | 仅开发与 smoke run | 本地 `thingi10k50` 运行目录 |
 
@@ -216,6 +217,53 @@ samples；C 位于 B 与 A 之间。B/C 的小 native loss 来源于 raw-Laplaci
 [75 个 OBJ meshes](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian)
 和[25 组总览图](../runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)。
 
+### Stage-2 分布适配与 Huber 饱和诊断
+
+三个 matched continuation arms 都从同一个冻结 Arm-B checkpoint 继续 20,000
+steps，没有一组超过原结果：
+
+| Arm，best checkpoint | Raw EPE | Chamfer | Normal | 改善数 | 保留 | 找回 | 丢失 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Frozen stage-1 B | 0.00300521 | **0.00380687** | **0.942463** | **19/25** | 19/19 | 0/6 | 0/19 |
+| Continue X0 | 0.00369851 | 0.00390257 | 0.931793 | 16/25 | 14/19 | 2/6 | 5/19 |
+| Continue X1 | **0.00349257** | **0.00384032** | **0.936939** | 16/25 | 14/19 | 2/6 | 5/19 |
+| Continue 50/50 | 0.00363284 | 0.00388119 | 0.934341 | 16/25 | 14/19 | 2/6 | 5/19 |
+
+X1 是三个 continuation 中最好的一组，但 mean Chamfer、P2S、normal consistency
+和改善数仍差于冻结 stage-1。该结果否定当前 stage-2 配方，不否定分布适配这一
+一般方向。
+
+Arm-B validation Huber 诊断覆盖 243,000 个 vertices。GT raw-Laplacian top 1%
+的平均 raw error 是 bottom 90% 的 `13.071x`，any-component saturation 为
+`66.049%`，gradient retention 为 `58.436%`；该组承担 `34.931%` Huber loss，
+但只贡献 `5.785%` output-gradient L1。梯度压缩主要集中在 top 1%，并非整个
+top 10% 全面饱和。
+
+## Future2000 GT-adaptive 扩展实验
+
+快照时间：2026-08-14 09:49 BST。数据集包含 2,000 个源物体，每个物体 5 个
+确定性 expanded-current variants；object-level split 为 8,000 train、1,000
+validation、1,000 test。主分支使用 28 views、GT-adaptive subdivision、C2F2 和
+raw current-graph target `L_current @ P_proxy`；配对 control 直接预测 vertex
+displacement。
+
+| Step | Train loss | Validation loss | 记录 |
+|---:|---:|---:|---|
+| 20,000 | 5.30099e-6 | 4.99851e-6 | resumed 200k run |
+| 30,000 | 4.82400e-6 | **4.19731e-6** | 当前最好 validation |
+| 32,000 | **4.77203e-6** | — | 最新完整 checkpoint |
+
+Job 15794 使用四张 L40，正常速度约 `3.076` optimizer steps/s，但 persistent
+DataLoader worker 在 32,000 step 耗尽 51,200 个文件描述符；其余 ranks 在 30
+分钟后触发 NCCL `ALLREDUCE` timeout。基础设施故障前，20k→32k train loss 下降
+`9.98%`，20k→30k validation 改善 `16.03%`。
+
+修复路径使用 `multiprocessing_sharing_strategy=file_system`、每个 rank 四个
+non-persistent workers，并保留 step-32k optimizer state。替代 job 15795 已于
+09:41 BST 使用四张 L40 启动；15759 与 15760 已改为依赖它成功完成。现有外部
+baseline array 15791 尚未完成且样本级失败率较高，因此不报告最终外部方法指标。
+新的对比任务只通过 `scripts/local/run_future2000_comparisons.sh` 在本地启动。
+
 ## 其他诊断实验
 
 | 诊断 | 主要记录结果 | 详细本地报告 |
@@ -248,7 +296,7 @@ samples；C 位于 B 与 A 之间。B/C 的小 native loss 来源于 raw-Laplaci
 | 960 optimized one-epoch smoke | 10 | 0.305584 | 仅 smoke |
 | 1920 optimized workers-4 one-epoch smoke | 10 | 0.305584 | 仅 smoke |
 
-## HPC 完成记录
+## HPC 执行记录
 
 | Job | 实验 | 最终状态 | 记录结果 |
 |---:|---|---|---|
@@ -259,6 +307,9 @@ samples；C 位于 B 与 A 之间。B/C 的小 native loss 来源于 raw-Laplaci
 | 15634 | 已替代的 A/B evaluation | 已取消 | Dependency job 未启动；H2 analysis 未使用该 job。 |
 | 15686 | H2 三分片评估 | 完成 | 三个 L40 array tasks 均约 19 分钟完成。 |
 | 15687 | H2 report merge | 完成 | 最终 JSON/CSV/report 在 15 秒内合并完成。 |
+| 15794 | Future2000 raw-Laplacian 200k | 失败，可恢复 | 到达 step 32,000；`Too many open files` 随后导致 NCCL timeout。 |
+| 15795 | Future2000 raw-Laplacian 200k resume | 快照时运行中 | 四张 L40；使用低文件描述符 worker 配置从完整 step-32k checkpoint 恢复。 |
+| 15791 | Future2000 外部方法诊断 array | 快照时运行中 | 尚未完成且样本级失败数较高，不记录最终 baseline 结论。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 
@@ -281,3 +332,4 @@ Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于�
 1. 每个运行目录中的 `metrics.json`、`summary.json`、CSV 和 checkpoint 是数值记录源。
 2. 本文档记录汇总快照，不替代 per-object 或 per-variant 文件。
 3. HPC 完成记录反映 scheduler 终态；科学指标仍以各 run 的 analysis 文件为准。
+4. 标记为运行中的记录是带日期快照，不应解释为最终实验结果。

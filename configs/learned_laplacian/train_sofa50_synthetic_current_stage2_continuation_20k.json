@@ -1,9 +1,9 @@
 {
-  "method": "synthetic_current_28view_h2_normalization_ablation",
+  "method": "synthetic_current_28view_B_stage2_distribution_adaptation",
   "seed": 7,
   "device": "cuda",
   "dataset": {
-    "name": "Sofa50SyntheticCurrent28View",
+    "name": "Sofa50SyntheticCurrent28ViewStage2",
     "expected_split_counts": {"train": 200, "validation": 25, "test": 25},
     "objects": 50,
     "variants_per_object": 5,
@@ -15,7 +15,7 @@
   "target_definition": "delta_target_raw=L_current@P_proxy",
   "target_scaling": {
     "method": "square_of_mean_incident_edge_length",
-    "source": "synthetic_current_graph",
+    "source": "current_input_graph",
     "epsilon": 1e-12,
     "clip_max_norm": null
   },
@@ -33,12 +33,11 @@
     "std_h": 0.003,
     "distribution": "isotropic_gaussian_xyz_clipped_at_3sigma",
     "maximum_offset_h": 0.009,
-    "scope": "training_only",
-    "frozen": ["proxy", "target", "h_current", "graph", "connectivity", "operator"]
+    "scope": "training_only"
   },
   "renderer_visibility": {
     "condition": "backface_and_occlusion",
-    "source": "precomputed_current_graph_depth_tested_face_id_buffer",
+    "source": "recomputed_opengl_960_on_fixed_input_mesh",
     "neighborhood_radius": 1,
     "front_face_winding": "ccw",
     "depth_image_used": false
@@ -95,12 +94,13 @@
   },
   "multi_object_training": {
     "epochs": 2000,
-    "max_optimizer_steps": 20000,
+    "max_optimizer_steps": 40000,
     "gradient_accumulation_meshes": 2,
     "shuffle": true,
     "validation_every_epochs": 5,
     "checkpoint_every_epochs": 100,
-    "checkpoint_epochs": [100, 250, 400],
+    "checkpoint_optimizer_steps": [30000, 40000],
+    "checkpoint_epochs": [],
     "cache_prepared_samples_on_device": false,
     "profile_training": true,
     "early_stopping": {"enabled": false, "patience_validations": 15, "min_delta": 0.0001}
@@ -119,12 +119,11 @@
     "denormalization": "none; model output is delta_pred_raw"
   },
   "experiment_metadata": {
-    "experiment": "current_graph_h2_normalization_three_arm_ablation",
-    "arm": "B_direct_raw_laplacian",
-    "capacity": "C2",
-    "feature_resolution": "F2",
+    "experiment": "B_direct_raw_stage2_distribution_adaptation",
+    "starting_checkpoint_steps": 20000,
+    "continuation_steps": 20000,
     "views": 28,
     "input_resolution": 960,
-    "comparison_type": "strict_paired_training"
+    "comparison_type": "matched_three_arm_continuation"
   }
 }

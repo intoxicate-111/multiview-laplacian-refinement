@@ -138,3 +138,34 @@ def test_lazy_manifest_paths_resolve_from_manifest_root_across_working_directori
 
     assert loaded["images"].shape == (1, 3, 12, 12)
     assert loaded["_dataset_root"] == str(root.resolve())
+
+
+def test_lazy_images_can_be_remapped_to_node_local_storage(tmp_path, monkeypatch):
+    root = tmp_path / "dataset"
+    prepared_dir = root / "prepared"
+    source_images = root / "shared-rgb"
+    local_images = tmp_path / "node-local-rgb"
+    prepared_dir.mkdir(parents=True)
+    source_images.mkdir()
+    local_images.mkdir()
+    Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(
+        source_images / "view.png"
+    )
+    Image.fromarray(np.full((8, 8, 3), 255, dtype=np.uint8)).save(
+        local_images / "view.png"
+    )
+
+    sample = tiny_sample()
+    sample.pop("images")
+    sample["image_paths"] = ["shared-rgb/view.png"]
+    sample["source_image_size"] = [8, 8]
+    sample["prepared_image_size"] = 8
+    sample["prepared_storage_format"] = "lazy_image_paths_v1"
+    path = prepared_dir / "sample.pt"
+    save_prepared_sample(sample, path)
+
+    monkeypatch.setenv("MLR_IMAGE_PATH_REMAP_FROM", str(source_images))
+    monkeypatch.setenv("MLR_IMAGE_PATH_REMAP_TO", str(local_images))
+    loaded = load_prepared_sample(path)
+
+    assert torch.all(loaded["images"] == 1)
