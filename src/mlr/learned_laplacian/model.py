@@ -5,10 +5,11 @@ from typing import Any, Mapping
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .aggregation import masked_mean_aggregate
 from .graph_layers import LaplacianPredictor, faces_to_edge_index
-from .image_encoder import SmallImageEncoder
+from .image_encoder import ImageFeatureConstructor, SmallImageEncoder
 from .projection import project_vertices, sample_vertex_features
 from .query_training import QUERY_FOURIER_GEOMETRY_MODE
 from .target_scaling import mean_incident_edge_length
@@ -54,6 +55,11 @@ class LearnedLaplacianOutput:
     valid_view_ratio: torch.Tensor
     valid_views: torch.Tensor
     oracle_residual_prediction: torch.Tensor | None = None
+    base_laplacian_prediction: torch.Tensor | None = None
+    dynamic_expert_residual_prediction: torch.Tensor | None = None
+    dynamic_gate_logit: torch.Tensor | None = None
+    dynamic_gate_signed: torch.Tensor | None = None
+    dynamic_gate_effective: torch.Tensor | None = None
 
     @property
     def delta_hat_prediction(self) -> torch.Tensor:
@@ -72,6 +78,11 @@ class LearnedLaplacianModel(nn.Module):
         image_feature_dim: int = 32,
         image_first_stride: int = 2,
         image_second_stride: int = 2,
+        image_feature_construction_mode: str = "original",
+        image_gaussian_kernel_size: int = 5,
+        image_gaussian_sigma: float = 1.0,
+        image_view_chunk_size: int | None = None,
+        image_gradient_checkpointing: bool = False,
         hidden_dim: int = 128,
         num_graph_layers: int = 3,
         dropout: float = 0.0,
@@ -83,6 +94,10 @@ class LearnedLaplacianModel(nn.Module):
         predict_confidence: bool = False,
         oracle_residual_expert_enabled: bool = False,
         oracle_residual_expert_hidden_dim: int = 32,
+        dynamic_residual_expert_enabled: bool = False,
+        dynamic_residual_expert_hidden_dim: int = 32,
+        dynamic_gate_hidden_dim: int = 32,
+        dynamic_gate_initial_bias: float = 0.1,
     ) -> None:
         super().__init__()
         if input_mode not in INPUT_MODES:
@@ -94,6 +109,19 @@ class LearnedLaplacianModel(nn.Module):
         self.image_feature_dim = image_feature_dim
         self.image_first_stride = int(image_first_stride)
         self.image_second_stride = int(image_second_stride)
+        self.image_feature_constructor = ImageFeatureConstructor(
+            mode=image_feature_construction_mode,
+            gaussian_kernel_size=image_gaussian_kernel_size,
+            gaussian_sigma=image_gaussian_sigma,
+        )
+        self.projected_image_feature_dim = (
+            image_feature_dim
+            * self.image_feature_constructor.output_channel_multiplier
+        )
+        if image_view_chunk_size is not None and image_view_chunk_size < 1:
+            raise ValueError("image_view_chunk_size must be positive when provided.")
+        self.image_view_chunk_size = image_view_chunk_size
+        self.image_gradient_checkpointing = bool(image_gradient_checkpointing)
         self.input_mode = input_mode
         self.zero_images = zero_images
         self.geometry_mode = geometry_mode
@@ -102,6 +130,16 @@ class LearnedLaplacianModel(nn.Module):
         self.oracle_residual_expert_hidden_dim = int(oracle_residual_expert_hidden_dim)
         if self.oracle_residual_expert_hidden_dim < 1:
             raise ValueError("oracle_residual_expert_hidden_dim must be positive.")
+        self.dynamic_residual_expert_enabled = bool(dynamic_residual_expert_enabled)
+        self.dynamic_residual_expert_hidden_dim = int(
+            dynamic_residual_expert_hidden_dim
+        )
+        self.dynamic_gate_hidden_dim = int(dynamic_gate_hidden_dim)
+        self.dynamic_gate_initial_bias = float(dynamic_gate_initial_bias)
+        if self.dynamic_residual_expert_hidden_dim < 1:
+            raise ValueError("dynamic_residual_expert_hidden_dim must be positive.")
+        if self.dynamic_gate_hidden_dim < 1:
+            raise ValueError("dynamic_gate_hidden_dim must be positive.")
         self.position_encoder = FourierPositionEncoding(
             num_frequencies=position_num_frequencies,
             include_input=position_include_input,
@@ -117,7 +155,7 @@ class LearnedLaplacianModel(nn.Module):
             else self.position_encoder.output_dim + 3 + 1 + 1
         )
         self.predictor = LaplacianPredictor(
-            input_dim=geometry_dim + 1 + image_feature_dim,
+            input_dim=geometry_dim + 1 + self.projected_image_feature_dim,
             hidden_dim=hidden_dim,
             num_graph_layers=num_graph_layers,
             dropout=dropout,
@@ -126,7 +164,10 @@ class LearnedLaplacianModel(nn.Module):
         # backbone and its three-vector output remain unchanged.
         self.confidence_head = (
             nn.Sequential(
-                nn.Linear(geometry_dim + 1 + image_feature_dim, hidden_dim),
+                nn.Linear(
+                    geometry_dim + 1 + self.projected_image_feature_dim,
+                    hidden_dim,
+                ),
                 nn.ReLU(inplace=True),
                 nn.Linear(hidden_dim, 1),
             )
@@ -150,6 +191,36 @@ class LearnedLaplacianModel(nn.Module):
             final = self.oracle_residual_expert[-1]
             nn.init.zeros_(final.weight)
             nn.init.zeros_(final.bias)
+        # The learned expert is deliberately constructed last so it cannot alter
+        # the seeded initialization of the canonical MSE predictor.  A zero
+        # residual output preserves the frozen base prediction exactly at step 0.
+        # The positive, spatially uniform initial gate lets the residual output
+        # layer receive gradients immediately without using target-derived routing.
+        self.dynamic_residual_expert = (
+            nn.Sequential(
+                nn.Linear(hidden_dim, self.dynamic_residual_expert_hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.dynamic_residual_expert_hidden_dim, 3),
+            )
+            if self.dynamic_residual_expert_enabled
+            else None
+        )
+        self.dynamic_gate_head = (
+            nn.Sequential(
+                nn.Linear(hidden_dim, self.dynamic_gate_hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.dynamic_gate_hidden_dim, 1),
+            )
+            if self.dynamic_residual_expert_enabled
+            else None
+        )
+        if self.dynamic_residual_expert is not None:
+            residual_final = self.dynamic_residual_expert[-1]
+            nn.init.zeros_(residual_final.weight)
+            nn.init.zeros_(residual_final.bias)
+            gate_final = self.dynamic_gate_head[-1]
+            nn.init.zeros_(gate_final.weight)
+            nn.init.constant_(gate_final.bias, self.dynamic_gate_initial_bias)
 
     def forward(self, sample: Mapping[str, Any]) -> LearnedLaplacianOutput:
         query_positions = sample.get("query_positions", sample["vertices"])
@@ -166,7 +237,7 @@ class LearnedLaplacianModel(nn.Module):
                 device=query_positions.device,
             )
             aggregated = query_positions.new_zeros(
-                (query_positions.shape[0], self.image_feature_dim)
+                (query_positions.shape[0], self.projected_image_feature_dim)
             )
             valid_ratio = query_positions.new_zeros((query_positions.shape[0],))
         else:
@@ -181,21 +252,20 @@ class LearnedLaplacianModel(nn.Module):
                 )
                 valid = projection.valid
                 aggregated = query_positions.new_zeros(
-                    (query_positions.shape[0], self.image_feature_dim)
+                    (query_positions.shape[0], self.projected_image_feature_dim)
                 )
                 valid_ratio = valid.to(query_positions.dtype).sum(dim=0) / float(
                     max(valid.shape[0], 1)
                 )
             else:
                 images = sample["images"]
-                feature_maps = self.image_encoder(images)
-                per_view, valid, _ = sample_vertex_features(
-                    feature_maps=feature_maps,
-                    vertices=query_positions,
-                    intrinsics=sample["intrinsics"],
-                    extrinsics=sample["extrinsics"],
-                    image_size=image_size,
-                    visibility=sample.get("visibility"),
+                per_view, valid = self._sample_image_features(
+                    images,
+                    query_positions,
+                    sample["intrinsics"],
+                    sample["extrinsics"],
+                    image_size,
+                    sample.get("visibility"),
                 )
                 aggregated, valid_ratio = masked_mean_aggregate(per_view, valid)
 
@@ -249,6 +319,7 @@ class LearnedLaplacianModel(nn.Module):
         shared_features, predicted = self.predictor.forward_with_shared_features(
             vertex_features, edge_index
         )
+        base_laplacian_prediction = predicted
         oracle_residual_prediction = None
         if self.oracle_residual_expert is not None:
             mask = sample.get("oracle_high_signal_mask")
@@ -263,6 +334,20 @@ class LearnedLaplacianModel(nn.Module):
                 device=predicted.device, dtype=predicted.dtype
             ).unsqueeze(-1)
             predicted = predicted + oracle_residual_prediction
+        dynamic_expert_residual_prediction = None
+        dynamic_gate_logit = None
+        dynamic_gate_signed = None
+        dynamic_gate_effective = None
+        if self.dynamic_residual_expert is not None:
+            dynamic_expert_residual_prediction = self.dynamic_residual_expert(
+                shared_features
+            )
+            dynamic_gate_logit = self.dynamic_gate_head(shared_features).squeeze(-1)
+            dynamic_gate_signed = torch.tanh(dynamic_gate_logit)
+            dynamic_gate_effective = torch.relu(dynamic_gate_signed)
+            predicted = predicted + dynamic_gate_effective.unsqueeze(
+                -1
+            ) * dynamic_expert_residual_prediction
         confidence_prediction = (
             None
             if self.confidence_head is None
@@ -276,12 +361,22 @@ class LearnedLaplacianModel(nn.Module):
             valid_view_ratio=valid_ratio,
             valid_views=valid,
             oracle_residual_prediction=oracle_residual_prediction,
+            base_laplacian_prediction=base_laplacian_prediction,
+            dynamic_expert_residual_prediction=dynamic_expert_residual_prediction,
+            dynamic_gate_logit=dynamic_gate_logit,
+            dynamic_gate_signed=dynamic_gate_signed,
+            dynamic_gate_effective=dynamic_gate_effective,
         )
 
     def architecture_config(self) -> dict[str, Any]:
         first_linear = self.predictor.input_mlp[0]
         return {
             "image_feature_dim": self.image_feature_dim,
+            "image_feature_construction_mode": self.image_feature_constructor.mode,
+            "image_gaussian_kernel_size": self.image_feature_constructor.gaussian_kernel_size,
+            "image_gaussian_sigma": self.image_feature_constructor.gaussian_sigma,
+            "image_view_chunk_size": self.image_view_chunk_size,
+            "image_gradient_checkpointing": self.image_gradient_checkpointing,
             "image_second_stride": self.image_second_stride,
             "hidden_dim": first_linear.out_features,
             "num_graph_layers": len(self.predictor.blocks),
@@ -294,7 +389,98 @@ class LearnedLaplacianModel(nn.Module):
             "predict_confidence": self.predict_confidence,
             "oracle_residual_expert_enabled": self.oracle_residual_expert_enabled,
             "oracle_residual_expert_hidden_dim": self.oracle_residual_expert_hidden_dim,
+            "dynamic_residual_expert_enabled": self.dynamic_residual_expert_enabled,
+            "dynamic_residual_expert_hidden_dim": self.dynamic_residual_expert_hidden_dim,
+            "dynamic_gate_hidden_dim": self.dynamic_gate_hidden_dim,
+            "dynamic_gate_initial_bias": self.dynamic_gate_initial_bias,
         }
+
+    def _sample_image_features(
+        self,
+        images: torch.Tensor,
+        query_positions: torch.Tensor,
+        intrinsics: torch.Tensor,
+        extrinsics: torch.Tensor,
+        image_size: tuple[int, int],
+        visibility: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        view_count = int(images.shape[0])
+        chunk_size = self.image_view_chunk_size
+        if chunk_size is None or chunk_size >= view_count:
+            feature_maps = self.image_feature_constructor(self.image_encoder(images))
+            per_view, valid, _ = sample_vertex_features(
+                feature_maps=feature_maps,
+                vertices=query_positions,
+                intrinsics=intrinsics,
+                extrinsics=extrinsics,
+                image_size=image_size,
+                visibility=visibility,
+            )
+            return per_view, valid
+
+        sampled_chunks = []
+        valid_chunks = []
+        for start in range(0, view_count, chunk_size):
+            stop = min(start + chunk_size, view_count)
+            image_chunk = images[start:stop]
+            intrinsics_chunk = intrinsics[start:stop]
+            extrinsics_chunk = extrinsics[start:stop]
+            visibility_chunk = (
+                None if visibility is None else visibility[start:stop]
+            )
+
+            def make_encoder(
+                fixed_visibility: torch.Tensor | None,
+            ) -> Any:
+                def encode_and_sample(
+                    chunk_images: torch.Tensor,
+                    chunk_intrinsics: torch.Tensor,
+                    chunk_extrinsics: torch.Tensor,
+                ) -> torch.Tensor:
+                    feature_maps = self.image_feature_constructor(
+                        self.image_encoder(chunk_images)
+                    )
+                    sampled, _, _ = sample_vertex_features(
+                        feature_maps=feature_maps,
+                        vertices=query_positions,
+                        intrinsics=chunk_intrinsics,
+                        extrinsics=chunk_extrinsics,
+                        image_size=image_size,
+                        visibility=fixed_visibility,
+                    )
+                    return sampled
+
+                return encode_and_sample
+
+            encode_and_sample = make_encoder(visibility_chunk)
+
+            if (
+                self.image_gradient_checkpointing
+                and self.training
+                and torch.is_grad_enabled()
+            ):
+                sampled = checkpoint(
+                    encode_and_sample,
+                    image_chunk,
+                    intrinsics_chunk,
+                    extrinsics_chunk,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+            else:
+                sampled = encode_and_sample(
+                    image_chunk, intrinsics_chunk, extrinsics_chunk
+                )
+            projection = project_vertices(
+                vertices=query_positions,
+                intrinsics=intrinsics_chunk,
+                extrinsics=extrinsics_chunk,
+                image_size=image_size,
+                visibility=visibility_chunk,
+            )
+            sampled_chunks.append(sampled)
+            valid_chunks.append(projection.valid)
+        return torch.cat(sampled_chunks, dim=0), torch.cat(valid_chunks, dim=0)
 
 
 def _normalize_query_positions(

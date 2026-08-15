@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-08-14 09:49 BST, Europe/London.
+Status date: 2026-08-15 18:47 BST, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -49,7 +49,8 @@ $$
 | Query-resolution ablation v2 | 50 objects; 40/5/5 | 14 / 960 | Complete | `multiview_960/query_resolution_ablation_v2` |
 | Synthetic current-query, 14 views | 50 objects, 5 variants each; 200/25/25 variants | 14 / 960 | Complete and copied to HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query, 28 views | 50 objects, 5 variants each; 200/25/25 variants | 28 / 960 | Complete | HPC: `sofa50_synthetic_current_28view_v1` |
-| Future2000 GT-adaptive expanded current | 2,000 objects, 5 variants each; 8000/1000/1000 variants | 28 / 960 | Prepared; primary training running | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Synthetic current-query, native 1920 | Same 250 IDs and 200/25/25 split as 960 | 28 / 1920 | Complete; HF training running | HPC: `sofa50_synthetic_current_28view_native1920_v1` |
+| Future2000 GT-adaptive expanded current | 2,000 objects, 5 variants each; 8000/1000/1000 variants | 28 / 960 | Prepared; primary training stopped at step 64k | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete | HPC: `openmvs_texture_test_v6_48view` |
 | Thingi10K50 development set | 50 objects; 40/5/5 | 960 and 1920 variants | Development and smoke runs only | Local `thingi10k50` run directories |
 
@@ -261,9 +262,66 @@ Laplacian top-1% vertices have `13.071x` the bottom-90% mean raw error,
 of Huber loss and `5.785%` of output-gradient L1. The compression is strongly
 concentrated in the top 1%, rather than uniformly across the full top 10%.
 
+### Huber versus raw MSE
+
+The completed 25-sample unified test does not show a tail or mean-geometry
+benefit from raw MSE:
+
+| Loss | Raw EPE ↓ | Raw RMS ↓ | Top-10% ↓ | Top-1% ↓ | Chamfer ↓ | Normal ↑ | Flips | Improved |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Huber, 0.01 | **0.00297478** | **0.00662604** | **0.0122438** | **0.0371716** | **0.00380692** | 0.942431 | 6,579 | **19/25** |
+| Raw MSE | 0.00297688 | 0.00695997 | 0.0128078 | 0.0380294 | 0.00381317 | **0.943833** | **5,925** | 16/25 |
+
+MSE uses global batch 6 and a 510-step validation interval, versus 2 and 500
+for Huber. The audit therefore records a resource-driven non-strict training
+comparison; the unified held-out evaluation remains directly comparable.
+
+### Learned dynamic residual expert and gate causality
+
+The learned final improves the jointly trained base from raw EPE `0.00450175`
+to `0.00294740`, Chamfer `0.00416138` to `0.00377438`, normal consistency
+`0.926613` to `0.944879`, and improved count `3/25` to `19/25`. The base branch
+is not the frozen original Arm B, so this large within-model change must not be
+reported as the gain over the original baseline.
+
+Validation selects constant gate `alpha=0.16`. Base-to-constant improves raw
+EPE, Chamfer, P2S and normal on `25/25`; constant-to-learned improves Chamfer
+and P2S on `25/25` and raw EPE on `24/25`. Learned placement also beats every
+one of five within-mesh gate shuffles on most paired samples. The causal result
+supports both an effective residual expert and a smaller additional spatial-
+placement contribution; gate/curvature correlations are observational only.
+
+### 960 Gaussian and high-frequency image features
+
+| Feature | Raw EPE ↓ | Raw RMS ↓ | Bottom 90% ↓ | Top 10% ↓ | Top 1% ↓ | Chamfer ↓ | Improved |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Original | 0.00297471 | 0.00662531 | 0.00194494 | 0.0122427 | 0.0371654 | 0.00380683 | 19/25 |
+| Gaussian | 0.00291322 | 0.00666042 | **0.00186460** | 0.0123509 | 0.0376811 | **0.00377507** | **21/25** |
+| Original + HF | **0.00288627** | **0.00628246** | 0.00190114 | **0.0117524** | **0.0347902** | 0.00377832 | 20/25 |
+
+Gaussian-only features improve mean downstream geometry but degrade the two
+tail groups relative to original. Concatenating the original feature and
+`F-Gaussian(F)` gives the strongest raw prediction and tail metrics without a
+material Bottom-90% penalty.
+
+### Native-1920 plus HF, running snapshot
+
+The native renderer reproduces the 960 HF sample IDs, 28 camera extrinsics,
+split, graph, proxy, target and visibility contracts. Intrinsics are scaled for
+1920, and the minimum native-versus-resized pixel MAE is `0.0205764`, rejecting
+the resize-only path. Job 15854 is a from-scratch four-L40 run with 20,000
+global optimiser steps. Step 500 train/validation losses are `7.02343e-5` and
+`6.34615e-5`; the matched 960 values are `7.47579e-5` and `9.61499e-5`.
+
+The 1920 run has global batch 4 versus the 960 baseline's 2. View chunking and
+gradient checkpointing are tested as mathematically equivalent execution
+changes, but the batch difference makes the training comparison non-strict.
+No resolution conclusion is reported before the paired Top-10%/Top-1% and
+downstream evaluation from jobs 15864/15865.
+
 ## Future2000 GT-adaptive scale-up
 
-Snapshot: 2026-08-14 09:49 BST. The dataset contains 2,000 source objects and
+Snapshot: 2026-08-15 18:47 BST. The dataset contains 2,000 source objects and
 five deterministic expanded-current variants per object. Object-level splits
 contain 8,000 train, 1,000 validation and 1,000 test samples. The primary arm
 uses 28 views, GT-adaptive subdivision, C2F2 and the raw current-graph target
@@ -273,7 +331,10 @@ uses 28 views, GT-adaptive subdivision, C2F2 and the raw current-graph target
 |---:|---:|---:|---|
 | 20,000 | 5.30099e-6 | 4.99851e-6 | resumed 200k run |
 | 30,000 | 4.82400e-6 | **4.19731e-6** | current best validation |
-| 32,000 | **4.77203e-6** | — | latest intact checkpoint |
+| 40,000 | 4.62000e-6 | **3.88000e-6** | lowest resumed validation |
+| 50,000 | 4.26000e-6 | 4.23000e-6 | resumed run |
+| 60,000 | 4.19000e-6 | 5.27000e-6 | resumed run |
+| 64,000 | **3.99000e-6** | — | latest intact checkpoint |
 
 Job 15794 used four L40 GPUs and reached about `3.076` optimiser steps/s, but
 failed at step 32,000 after a persistent DataLoader worker exhausted the
@@ -281,13 +342,13 @@ failed at step 32,000 after a persistent DataLoader worker exhausted the
 30 minutes later. Training loss fell `9.98%` from 20k to 32k and validation
 improved `16.03%` from 20k to 30k before the infrastructure failure.
 
-The repaired path uses `multiprocessing_sharing_strategy=file_system`, four
-non-persistent workers per rank and the preserved step-32k optimizer state.
-Replacement job 15795 started on four L40 GPUs at 09:41 BST. Jobs 15759 and
-15760 now depend on its successful completion. The existing external-baseline
-array 15791 is incomplete and has a high sample-level failure fraction; no
-external comparison metric is treated as final. New comparison launches are
-local-only through `scripts/local/run_future2000_comparisons.sh`.
+Replacement job 15795 resumed with `file_system` sharing and non-persistent
+workers, reached step 64,000, and then failed when a worker exhausted `/dev/shm`
+(`Bus error` and `No space left on device`). The step-64k checkpoint remains
+resumable. Paired displacement jobs 15759/15760 were cancelled, so no final
+prediction or geometry comparison exists. External array 15791 remains
+incomplete with a high sample-level failure fraction; new launches are local-
+only through `scripts/local/run_future2000_comparisons.sh`.
 
 ## Other diagnostic experiments
 
@@ -335,8 +396,14 @@ directly with the canonical Sofa50 results.
 | 15686 | H2 three-shard evaluation | Completed | Three L40 array tasks completed in about 19 minutes. |
 | 15687 | H2 report merge | Completed | Final JSON/CSV/report merge completed in 15 seconds. |
 | 15794 | Future2000 raw-Laplacian 200k | Failed, recoverable | Reached step 32,000; `Too many open files` caused a downstream NCCL timeout. |
-| 15795 | Future2000 raw-Laplacian 200k resume | Running at snapshot | Four L40 GPUs; resumed the intact step-32k checkpoint with the low-FD worker configuration. |
+| 15795 | Future2000 raw-Laplacian 200k resume | Failed, resumable | Reached step 64,000; a DataLoader worker exhausted `/dev/shm`. |
 | 15791 | Future2000 external diagnostic array | Running at snapshot | Incomplete; high sample-level failure count, so no final baseline result is recorded. |
+| 15812/15813 | Raw MSE evaluation/report | Completed | Four evaluation shards completed in 75–85 seconds; report merge completed in 24 seconds. |
+| 15844 | Gaussian feature, 20k | Completed | Two L40 GPUs; elapsed `03:31:05`. |
+| 15845 | Original + HF feature, 20k | Completed | Two L40 GPUs; elapsed `03:58:50`. |
+| 15846/15847 | Image-feature evaluation/report | Completed | Four shards completed in under two minutes; report merge took 11 seconds. |
+| 15854 | Native-1920 + HF, 20k | Running at snapshot | Four L40 GPUs; from scratch, global batch 4, latest complete checkpoint step 900. |
+| 15864/15865 | Native-1920 paired evaluation/report | Dependency pending | Starts only after job 15854 completes successfully. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model
@@ -359,6 +426,13 @@ or comparison result.
   the frozen GT-query baseline. In the controlled 28-view H2 ablation, direct
   raw-Laplacian training is the best arm and lowers mean Chamfer below the
   initial mesh while improving 19/25 test samples.
+- Raw MSE does not improve the high-curvature tail or mean recovery over Huber.
+- The learned residual expert is effective without spatial gating, while the
+  learned gate adds a smaller placement-specific benefit beyond a validation-
+  selected constant scale.
+- At 960, original-plus-HF gives the best raw/tail prediction; Gaussian-only
+  gives the best mean recovery. Native-1920+HF remains pending and its early
+  validation loss is not a final resolution result.
 
 ## Source hierarchy
 

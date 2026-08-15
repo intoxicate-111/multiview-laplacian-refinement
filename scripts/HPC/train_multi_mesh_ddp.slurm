@@ -24,6 +24,7 @@ MANIFEST="$1"
 CONFIG="$2"
 OUTPUT_DIR="$3"
 RESUME_CHECKPOINT="${4:-}"
+INITIALIZATION_CHECKPOINT="${INITIALIZATION_CHECKPOINT:-}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
 
 if [[ ! "${GPUS_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
@@ -40,12 +41,20 @@ if [[ -n "${RESUME_CHECKPOINT}" && ! -f "${RESUME_CHECKPOINT}" ]]; then
     echo "Missing resume checkpoint: ${RESUME_CHECKPOINT}"
     exit 2
 fi
+if [[ -n "${INITIALIZATION_CHECKPOINT}" && ! -f "${INITIALIZATION_CHECKPOINT}" ]]; then
+    echo "Missing initialization checkpoint: ${INITIALIZATION_CHECKPOINT}"
+    exit 2
+fi
+if [[ -n "${RESUME_CHECKPOINT}" && -n "${INITIALIZATION_CHECKPOINT}" ]]; then
+    echo "RESUME_CHECKPOINT and INITIALIZATION_CHECKPOINT are mutually exclusive."
+    exit 2
+fi
 
 mkdir -p "${REPO}/slurm_logs" "${OUTPUT_DIR}"
 
 MASTER_ADDR="$(scontrol show hostnames "${SLURM_JOB_NODELIST}" | sed -n '1p')"
 MASTER_PORT="$((20000 + SLURM_JOB_ID % 20000))"
-export REPO CONDA MANIFEST CONFIG OUTPUT_DIR RESUME_CHECKPOINT
+export REPO CONDA MANIFEST CONFIG OUTPUT_DIR RESUME_CHECKPOINT INITIALIZATION_CHECKPOINT
 export GPUS_PER_NODE MASTER_ADDR MASTER_PORT
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export NCCL_ASYNC_ERROR_HANDLING=1
@@ -61,6 +70,7 @@ echo "nccl_socket_ifname=${NCCL_SOCKET_IFNAME}"
 echo "manifest=${MANIFEST}"
 echo "config=${CONFIG}"
 echo "output_dir=${OUTPUT_DIR}"
+echo "initialization_checkpoint=${INITIALIZATION_CHECKPOINT:-none}"
 
 srun --nodes="${SLURM_NNODES}" \
     --ntasks="${SLURM_NNODES}" \
@@ -77,6 +87,9 @@ srun --nodes="${SLURM_NNODES}" \
         )
         if [[ -n "${RESUME_CHECKPOINT}" ]]; then
             arguments+=(--resume-checkpoint "${RESUME_CHECKPOINT}")
+        fi
+        if [[ -n "${INITIALIZATION_CHECKPOINT}" ]]; then
+            arguments+=(--initialization-checkpoint "${INITIALIZATION_CHECKPOINT}")
         fi
         PYTHONPATH=src "${CONDA}" run --no-capture-output -n test \
             torchrun \

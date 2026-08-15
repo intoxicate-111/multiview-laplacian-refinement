@@ -246,6 +246,7 @@ def train_multi_object(
     initial_loading_seconds: float = 0.0,
     resume_checkpoint: str | Path | None = None,
     reset_resume_tracking: bool = False,
+    initialization_checkpoint: str | Path | None = None,
 ) -> MultiObjectTrainingResult:
     """Train one shared model over ragged mesh samples, one mesh forward at a time."""
 
@@ -278,6 +279,22 @@ def train_multi_object(
             "query_training.enabled=true requires model.geometry_mode='query_fourier'."
         )
     base_model = _build_model(config, input_mode_override, zero_images).to(device)
+    if resume_checkpoint is not None and initialization_checkpoint is not None:
+        raise ValueError(
+            "resume_checkpoint and initialization_checkpoint are mutually exclusive."
+        )
+    if initialization_checkpoint is not None:
+        _load_initialization_checkpoint(base_model, initialization_checkpoint, device)
+    trainable_scope = str(
+        config.get("training", {}).get("trainable_parameter_scope", "all")
+    )
+    if trainable_scope == "dynamic_residual_expert_only":
+        _freeze_except_dynamic_residual_expert(base_model)
+    elif trainable_scope != "all":
+        raise ValueError(
+            "training.trainable_parameter_scope must be 'all' or "
+            "'dynamic_residual_expert_only'."
+        )
     if base_model.input_mode == "coarse_only" or base_model.zero_images:
         base_model.image_encoder.requires_grad_(False)
     decode_images = base_model.input_mode != "coarse_only" and not base_model.zero_images
@@ -341,8 +358,13 @@ def train_multi_object(
             "checkpoint_optimizer_steps cannot exceed max_optimizer_steps."
         )
     initial_learning_rate = float(training.get("learning_rate", 1e-4))
+    trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+    if not trainable_parameters:
+        raise ValueError("Training has no trainable parameters.")
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        trainable_parameters,
         lr=initial_learning_rate,
         weight_decay=float(training.get("weight_decay", 0.0)),
     )
@@ -1642,6 +1664,9 @@ def _build_model(
     config: Mapping[str, Any], input_mode_override: str | None, zero_images: bool
 ) -> LearnedLaplacianModel:
     image_config = config.get("image_encoder", {})
+    feature_construction = image_config.get("feature_construction", {})
+    if not isinstance(feature_construction, Mapping):
+        raise ValueError("image_encoder.feature_construction must be an object.")
     model_config = config.get("model", {})
     position_config = model_config.get("position_encoding", {})
     if not isinstance(position_config, Mapping):
@@ -1649,10 +1674,28 @@ def _build_model(
     expert_config = model_config.get("oracle_residual_expert", {})
     if not isinstance(expert_config, Mapping):
         raise ValueError("model.oracle_residual_expert must be an object.")
+    dynamic_expert_config = model_config.get("dynamic_residual_expert", {})
+    if not isinstance(dynamic_expert_config, Mapping):
+        raise ValueError("model.dynamic_residual_expert must be an object.")
     return LearnedLaplacianModel(
         image_feature_dim=int(image_config.get("feature_dim", 32)),
         image_first_stride=int(image_config.get("first_stride", 2)),
         image_second_stride=int(image_config.get("second_stride", 2)),
+        image_feature_construction_mode=str(
+            feature_construction.get("mode", "original")
+        ),
+        image_gaussian_kernel_size=int(
+            feature_construction.get("kernel_size", 5)
+        ),
+        image_gaussian_sigma=float(feature_construction.get("sigma", 1.0)),
+        image_view_chunk_size=(
+            None
+            if image_config.get("view_chunk_size") is None
+            else int(image_config["view_chunk_size"])
+        ),
+        image_gradient_checkpointing=bool(
+            image_config.get("gradient_checkpointing", False)
+        ),
         hidden_dim=int(model_config.get("hidden_dim", 128)),
         num_graph_layers=int(model_config.get("num_graph_layers", 3)),
         dropout=float(model_config.get("dropout", 0.0)),
@@ -1664,7 +1707,56 @@ def _build_model(
         predict_confidence=bool(config.get("confidence", {}).get("enabled", False)),
         oracle_residual_expert_enabled=bool(expert_config.get("enabled", False)),
         oracle_residual_expert_hidden_dim=int(expert_config.get("hidden_dim", 32)),
+        dynamic_residual_expert_enabled=bool(
+            dynamic_expert_config.get("enabled", False)
+        ),
+        dynamic_residual_expert_hidden_dim=int(
+            dynamic_expert_config.get("residual_hidden_dim", 32)
+        ),
+        dynamic_gate_hidden_dim=int(
+            dynamic_expert_config.get("gate_hidden_dim", 32)
+        ),
+        dynamic_gate_initial_bias=float(
+            dynamic_expert_config.get("gate_initial_bias", 0.1)
+        ),
     )
+
+
+def _load_initialization_checkpoint(
+    model: LearnedLaplacianModel,
+    checkpoint_path: str | Path,
+    device: torch.device,
+) -> None:
+    payload = torch.load(Path(checkpoint_path), map_location=device, weights_only=False)
+    state = payload.get("model_state_dict")
+    if not isinstance(state, Mapping):
+        raise ValueError("initialization_checkpoint has no model_state_dict.")
+    incompatible = model.load_state_dict(state, strict=False)
+    allowed_missing_prefixes = (
+        "dynamic_residual_expert.",
+        "dynamic_gate_head.",
+    )
+    unexpected = list(incompatible.unexpected_keys)
+    disallowed_missing = [
+        name
+        for name in incompatible.missing_keys
+        if not name.startswith(allowed_missing_prefixes)
+    ]
+    if unexpected or disallowed_missing:
+        raise ValueError(
+            "Initialization checkpoint is not base-model compatible: "
+            f"missing={disallowed_missing}, unexpected={unexpected}."
+        )
+
+
+def _freeze_except_dynamic_residual_expert(model: LearnedLaplacianModel) -> None:
+    if model.dynamic_residual_expert is None or model.dynamic_gate_head is None:
+        raise ValueError(
+            "dynamic_residual_expert_only requires model.dynamic_residual_expert.enabled=true."
+        )
+    model.requires_grad_(False)
+    model.dynamic_residual_expert.requires_grad_(True)
+    model.dynamic_gate_head.requires_grad_(True)
 
 
 def _confidence_settings(config: Mapping[str, Any]) -> dict[str, Any]:

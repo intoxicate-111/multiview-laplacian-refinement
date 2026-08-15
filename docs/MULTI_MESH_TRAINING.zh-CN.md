@@ -102,6 +102,36 @@ PE(q) = [q, sin(2^k pi q), cos(2^k pi q)]
 Expanded manifest 中为了满足 schema 而存在的 target 不是 GT supervision。将它传给
 训练循环会违反项目目标。
 
+## Synthetic-current direct-raw 合同
+
+28-view Sofa50 Arm B 使用 50 个物体、每个物体 5 个固定 current-mesh
+variants，并按物体划分 `200/25/25` samples。与上述 GT-query 合同不同，
+它直接预测 current-graph raw target：
+
+```text
+delta_target_raw = L_current @ P_proxy
+target_mode = raw_laplacian
+prediction_loss_space = output_representation
+```
+
+`target_scaling` 仍保留在公共 schema 中，因为数据准备同时保存
+`local_edge_length`、`valid_scale_mask`、`raw_laplacian_target` 和并行的
+normalized target。它不会将 Arm-B target 除以 `h^2`；只有
+`target_mode=edge_scale_normalized_laplacian` 才选择 normalized representation。
+`clip_max_norm=null` 时 direct raw target 也不会被裁剪。
+
+Image encoder 支持三种受控 feature construction：
+
+- `original`：采样 encoder output `F`；
+- `gaussian`：使用固定 kernel/sigma 采样 `Gaussian(F)`；
+- `original_plus_high_frequency`：采样 128-channel 拼接
+  `[F, F-Gaussian(F)]`。
+
+Native 1920 训练可以用固定 view chunk 运行 encoder，并对整个
+encoder/feature-construction/sampling 路径执行 gradient checkpointing。这些开关只降低
+activation memory，不改变数学输出或梯度；full/chunked 路径已通过等价测试。
+它们不允许改变 optimizer-step budget，也不能隐藏 global-batch 差异。
+
 ## 启动完整训练
 
 正式启动脚本为：
@@ -246,8 +276,12 @@ Trainer 会报告 DataLoader wait、image decode、GPU transfer、forward/backwa
 
 - 训练仍然是每次前向一个 ragged mesh，再进行梯度累积，不是 packed-graph batching；
 - 960 像素下 PNG decode 是当前稳态训练的主要耗时；
+- Native 1920 F2+HF 使用 view chunk 和 gradient checkpointing 将完整 28-view
+  feature 路径保持在 L40 显存内；每个 sample 仍使用全部 28 张 RGB；
 - 静态 graph preparation 只运行一次，其耗时随 mesh 数量和复杂度增长；
-- 当前尚未实现自动 checkpoint resume；
+- 支持显式 checkpoint resume，launcher 不会自动判断应恢复哪个 checkpoint；
+- DDP 每个 rank 至少处理一个 mesh。四个 ranks 且 accumulation=1 时 global batch
+  为 4，不修改 batching implementation 就无法复现两个 ranks 的 global batch 2；
 - 数据集文件仍在生成或移动时不得启动训练；
 - GT training observation 与 coarse/expanded inference query 必须保持一致的坐标和相机约定。
 

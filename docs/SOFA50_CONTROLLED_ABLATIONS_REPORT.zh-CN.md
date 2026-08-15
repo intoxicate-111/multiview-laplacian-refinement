@@ -1,6 +1,6 @@
 # Sofa50 C2F2 受控消融报告
 
-状态时间：2026-08-12 21:20 BST
+状态时间：2026-08-15 18:47 BST
 
 训练设备：NVIDIA L40
 
@@ -16,7 +16,11 @@
 4. GT-query 与 synthetic current-query 训练对比；
 5. synthetic current-query 从 20,000 steps 延长到 50,000 steps；
 6. 28-view synthetic current-query local jitter 对照；
-7. 28-view current-graph `h^2` target/loss-space 三方案消融。
+7. 28-view current-graph `h^2` target/loss-space 三方案消融；
+8. Direct-raw Huber 与 MSE loss 消融；
+9. Learned dynamic residual expert 与 inference-time gate causal ablation；
+10. Gaussian/HF image-feature 消融；
+11. Native 1920 + HF 分辨率消融（运行中）。
 
 已完成实验使用最终 `metrics.json` 或分析产物。
 
@@ -455,7 +459,61 @@ Top-k exact-target replacement 的主要记录为：A 在 50% replacement 首次
 `00:19:06`–`00:19:25`；merge job 15687 用时 `00:00:15`。Arm B 的 25 组
 `GT/COARSE/REFINED RESULT` 可视化和 75 个 OBJ 已导出到本地 analysis 目录。
 
-## 10. 假设状态
+## 10. Huber 与 raw MSE
+
+MSE arm 仅替换 prediction loss，但实际使用 3 个 L40 ranks、global batch 6；
+Huber baseline 的 global batch 为 2。因此训练不做严格单变量声称，统一 test/recovery
+仍使用同样的 25 samples：
+
+| Loss | Raw EPE ↓ | RMS ↓ | Top-10% ↓ | Top-1% ↓ | Chamfer ↓ | P2S ↓ | Normal ↑ | Flips | Improved |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Huber | **0.00297478** | **0.00662604** | **0.0122438** | **0.0371716** | **0.00380692** | **0.00380603** | 0.942431 | 6,579 | **19/25** |
+| MSE | 0.00297688 | 0.00695997 | 0.0128078 | 0.0380294 | 0.00381317 | 0.00381467 | **0.943833** | **5,925** | 16/25 |
+
+MSE 不降低 high-curvature tail，也不改善 mean Chamfer/P2S；它提升 normal 并减少
+flips，但不足以支持替换 Huber。
+
+## 11. Learned dynamic residual expert 与 gate causal ablation
+
+From-scratch joint model 的 learned final 相对其 joint base 在 raw EPE、Chamfer、P2S 和
+normal 上都是 `25/25` paired 胜出。Validation-selected constant gate 为 `alpha=0.16`；
+learned gate 相对 constant gate 的 raw EPE/Chamfer/P2S/normal 胜数为
+`24/25`、`25/25`、`25/25`、`22/25`。
+
+| Arm | Raw EPE ↓ | Weighted RMS ↓ | Top-10% ↓ | Top-1% ↓ | Chamfer ↓ | Normal ↑ | Improved |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Joint base | 0.00450175 | 0.00995971 | 0.0192322 | 0.0558252 | 0.00416138 | 0.926613 | 3/25 |
+| Constant gate | 0.00309090 | 0.00706054 | 0.0134237 | 0.0433624 | 0.00381185 | 0.943196 | 16/25 |
+| Shuffled gate mean | 0.00313083 | 0.00735610 | 0.0142763 | 0.0454299 | 0.00380357 | 0.943870 | 16/25 |
+| Learned gate | **0.00294740** | **0.00671699** | **0.0127107** | **0.0389902** | **0.00377438** | **0.944879** | **19/25** |
+
+结论：residual expert 在没有 spatial gate 时已有效；learned placement 在 constant/global
+scaling 之上还有较小额外收益；5 个 mesh 内 shuffle interventions 支持 vertex-level
+placement 重要。Correlation 数据未被单独当作因果证据。
+
+## 12. 960 image-feature 消融
+
+| Feature | Raw EPE ↓ | RMS ↓ | Bottom-90% ↓ | Top-10% ↓ | Top-1% ↓ | Chamfer ↓ | Normal ↑ | Improved |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Original | 0.00297471 | 0.00662531 | 0.00194494 | 0.0122427 | 0.0371654 | 0.00380683 | 0.942470 | 19/25 |
+| Gaussian | 0.00291322 | 0.00666042 | **0.00186460** | 0.0123509 | 0.0376811 | **0.00377507** | **0.944459** | **21/25** |
+| Original + HF | **0.00288627** | **0.00628246** | 0.00190114 | **0.0117524** | **0.0347902** | 0.00377832 | 0.942475 | 20/25 |
+
+Gaussian blur 不利于 Top-10%/Top-1%，但有利于 mean geometry；保留 original 并追加
+high-frequency residual 取得最好的 prediction/tail metrics，而没有明显恶化 Bottom-90%。
+
+## 13. Native 1920 + HF（运行中）
+
+1920 observations 为 renderer native output，不是 960 resize。Camera extrinsics、sample IDs、
+split、current graph、proxy、target 和 visibility 与 960 HF 严格对齐。Job 15854 使用
+4×L40、20,000 optimizer steps、view chunk=4 和 gradient checkpointing。Global batch 4 与
+960 baseline 的 2 不同，因此不是严格单变量训练。
+
+Step-500 的 1920/960 train loss 为 `7.02343e-5/7.47579e-5`，validation loss 为
+`6.34615e-5/9.61499e-5`。这是 early loss 快照；必须等 jobs 15864/15865 的 unified
+tail/recovery 评估后才能判断分辨率收益。
+
+## 14. 假设状态
 
 | Hypothesis | Status | Recorded result |
 |---|---|---|
@@ -479,13 +537,18 @@ Top-k exact-target replacement 的主要记录为：A 在 50% replacement 首次
 | Local query jitter 降低最终 synthetic 与 OpenMVS recovery error | Not supported | Test raw EPE +0.000123442；OpenMVS Chamfer +0.000182345；5/5 paired meshes |
 | Direct raw-Laplacian training 优于 canonical H2 与 normalized-output/raw-loss | Supported under unified 28-view protocol | Raw EPE 0.00300525；Chamfer 0.00380671；19/25 improved |
 | B/C 极小 native loss 可与 A normalized loss 直接比较 | Not supported | Loss space 与数值单位不同；使用 unified raw-space endpoints 判定 |
+| Raw MSE 改善 Top-10%/Top-1% 与 mean recovery | Not supported | Tail 和 Chamfer/P2S 均差于 Huber；改善数 16/25 |
+| Residual expert 在无 spatial gate 时有效 | Supported | Base-to-constant 的 raw EPE/Chamfer/P2S/normal 均 25/25 |
+| Learned gate placement 在 global scaling 上额外有效 | Supported | Learned 优于 constant 和 5 组 within-mesh shuffles |
+| Original + HF 改善 raw tail 预测 | Supported at 960 | Top-10% `0.0117524`；Top-1% `0.0347902` |
+| Native 1920 + HF 优于 960 + HF | Pending | 训练运行中；early loss 不作最终结论 |
 
-## 11. 尚需完成的判定
+## 15. 尚需完成的判定
 
 1. 对 GT 与 GT-adaptive prediction 做 common-surface paired evaluation：映射到相同 GT vertices 或固定表面采样点，使用同一 target、同一 curvature bins、同一 EPE/cosine 定义。
 2. 在 adaptive 的 common-surface 指标完成前，不从 graph-specific raw EPE 推导 Sofa50 主训练配置。
 
-## 12. 产物位置
+## 16. 产物位置
 
 - View/query-resolution analysis：
   `runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/`
@@ -512,3 +575,12 @@ Top-k exact-target replacement 的主要记录为：A 在 50% replacement 首次
 - H2 Arm B 的 25 组 mesh 与对比图：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian/`
   `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/`
+- Huber/MSE loss ablation：
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_loss_ablation_20k_seed7/analysis/`
+- Dynamic residual expert 与 gate causal ablation：
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_dynamic_residual_expert_20k_seed7/analysis/`
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_dynamic_residual_expert_20k_seed7/gate_causal_ablation/`
+- 960 image-feature ablation：
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_image_feature_ablation_20k_seed7/analysis/`
+- Native-1920 HF resolution ablation：
+  `runs/learned_laplacian/sofa50_synthetic_current_28view_hf_resolution_1920_20k_seed7/`

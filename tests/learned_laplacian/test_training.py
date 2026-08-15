@@ -88,3 +88,20 @@ def test_target_magnitude_weighting_rejects_negative_lambda():
         assert "non-negative" in str(error)
     else:
         raise AssertionError("negative target magnitude weight must fail")
+
+
+def test_raw_mse_loss_is_mean_squared_component_error():
+    prediction = torch.tensor([[1.0, 2.0, 3.0], [3.0, 0.0, -1.0]])
+    target = torch.zeros_like(prediction)
+    confidence = torch.tensor([1.0, 0.5])
+
+    actual = weighted_robust_laplacian_loss(
+        prediction,
+        target,
+        confidence,
+        loss_type="mse",
+    )
+    per_vertex = (prediction - target).square().mean(dim=-1)
+    expected = (confidence * per_vertex).sum() / confidence.sum()
+
+    torch.testing.assert_close(actual, expected)

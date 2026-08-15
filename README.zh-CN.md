@@ -10,9 +10,11 @@
 
 实验指标与运行状态：[实验数据汇总](docs/EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
+当前 Sofa50 受控消融：[Direct-raw/loss/expert/image-feature 报告](docs/SOFA50_CONTROLLED_ABLATIONS_REPORT.zh-CN.md)
+
 Future2000 本地对比任务：[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 
-近期 commit 与实验记录：[8 月 4–14 日报告](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
+近期 commit 与实验记录：[8 月 4–15 日报告与补充记录](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
 
 View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
@@ -20,7 +22,7 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 
 ## 项目状态
 
-状态日期：2026-08-14 09:49 BST。
+状态日期：2026-08-15 18:47 BST。
 
 | 组件 | 状态 | 结论 |
 |---|---|---|
@@ -39,9 +41,13 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 | 冻结模型三轮递归 | 已完成 | 改善数从 Arm-B 基线 `19/25` 降为 `12/25`、`7/25`、`2/25`；重复 inference 不是有效提升路径。 |
 | Stage-2 分布适配 | 已完成 | X1 训练分支的最好结果为 `16/25`、Chamfer `0.00384032`，未超过冻结 Arm-B 基线。 |
 | Arm-B Huber 饱和诊断 | 已完成 | GT 曲率 top 1% 中，66.049% vertex 至少一个分量饱和，gradient retention 为 58.436%。 |
-| Future2000 GT-adaptive 扩展 | 运行中 | 2,000 个物体 × 5 个固定 current-mesh variants、28 views、C2F2、current-graph raw-Laplacian 监督；job 15795 已从 32,000 step 恢复。 |
-| Future2000 外部基线 | 运行中，尚无结论 | 已存在的分片诊断尚未完成，且样本级失败数较高；新对比任务使用本地脚本，不提前报告外部方法结论。 |
-| 自动化测试 | 当前文档改动对应检查通过 | 84 项相关测试通过，包括双进程 DDP；本地 GPU 被占用，因此 4 项纯 CUDA 用例未复跑。Python、JSON 与 Slurm 静态检查通过。 |
+| Raw MSE 与 Huber | 已完成 | Raw MSE 未降低 test Top-10%/Top-1% error，也未降低 mean Chamfer/P2S。MSE 使用 global batch 6，基线为 2，因此不是严格单变量训练对比。 |
+| Learned dynamic residual expert 与 gate | 已完成 | Learned final 在 25/25 test samples 上的 raw EPE、Chamfer 和 P2S 均优于联合训练的 base。Validation-selected constant gate 与 5 个 mesh 内 shuffle 干预表明：expert 是主要贡献，vertex-level placement 还提供较小但可测的额外增益。 |
+| 960 image-feature 消融 | 已完成 | `F + (F-Gaussian(F))` 的 test raw EPE、RMS、Top-10% 和 Top-1% 最低；Gaussian-only 的 mean Chamfer、normal consistency 和改善数（`21/25`）最好。 |
+| Native-1920 + high-frequency residual | 运行中，尚无最终结论 | Native renderer 观测已通过 camera/split/graph/target/visibility audit。4×L40 job 15854 从零训练 20,000 steps；global batch 4 与 960 基线的 2 不同。 |
+| Future2000 GT-adaptive 扩展 | 停在 step 64,000，可恢复 | Job 15795 从 32,000 继续到 64,000，后因 DataLoader worker 耗尽 shared memory 失败。Checkpoint 完整，尚无最终 geometry 结果。 |
+| Future2000 外部基线 | 未完成，不报告结论 | 现有分片诊断的样本级失败数较高；新对比任务仍仅使用本地脚本。 |
+| 自动化测试 | 当前文档改动对应检查通过 | Raw loss、dynamic expert/gate、image feature、native-1920 数据准备和分布式训练相关测试通过；下文验证命令是新 checkout 的最终依据。 |
 
 当前模型能够在 GT-query graph 上学习监督微分场，并使用 RGB 信息。从 GT-query
 graph 到 expanded 或 OpenMVS query graph 的迁移未产生几何改善。当前 recovery
@@ -512,6 +518,46 @@ Top 1% 的平均 raw error 是 bottom 90% 的 `13.071x`，其中 `66.049%` 的 v
 的 output-gradient L1，gradient retention 为 `58.436%`。这证明极端尾部存在集中
 梯度压缩；若要建立其与 Chamfer 的完整因果关系，仍需 surface-sensitivity 对照。
 
+### Raw loss、dynamic expert 与 image-feature 消融
+
+Raw-MSE control 不支持替换 Huber。共享 25-sample test 上，Huber/MSE 的
+Top-10% EPE 为 `0.0122438/0.0128078`，Top-1% EPE 为
+`0.0371716/0.0380294`，Chamfer 为 `0.00380692/0.00381317`，改善数为
+`19/25` 与 `16/25`。MSE 使用 global batch 6，Huber 基线为 2，因此不做严格
+单变量训练声称。
+
+从零训练的 learned dynamic residual expert 的 test raw EPE 为
+`0.00294740`、Chamfer `0.00377438`、normal consistency `0.944879`，新增
+5,699 个 flips，改善 `19/25`。Inference-time causal ablation 在 validation 上选得
+`alpha=0.16`。Constant gate 在 25/25 test samples 上优于联合 base；learned gate
+又在 Chamfer/P2S 上 `25/25` 优于 constant gate，并在多数 samples 上优于 5 个
+mesh 内 gate shuffle。Chamfer attribution diagnostic 中 expert/gate 分别占
+`90.32%/9.68%`；这只是诊断，不是严格独立因果分解。
+
+| 960 image feature | Test raw EPE ↓ | Top-10% ↓ | Top-1% ↓ | Chamfer ↓ | Normal ↑ | 改善数 |
+|---|---:|---:|---:|---:|---:|---:|
+| Original Arm B | 0.00297471 | 0.0122427 | 0.0371654 | 0.00380683 | 0.942470 | 19/25 |
+| Gaussian only | 0.00291322 | 0.0123509 | 0.0376811 | **0.00377507** | **0.944459** | **21/25** |
+| Original + HF residual | **0.00288627** | **0.0117524** | **0.0347902** | 0.00377832 | 0.942475 | 20/25 |
+
+Gaussian-only 略微恶化 high-curvature tail，却获得最好的 mean downstream geometry。
+`F + (F-Gaussian(F))` 获得最好的 prediction/tail metrics，且 mean
+Chamfer/P2S 仍优于 original Arm B。
+
+### Native 1920 + high-frequency residual（运行中）
+
+Native-1920 数据使用相同的 250 个 sample IDs、`200/25/25` split、28 个
+camera extrinsics、current graph、proxy、raw target 和 visibility tensor。Intrinsics 按
+native 1920 渲染缩放，不是 960 resize；native 与 resized 的最小 pixel MAE 为
+`0.0205764`。
+
+4×L40 job 15854 从零训练 20,000 steps。View chunk=4 和 gradient checkpointing
+已通过 forward/gradient equivalence tests。实际 global batch 为 4，960 HF 基线为 2，
+因此最终对比会标记为非严格单变量。8 月 15 日 18:47 快照的完整 checkpoint
+为 step 900；step-500 validation loss 为 `6.34615e-5`，同期 960 HF 为
+`9.61499e-5`。这一 early loss 差异不是 Top-10%/Top-1% 或 downstream 结论。
+Jobs 15864/15865 将在训练后执行 paired evaluation 和 report merge。
+
 ### Future2000 GT-adaptive 扩展实验
 
 当前扩展实验包含 2,000 个上游 meshes，每个物体生成 5 个确定性 current-mesh
@@ -523,13 +569,16 @@ views、GT-adaptive subdivision、C2F2 和 current-graph direct-raw target。HPC
 |---:|---:|---:|
 | 20,000 | 5.30099e-6 | 4.99851e-6 |
 | 30,000 | 4.82400e-6 | **4.19731e-6** |
-| 32,000 | **4.77203e-6** | — |
+| 40,000 | 4.62000e-6 | **3.88000e-6** |
+| 50,000 | 4.26000e-6 | 4.23000e-6 |
+| 60,000 | 4.19000e-6 | 5.27000e-6 |
+| 64,000 | **3.99000e-6** | — |
 
-Job 15794 在 32,000 step 停止：DataLoader worker 耗尽 51,200 个文件描述符，
-其余 DDP ranks 随后触发 30 分钟 NCCL watchdog timeout。Checkpoint 完整保留。
-修复后使用 PyTorch `file_system` sharing strategy，并在 epoch 边界重建每个 rank
-的 4 个 workers。替代作业 15795 已于 2026-08-14 09:41 BST 在 `gpu-03` 从
-`checkpoint_latest.pt` 恢复。这里记录的是训练中快照，不是最终 geometry 结论。
+Job 15794 在 32,000 step 因文件描述符耗尽停止。替代 job 15795 使用
+`file_system` sharing strategy 和 non-persistent workers 恢复，到 step 64,000 后因
+DataLoader worker 耗尽 `/dev/shm` 失败（`Bus error` / `No space left on device`）。
+Step-64k checkpoint 完整可恢复。配对 direct-displacement jobs 已取消，尚无最终
+prediction 或 geometry 对比。
 
 ## 安装与验证
 
@@ -569,6 +618,18 @@ sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
 
 # 三张 L40 分片执行 H2 评估，并提交依赖合并作业
 bash scripts/HPC/submit_sofa50_synthetic_current_28view_h2_ablation_3gpu.sh
+
+# Raw MSE 与 Huber 训练/评估
+bash scripts/HPC/submit_sofa50_synthetic_current_28view_loss_ablation_3gpu.sh
+
+# Learned dynamic residual expert 与 inference-time gate 消融
+bash scripts/HPC/submit_sofa50_dynamic_residual_expert_from_scratch_4gpu.sh
+
+# Gaussian 与 original-plus-high-frequency image-feature arms
+bash scripts/HPC/submit_sofa50_image_feature_ablation_2x2gpu.sh
+
+# Native-1920 original-plus-high-frequency 数据、训练和评估链
+bash scripts/HPC/submit_sofa50_hf1920_4gpu.sh
 
 # Future2000 合同审计与四张 L40 current-graph 训练
 sbatch scripts/HPC/audit_future2000_gt_adaptive_2000mesh.slurm

@@ -3,10 +3,12 @@
 These scripts run the comparison and reporting pipeline directly on the local
 machine. They contain no Slurm submission commands.
 
-Status snapshot: 2026-08-14 09:49 BST. The learned raw-Laplacian model is still
-training on HPC as job 15795 from the intact step-32k checkpoint. The paired
-direct-displacement run waits on that job. Do not start the learned comparison
-until both checkpoints are complete.
+Status snapshot: 2026-08-15 18:47 BST. Learned raw-Laplacian job 15795 resumed
+the intact step-32k checkpoint and reached step 64,000, then stopped after a
+DataLoader worker exhausted `/dev/shm` (`Bus error` / `No space left on
+device`). The step-64k checkpoint is intact and resumable. Paired direct-
+displacement jobs 15759/15760 were cancelled, so the learned comparison cannot
+start yet. Do not substitute an incomplete checkpoint for either final arm.
 
 An older external-method diagnostic array, job 15791, was already running on
 HPC when the workflow was moved local. Its partial outputs are not final and

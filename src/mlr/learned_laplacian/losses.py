@@ -12,7 +12,7 @@ def robust_laplacian_error_per_vertex(
     huber_delta: float = 0.01,
     charbonnier_epsilon: float = 1e-3,
 ) -> torch.Tensor:
-    """Return the robust three-component mean error for every query vertex."""
+    """Return the configured three-component mean error for every query vertex."""
 
     if prediction.shape != target.shape or prediction.ndim != 2 or prediction.shape[1] != 3:
         raise ValueError("prediction and target must both have shape [N, 3].")
@@ -21,13 +21,15 @@ def robust_laplacian_error_per_vertex(
         per_component = F.huber_loss(
             prediction, target, delta=huber_delta, reduction="none"
         )
+    elif loss_type == "mse":
+        per_component = residual.square()
     elif loss_type == "charbonnier":
         per_component = (
             torch.sqrt(residual.square() + charbonnier_epsilon**2)
             - charbonnier_epsilon
         )
     else:
-        raise ValueError("loss_type must be 'huber' or 'charbonnier'.")
+        raise ValueError("loss_type must be 'huber', 'mse', or 'charbonnier'.")
     return per_component.mean(dim=-1)
 
 

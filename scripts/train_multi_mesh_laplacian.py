@@ -71,6 +71,14 @@ def main() -> int:
         help="Resume a canonical checkpoint_latest.pt or optimizer-step checkpoint.",
     )
     parser.add_argument(
+        "--initialization-checkpoint",
+        type=Path,
+        help=(
+            "Load compatible model weights only and start a fresh optimizer/step "
+            "schedule. Intended for frozen-base residual experiments."
+        ),
+    )
+    parser.add_argument(
         "--reset-resume-tracking",
         action="store_true",
         help=(
@@ -124,6 +132,7 @@ def main() -> int:
                 config,
                 resume_checkpoint=args.resume_checkpoint,
                 reset_resume_tracking=args.reset_resume_tracking,
+                initialization_checkpoint=args.initialization_checkpoint,
             )
         distributed_barrier(distributed)
 
@@ -156,6 +165,7 @@ def main() -> int:
             initial_loading_seconds=loading_seconds,
             resume_checkpoint=args.resume_checkpoint,
             reset_resume_tracking=args.reset_resume_tracking,
+            initialization_checkpoint=args.initialization_checkpoint,
         )
         if distributed.is_main:
             summary = {
@@ -240,6 +250,7 @@ def _write_run_metadata(
     *,
     resume_checkpoint: Path | None = None,
     reset_resume_tracking: bool = False,
+    initialization_checkpoint: Path | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifest_path.resolve()
@@ -270,6 +281,18 @@ def _write_run_metadata(
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
         resume_sha256 = digest.hexdigest()
+    initialization_path = (
+        None
+        if initialization_checkpoint is None
+        else initialization_checkpoint.resolve()
+    )
+    initialization_sha256 = None
+    if initialization_path is not None:
+        digest = hashlib.sha256()
+        with initialization_path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        initialization_sha256 = digest.hexdigest()
     (output_dir / "run_config.json").write_text(
         json.dumps(
             {
@@ -279,6 +302,10 @@ def _write_run_metadata(
                 "resume_checkpoint": None if resume_path is None else str(resume_path),
                 "resume_checkpoint_sha256": resume_sha256,
                 "reset_resume_tracking": bool(reset_resume_tracking),
+                "initialization_checkpoint": (
+                    None if initialization_path is None else str(initialization_path)
+                ),
+                "initialization_checkpoint_sha256": initialization_sha256,
             },
             indent=2,
         )

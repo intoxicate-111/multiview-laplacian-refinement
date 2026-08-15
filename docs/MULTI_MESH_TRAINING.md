@@ -101,6 +101,37 @@ Use this manifest only for downstream inference evaluation:
 The expanded manifest's schema-required target is not GT supervision. Passing
 that manifest to the training loop would violate the project objective.
 
+## Synthetic-current direct-raw contract
+
+The controlled 28-view Sofa50 Arm B uses 50 objects with five fixed current-
+mesh variants and an object-level `200/25/25` sample split. Unlike the GT-query
+contract above, it predicts the raw current-graph target directly:
+
+```text
+delta_target_raw = L_current @ P_proxy
+target_mode = raw_laplacian
+prediction_loss_space = output_representation
+```
+
+`target_scaling` remains in the common schema because preparation stores
+`local_edge_length`, `valid_scale_mask`, `raw_laplacian_target` and a parallel
+normalised target. It does not divide the Arm-B training target by `h^2`; only
+`target_mode=edge_scale_normalized_laplacian` selects that representation.
+With `clip_max_norm=null`, direct raw targets are not clipped.
+
+The image encoder supports three controlled feature constructions:
+
+- `original`: sample the encoder output `F`;
+- `gaussian`: sample `Gaussian(F)` with fixed kernel and sigma;
+- `original_plus_high_frequency`: sample the 128-channel concatenation
+  `[F, F-Gaussian(F)]`.
+
+Native 1920 training can encode views in fixed chunks and checkpoint the whole
+encoder/feature-construction/sampling operation. These switches reduce peak
+activation memory without changing the mathematical output or gradient; the
+full and chunked paths are covered by equivalence tests. They do not authorize
+changing the optimiser-step budget or hiding a global-batch difference.
+
 ## Canonical Sofa50 launch
 
 The production launcher is:
@@ -253,8 +284,15 @@ and CPU/GPU peak memory.
 - Training is one ragged mesh forward at a time with gradient accumulation,
   not packed-graph batching.
 - PNG decoding is currently the dominant steady-state cost at 960 pixels.
+- Native 1920 F2+HF uses view chunks and gradient checkpointing to keep the
+  full 28-view feature path within L40 memory; all 28 RGB observations remain
+  part of every sample.
 - Static graph preparation runs once and scales with mesh count and complexity.
-- Automatic checkpoint resume is not implemented.
+- Explicit checkpoint resume is supported; launchers do not automatically
+  discover which checkpoint should be resumed.
+- DDP processes at least one mesh per rank. Four ranks with accumulation one
+  therefore have global batch four and cannot reproduce a two-rank global
+  batch of two without changing the batching implementation.
 - A run must not start while dataset files are still being generated or moved.
 - Coordinate and camera conventions must remain identical between GT training
   observations and coarse/expanded inference queries.

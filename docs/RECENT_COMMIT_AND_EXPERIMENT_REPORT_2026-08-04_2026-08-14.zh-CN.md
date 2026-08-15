@@ -1,6 +1,6 @@
 # 近期 Commit、Sofa50 与 Future2000 实验对比报告
 
-报告更新时间：2026-08-14 09:49 BST
+报告更新时间：2026-08-15 18:47 BST（含 5.4 节 addendum）
 
 实验统计窗口：2026-08-04 00:00 BST 至 2026-08-14 09:49 BST
 
@@ -8,8 +8,8 @@
 
 统计基准 HEAD：`bd0f2aaf909af0cea288d551b2857fbe7a9f877a`
 
-说明：本报告与 8 月 13–14 日实现由随后同一个发布 commit 纳入仓库，因此 commit
-统计有意不包含承载本报告自身的发布 commit；实验状态则更新到上述快照时间。
+说明：Commit 统计仍固定在上述 8 月 4–14 日窗口，不包含承载本报告的发布
+commit。5.4 节单独记录 8 月 14–15 日后续实验，不回写历史 commit 统计。
 
 ## 1. 摘要
 
@@ -48,8 +48,8 @@ multi-mesh pipeline 开始，经过 Sofa50 canonical H2、renderer visibility、
 - Arm-B Huber 诊断显示梯度压缩集中于 GT raw-Laplacian top 1%：`66.049%`
   vertices 至少一个分量饱和，gradient retention `58.436%`。
 - Future2000 已形成 2,000×5、28-view、GT-adaptive、C2F2 current-graph 训练合同。
-  200k 主训练在 32k 发生 worker 文件描述符耗尽，修复后由 job 15795 从完整
-  checkpoint 恢复；当前不报告最终 geometry 结论。
+  主训练首次在 32k 因文件描述符耗尽失败，恢复后到 64k 又因 `/dev/shm` 耗尽失败；
+  checkpoint 可恢复，当前不报告最终 geometry 结论。
 
 ## 2. Commit 统计
 
@@ -391,7 +391,7 @@ matched extra-training control 到足以改变结论的程度。它找回 2 个�
 整个 top 10% 全面饱和。要证明它与 reconstruction objective 的完整因果不一致，
 仍需将同一 vertex 与 surface displacement/Chamfer sensitivity 配对。
 
-### 5.3 Future2000 GT-adaptive 扩展（运行中）
+### 5.3 Future2000 GT-adaptive 扩展（停在 64k，可恢复）
 
 数据合同为 2,000 个源 meshes × 5 个固定 current variants，object-level split
 为 `8000/1000/1000`，使用 28 views、GT-adaptive subdivision、C2F2、raw
@@ -403,17 +403,38 @@ current-graph target；配对实验直接预测 vertex displacement。
 |---:|---:|---:|
 | 20,000 | 5.30099e-6 | 4.99851e-6 |
 | 30,000 | 4.82400e-6 | **4.19731e-6** |
-| 32,000 | **4.77203e-6** | — |
+| 40,000 | 4.62000e-6 | **3.88000e-6** |
+| 50,000 | 4.26000e-6 | 4.23000e-6 |
+| 60,000 | 4.19000e-6 | 5.27000e-6 |
+| 64,000 | **3.99000e-6** | — |
 
 首个异常是 DataLoader worker 的 `Too many open files (24)`；随后其他 DDP ranks
 在 `ALLREDUCE` 等待 30 分钟并触发 NCCL watchdog。修复使用 `file_system`
 multiprocessing sharing strategy 和每个 rank 四个 non-persistent workers。
-Job 15795 于 09:41 BST 从完整 step-32k checkpoint 恢复，15759/15760 已重新
-绑定依赖。快照时 15795 正在静态准备，尚未产生 34k 新 loss。
+Job 15795 从完整 step-32k checkpoint 恢复并达到 step 64,000，后因
+DataLoader worker 耗尽 `/dev/shm` 而失败（`Bus error` / `No space left on
+device`）。Step-64k checkpoint 仍完整可恢复。15759/15760 配对 displacement jobs
+已取消，因此这一规模实验尚无最终 geometry 结论。
 
 现有 external diagnostic array 15791 在快照时 shard 0 为 `181/334`，其中
 64 completed、117 failed。作业本身无 Traceback，但样本失败率过高且其余 shards
 未完成，因此不形成外部方法结论。新的 external comparison 只使用本地 runner。
+
+### 5.4 8 月 14–15 日后续 Sofa50 结果
+
+本报告的 commit 计数边界仍是原文档的 8 月 4–14 日历史窗口；下列后续实验作为
+结果 addendum，不追溯修改原 commit 统计。
+
+- Raw MSE 没有降低 test Top-10%/Top-1% 或 mean Chamfer/P2S；Huber/MSE 改善数为
+  `19/25` 与 `16/25`。MSE global batch 6 与基线 2 不同。
+- Learned dynamic residual expert 的 learned final 相对 joint base 在 raw EPE、Chamfer、P2S
+  上均 `25/25` 胜出。Validation-selected `alpha=0.16` 和 5 个 within-mesh shuffles
+  支持：expert 是主要贡献，learned gate placement 有较小额外贡献。
+- 960 image features 中，Gaussian-only 的 Chamfer `0.00377507`、改善数 `21/25`
+  最好；original+HF 的 raw EPE `0.00288627`、Top-10% `0.0117524`、Top-1%
+  `0.0347902` 最好。
+- Native-1920+HF 数据 audit 已通过，4×L40 job 15854 从零训练中。它的 global
+  batch 为 4，960 HF 为 2，因此最终只能作为带 batch caveat 的分辨率消融。
 
 ## 6. 数据来源与复核规则
 

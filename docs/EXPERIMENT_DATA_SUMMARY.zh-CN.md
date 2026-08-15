@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-08-14 09:49 BST，Europe/London。
+状态日期：2026-08-15 18:47 BST，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -45,7 +45,8 @@ $$
 | Query-resolution ablation v2 | 50 个对象；40/5/5 | 14 / 960 | 完成 | `multiview_960/query_resolution_ablation_v2` |
 | Synthetic current-query，14 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 14 / 960 | 完成并已复制到 HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query，28 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 28 / 960 | 完成 | HPC：`sofa50_synthetic_current_28view_v1` |
-| Future2000 GT-adaptive expanded current | 2,000 个对象，每个 5 个变体；变体划分 8000/1000/1000 | 28 / 960 | 数据完成，主训练运行中 | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Synthetic current-query，native 1920 | 与 960 相同的 250 IDs 和 200/25/25 split | 28 / 1920 | 数据完成，HF 训练运行中 | HPC：`sofa50_synthetic_current_28view_native1920_v1` |
+| Future2000 GT-adaptive expanded current | 2,000 个对象，每个 5 个变体；变体划分 8000/1000/1000 | 28 / 960 | 数据完成，主训练停在 64k | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成 | HPC：`openmvs_texture_test_v6_48view` |
 | Thingi10K50 开发集 | 50 个对象；40/5/5 | 960 和 1920 变体 | 仅开发与 smoke run | 本地 `thingi10k50` 运行目录 |
 
@@ -239,9 +240,58 @@ Arm-B validation Huber 诊断覆盖 243,000 个 vertices。GT raw-Laplacian top 
 但只贡献 `5.785%` output-gradient L1。梯度压缩主要集中在 top 1%，并非整个
 top 10% 全面饱和。
 
+### Huber 与 raw MSE
+
+25-sample 统一 test 不支持 raw MSE 能改善 tail 或 mean geometry：
+
+| Loss | Raw EPE ↓ | Raw RMS ↓ | Top-10% ↓ | Top-1% ↓ | Chamfer ↓ | Normal ↑ | Flips | 改善数 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Huber, 0.01 | **0.00297478** | **0.00662604** | **0.0122438** | **0.0371716** | **0.00380692** | 0.942431 | 6,579 | **19/25** |
+| Raw MSE | 0.00297688 | 0.00695997 | 0.0128078 | 0.0380294 | 0.00381317 | **0.943833** | **5,925** | 16/25 |
+
+MSE 使用 global batch 6 和 510-step validation interval，Huber 为 2 和 500；因此
+audit 将其标为资源驱动的非严格训练对比，held-out 统一评估仍可直接比较。
+
+### Learned dynamic residual expert 与 gate 因果消融
+
+Learned final 将联合训练 base 的 raw EPE 从 `0.00450175` 降到 `0.00294740`，
+Chamfer 从 `0.00416138` 降到 `0.00377438`，normal 从 `0.926613` 升到
+`0.944879`，改善数从 `3/25` 升到 `19/25`。该 base 不是冻结的 original Arm B，
+不能把这个大差异当作相对 original baseline 的收益。
+
+Validation 选择 constant gate `alpha=0.16`。Base-to-constant 在 raw EPE、Chamfer、P2S
+和 normal 上均为 `25/25`；constant-to-learned 在 Chamfer/P2S 上 `25/25`，raw EPE
+上 `24/25`。Learned placement 在 5 个 mesh 内 shuffle seeds 上也多数胜出。结果同时
+支持有效 residual expert 与较小但可测的 spatial-placement 增益；gate/curvature
+correlation 只是观察证据。
+
+### 960 Gaussian 与 high-frequency image features
+
+| Feature | Raw EPE ↓ | Raw RMS ↓ | Bottom 90% ↓ | Top 10% ↓ | Top 1% ↓ | Chamfer ↓ | 改善数 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Original | 0.00297471 | 0.00662531 | 0.00194494 | 0.0122427 | 0.0371654 | 0.00380683 | 19/25 |
+| Gaussian | 0.00291322 | 0.00666042 | **0.00186460** | 0.0123509 | 0.0376811 | **0.00377507** | **21/25** |
+| Original + HF | **0.00288627** | **0.00628246** | 0.00190114 | **0.0117524** | **0.0347902** | 0.00377832 | 20/25 |
+
+Gaussian-only 改善 mean downstream geometry，却相对 original 恶化两个 tail groups。
+`F + (F-Gaussian(F))` 获得最强 raw prediction/tail metrics，且 Bottom-90%
+没有实质退化。
+
+### Native-1920 + HF（运行快照）
+
+Native renderer 复用 960 HF 的 sample IDs、28 个 camera extrinsics、split、graph、proxy、
+target 和 visibility contracts。Intrinsics 按 1920 缩放，native 与 resized 的最小 pixel
+MAE 为 `0.0205764`，排除 resize-only 路径。Job 15854 使用 4×L40 从零训练
+20,000 global optimizer steps。Step 500 train/validation loss 为 `7.02343e-5` /
+`6.34615e-5`，同期 960 为 `7.47579e-5` / `9.61499e-5`。
+
+1920 global batch 为 4，960 基线为 2。View chunk 和 gradient checkpointing 已通过数学
+等价测试，但 batch 差异使训练对比非严格。在 jobs 15864/15865 完成 paired
+Top-10%/Top-1% 与 downstream 评估前，不报告分辨率结论。
+
 ## Future2000 GT-adaptive 扩展实验
 
-快照时间：2026-08-14 09:49 BST。数据集包含 2,000 个源物体，每个物体 5 个
+快照时间：2026-08-15 18:47 BST。数据集包含 2,000 个源物体，每个物体 5 个
 确定性 expanded-current variants；object-level split 为 8,000 train、1,000
 validation、1,000 test。主分支使用 28 views、GT-adaptive subdivision、C2F2 和
 raw current-graph target `L_current @ P_proxy`；配对 control 直接预测 vertex
@@ -251,18 +301,21 @@ displacement。
 |---:|---:|---:|---|
 | 20,000 | 5.30099e-6 | 4.99851e-6 | resumed 200k run |
 | 30,000 | 4.82400e-6 | **4.19731e-6** | 当前最好 validation |
-| 32,000 | **4.77203e-6** | — | 最新完整 checkpoint |
+| 40,000 | 4.62000e-6 | **3.88000e-6** | 恢复后最低 validation |
+| 50,000 | 4.26000e-6 | 4.23000e-6 | 恢复运行 |
+| 60,000 | 4.19000e-6 | 5.27000e-6 | 恢复运行 |
+| 64,000 | **3.99000e-6** | — | 最新完整 checkpoint |
 
 Job 15794 使用四张 L40，正常速度约 `3.076` optimizer steps/s，但 persistent
 DataLoader worker 在 32,000 step 耗尽 51,200 个文件描述符；其余 ranks 在 30
 分钟后触发 NCCL `ALLREDUCE` timeout。基础设施故障前，20k→32k train loss 下降
 `9.98%`，20k→30k validation 改善 `16.03%`。
 
-修复路径使用 `multiprocessing_sharing_strategy=file_system`、每个 rank 四个
-non-persistent workers，并保留 step-32k optimizer state。替代 job 15795 已于
-09:41 BST 使用四张 L40 启动；15759 与 15760 已改为依赖它成功完成。现有外部
-baseline array 15791 尚未完成且样本级失败率较高，因此不报告最终外部方法指标。
-新的对比任务只通过 `scripts/local/run_future2000_comparisons.sh` 在本地启动。
+替代 job 15795 使用 `file_system` sharing 和 non-persistent workers 恢复，到
+step 64,000 后因 worker 耗尽 `/dev/shm` 失败（`Bus error` / `No space left on
+device`）。Step-64k checkpoint 仍可恢复。配对 displacement jobs 15759/15760 已取消，
+尚无最终 prediction/geometry 对比。External array 15791 仍不完整且样本级失败率高；
+新任务仅通过 `scripts/local/run_future2000_comparisons.sh` 在本地启动。
 
 ## 其他诊断实验
 
@@ -308,8 +361,14 @@ baseline array 15791 尚未完成且样本级失败率较高，因此不报告�
 | 15686 | H2 三分片评估 | 完成 | 三个 L40 array tasks 均约 19 分钟完成。 |
 | 15687 | H2 report merge | 完成 | 最终 JSON/CSV/report 在 15 秒内合并完成。 |
 | 15794 | Future2000 raw-Laplacian 200k | 失败，可恢复 | 到达 step 32,000；`Too many open files` 随后导致 NCCL timeout。 |
-| 15795 | Future2000 raw-Laplacian 200k resume | 快照时运行中 | 四张 L40；使用低文件描述符 worker 配置从完整 step-32k checkpoint 恢复。 |
+| 15795 | Future2000 raw-Laplacian 200k resume | 失败，可恢复 | 达到 step 64,000；DataLoader worker 耗尽 `/dev/shm`。 |
 | 15791 | Future2000 外部方法诊断 array | 快照时运行中 | 尚未完成且样本级失败数较高，不记录最终 baseline 结论。 |
+| 15812/15813 | Raw MSE 评估/报告 | 完成 | 4 个 shards 用时 75–85 秒，merge 用时 24 秒。 |
+| 15844 | Gaussian feature，20k | 完成 | 2×L40；elapsed `03:31:05`。 |
+| 15845 | Original + HF feature，20k | 完成 | 2×L40；elapsed `03:58:50`。 |
+| 15846/15847 | Image-feature 评估/报告 | 完成 | 4 个 shards 都在 2 分钟内完成，merge 11 秒。 |
+| 15854 | Native-1920 + HF，20k | 快照时运行中 | 4×L40；从零训练，global batch 4，最新完整 checkpoint step 900。 |
+| 15864/15865 | Native-1920 paired evaluation/report | 依赖等待 | 仅在 job 15854 成功完成后启动。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 
@@ -326,6 +385,11 @@ Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于�
 - Current-graph training 相对 frozen GT-query baseline 缩小了 synthetic-current
   recovery gap。在受控 28-view H2 消融中，direct raw-Laplacian training 最优，
   mean Chamfer 低于 initial mesh，并改善 19/25 test samples。
+- Raw MSE 未改善 high-curvature tail 或 mean recovery。
+- Learned residual expert 在无 spatial gate 时已有效；learned gate 在 validation-selected
+  constant scale 之上还提供较小的 placement-specific 增益。
+- 960 original+HF 的 raw/tail prediction 最好，Gaussian-only 的 mean recovery 最好。
+  Native-1920+HF 尚待完成，early validation loss 不是最终分辨率结论。
 
 ## 数据来源优先级
 

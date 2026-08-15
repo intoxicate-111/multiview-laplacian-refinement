@@ -69,8 +69,8 @@ Relevant entry points:
 - `evaluate_future2000_laplacian_vs_displacement_3gpu.slurm`: sharded learned
   comparison after both models are complete.
 
-The active 200,000-step launch overrides the development budget stored in the
-JSON configuration. Job 15794 reached step 32,000 and then failed because a
+The 200,000-step launch overrides the development budget stored in the JSON
+configuration. Job 15794 reached step 32,000 and then failed because a
 persistent DataLoader worker exhausted the 51,200 file-descriptor limit; the
 remaining ranks later hit the NCCL watchdog. Job 15795 resumes the preserved
 checkpoint with:
@@ -82,6 +82,32 @@ multiprocessing_sharing_strategy=file_system
 ```
 
 These settings preserve parallel image loading while recreating workers at
-epoch boundaries. The downstream jobs must use `afterok` dependencies on the
-replacement training job. External-method comparison launches are local-only;
-see `docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md`.
+epoch boundaries. Job 15795 reached step 64,000, then failed because a worker
+exhausted `/dev/shm`; its checkpoint remains resumable. The paired displacement
+jobs were cancelled, and no final geometry result exists. External-method
+comparison launches are local-only; see
+`docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md`.
+
+## Sofa50 direct-raw controlled experiments
+
+The current 28-view synthetic-current line uses direct raw current-graph
+Laplacian output, Huber `delta=0.01`, seed 7, local jitter off and 20,000 global
+optimizer steps. Available orchestration entry points are:
+
+- `submit_sofa50_synthetic_current_28view_loss_ablation_3gpu.sh`: raw MSE arm
+  followed by four-shard Huber/MSE evaluation and merge;
+- `submit_sofa50_dynamic_residual_expert_from_scratch_4gpu.sh`: four-L40
+  from-scratch dynamic residual expert and unified evaluation;
+- `evaluate_sofa50_dynamic_gate_causal_ablation_4gpu.slurm` plus
+  `merge_sofa50_dynamic_gate_causal_ablation.slurm`: no-retraining base,
+  constant, shuffled and learned-gate interventions;
+- `submit_sofa50_image_feature_ablation_2x2gpu.sh`: Gaussian-only and
+  original-plus-HF arms, two L40 GPUs per arm;
+- `submit_sofa50_hf1920_4gpu.sh`: native-1920 preparation, smoke, four-L40
+  training, four-shard 960/1920 evaluation and report merge.
+
+The native-1920 launcher preserves all 28 views but uses view chunks of four
+and gradient checkpointing for activation memory. Its global batch is four,
+whereas the completed 960 HF arm uses two; reports must retain this non-strict
+ablation caveat. All long chains use `afterok` dependencies and refuse to
+overwrite a completed report or shard.

@@ -10,9 +10,11 @@ Visibility and recovery: [Visibility-aware recovery report](docs/VISIBILITY_AWAR
 
 Experiment metrics and run status: [Experiment data summary](docs/EXPERIMENT_DATA_SUMMARY.md)
 
+Current Sofa50 controlled ablations: [Direct-raw/loss/expert/image-feature report](docs/SOFA50_CONTROLLED_ABLATIONS_REPORT.zh-CN.md)
+
 Future2000 local comparisons: [Local task guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 
-Recent commit and experiment record: [4–14 August report](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
+Recent commit and experiment record: [4–15 August report and addendum](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
 
 View-count and query-resolution results: [Ablation report](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
@@ -20,7 +22,7 @@ View-count and query-resolution results: [Ablation report](runs/learned_laplacia
 
 ## Project status
 
-Status date: 2026-08-14 09:49 BST.
+Status date: 2026-08-15 18:47 BST.
 
 | Component | State | Conclusion |
 |---|---|---|
@@ -39,9 +41,13 @@ Status date: 2026-08-14 09:49 BST.
 | Three-round frozen-model recursion | Complete | Improvement count falls from the Arm-B baseline `19/25` to `12/25`, `7/25` and `2/25`; repeated inference is not a valid improvement path. |
 | Stage-2 distribution adaptation | Complete | The best X1-trained arm reaches `16/25` and Chamfer `0.00384032`; it does not exceed the frozen Arm-B baseline. |
 | Arm-B Huber saturation diagnostic | Complete | In the top 1% GT-curvature group, 66.049% of vertices have at least one saturated component and gradient retention is 58.436%. |
-| Future2000 GT-adaptive scale-up | Running | 2,000 objects × 5 fixed current-mesh variants, 28 views, C2F2 and current-graph raw-Laplacian supervision. Job 15795 resumed from step 32,000 after the input-worker fix. |
-| Future2000 external baselines | Running, not final | The existing sharded diagnostic is incomplete and has a high sample-level failure count; no external-method conclusion is reported yet. New comparison launches use the local task scripts. |
-| Automated tests | Passing for the documented changes | 84 relevant tests pass, including the two-process DDP test; four local CUDA-only cases were not rerun because the local GPU was occupied. Python, JSON and Slurm static checks pass. |
+| Raw MSE versus Huber | Complete | Raw MSE does not lower test Top-10%/Top-1% error or mean Chamfer/P2S. The MSE run used global batch 6 versus 2, so it is not a strict single-variable training comparison. |
+| Learned dynamic residual expert and gate | Complete | The learned final improves the jointly trained base on every test sample for raw EPE, Chamfer and P2S. Validation-selected constant-gate and five within-mesh shuffle interventions show that the residual expert is the main contribution and vertex-level gate placement adds a smaller, measurable gain. |
+| 960 image-feature ablation | Complete | `F + (F-Gaussian(F))` has the lowest test raw EPE, RMS, Top-10% and Top-1% errors. Gaussian-only features have the best mean Chamfer, normal consistency and improved count (`21/25`). |
+| Native-1920 plus high-frequency residual | Running, not final | Native renderer observations pass camera/split/graph/target/visibility audits. Four-L40 job 15854 is a 20,000-step from-scratch run; global batch 4 versus the 960 baseline's 2 prevents a strict single-variable claim. |
+| Future2000 GT-adaptive scale-up | Stopped at step 64,000, resumable | Job 15795 progressed from step 32,000 to 64,000, then a DataLoader worker exhausted shared memory. The checkpoint is intact; no final geometry result exists. |
+| Future2000 external baselines | Incomplete, not final | The existing sharded diagnostic has a high sample-level failure count; no external-method conclusion is reported. New comparison launches remain local-only. |
+| Automated tests | Passing for the documented changes | Targeted raw-loss, dynamic-expert/gate, image-feature, native-1920 preparation and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
 
 The implemented model learns the supervised differential field on GT-query
 graphs and uses RGB information. Transfer from GT-query graphs to expanded or
@@ -543,9 +549,61 @@ L1, with `58.436%` gradient retention. The result identifies concentrated
 tail-gradient compression; linking it causally to Chamfer still requires a
 surface-sensitivity experiment.
 
+### Raw loss, dynamic expert and image-feature ablations
+
+The raw-MSE control does not support replacing Huber. On the shared 25-sample
+test set, Huber/MSE Top-10% EPE is `0.0122438/0.0128078`, Top-1% EPE is
+`0.0371716/0.0380294`, Chamfer is `0.00380692/0.00381317`, and improved count is
+`19/25` versus `16/25`. The MSE run used three L40 ranks with global batch 6,
+whereas the Huber baseline used global batch 2; this resource-driven difference
+is recorded by the audit and prevents a strict single-variable claim.
+
+The from-scratch learned dynamic residual expert produces test raw EPE
+`0.00294740`, Chamfer `0.00377438`, normal consistency `0.944879`, 5,699
+introduced flips and `19/25` improved samples. Its inference-time causal
+ablation selects constant `alpha=0.16` on validation. Constant gating already
+improves the jointly trained base on all 25 test samples; the learned spatial
+gate then beats the constant gate on Chamfer and P2S for `25/25`, and beats each
+of five within-mesh gate shuffles on most samples. For Chamfer, the attribution
+diagnostic assigns `90.32%` of the total base-to-learned change to the expert
+without spatial modulation and `9.68%` to learned gating. These ratios are
+diagnostics, not an independent causal decomposition.
+
+The 960 image-feature experiment keeps the direct-raw C2F2 contract fixed:
+
+| Image feature | Test raw EPE ↓ | Top-10% ↓ | Top-1% ↓ | Chamfer ↓ | Normal ↑ | Improved |
+|---|---:|---:|---:|---:|---:|---:|
+| Original Arm B | 0.00297471 | 0.0122427 | 0.0371654 | 0.00380683 | 0.942470 | 19/25 |
+| Gaussian only | 0.00291322 | 0.0123509 | 0.0376811 | **0.00377507** | **0.944459** | **21/25** |
+| Original + HF residual | **0.00288627** | **0.0117524** | **0.0347902** | 0.00377832 | 0.942475 | 20/25 |
+
+Gaussian-only sampling slightly degrades the high-curvature tail while
+improving mean downstream geometry. Adding `F-Gaussian(F)` to the original
+feature gives the best prediction and tail metrics and still improves mean
+Chamfer/P2S over original Arm B.
+
+### Native 1920 plus high-frequency residual, running
+
+The native-1920 dataset contains the same 250 sample IDs, object-level
+`200/25/25` split, 28 camera extrinsics, current graphs, proxy positions,
+raw-Laplacian targets and renderer visibility tensors as the 960 HF run.
+Intrinsics are scaled for native 1920 rendering; the observations are not
+resized 960 images. The minimum native-versus-resized pixel MAE across the
+audit is `0.0205764`.
+
+Four-L40 job 15854 trains from scratch for 20,000 optimiser steps. View chunks
+of four and gradient checkpointing are execution-only memory controls covered
+by forward/gradient equivalence tests. The actual global batch is 4 versus 2
+for the completed 960 HF baseline, so the final report will explicitly label
+the comparison non-strict. At the 15 August 18:47 snapshot the latest complete
+checkpoint is step 900; step-500 validation loss is `6.34615e-5` versus
+`9.61499e-5` for 960 HF at the same step. This early loss difference is not a
+Top-10%/Top-1% or downstream conclusion. Jobs 15864 and 15865 will run the
+four-shard paired evaluation and report merge after training.
+
 ### Future2000 GT-adaptive scale-up
 
-The running scale-up uses 2,000 upstream meshes, five deterministic current-mesh
+The stopped, resumable scale-up uses 2,000 upstream meshes, five deterministic current-mesh
 variants per object, an object-level 80/10/10 split (`8000/1000/1000` samples),
 28 calibrated views, GT-adaptive subdivision, C2F2 and the current-graph
 direct-raw target. The launch overrides the stored development budget to
@@ -555,15 +613,19 @@ direct-raw target. The launch overrides the stored development budget to
 |---:|---:|---:|
 | 20,000 | 5.30099e-6 | 4.99851e-6 |
 | 30,000 | 4.82400e-6 | **4.19731e-6** |
-| 32,000 | **4.77203e-6** | — |
+| 40,000 | 4.62000e-6 | **3.88000e-6** |
+| 50,000 | 4.26000e-6 | 4.23000e-6 |
+| 60,000 | 4.19000e-6 | 5.27000e-6 |
+| 64,000 | **3.99000e-6** | — |
 
 Job 15794 stopped at step 32,000 after a DataLoader worker exhausted 51,200
 file descriptors; the other DDP ranks then reached the 30-minute NCCL watchdog
-timeout. The checkpoint is intact. The fix selects PyTorch's `file_system`
-sharing strategy and recreates four workers per rank at epoch boundaries.
-Replacement job 15795 resumed from `checkpoint_latest.pt` on `gpu-03` at
-09:41 BST on 14 August 2026. This is a running training snapshot, not a final
-geometry result.
+timeout. Replacement job 15795 resumed the intact checkpoint with PyTorch's
+`file_system` sharing strategy and non-persistent workers, reached step 64,000,
+then failed when a DataLoader worker exhausted `/dev/shm` (`Bus error` and `No
+space left on device`). The step-64k checkpoint remains resumable. The paired
+direct-displacement jobs were cancelled, so this experiment has no final
+prediction or geometry comparison.
 
 ## Installation and verification
 
@@ -604,6 +666,18 @@ sbatch scripts/HPC/c2f2_dataset_ablation_20k.slurm query gt_sub1
 
 # Three-L40 sharded H2 evaluation and dependent merge
 bash scripts/HPC/submit_sofa50_synthetic_current_28view_h2_ablation_3gpu.sh
+
+# Raw MSE versus Huber training/evaluation
+bash scripts/HPC/submit_sofa50_synthetic_current_28view_loss_ablation_3gpu.sh
+
+# Learned dynamic residual expert and inference-time gate ablation
+bash scripts/HPC/submit_sofa50_dynamic_residual_expert_from_scratch_4gpu.sh
+
+# Gaussian and original-plus-high-frequency image-feature arms
+bash scripts/HPC/submit_sofa50_image_feature_ablation_2x2gpu.sh
+
+# Native-1920 original-plus-high-frequency data, training and evaluation chain
+bash scripts/HPC/submit_sofa50_hf1920_4gpu.sh
 
 # Future2000 contract audit and four-L40 current-graph training
 sbatch scripts/HPC/audit_future2000_gt_adaptive_2000mesh.slurm

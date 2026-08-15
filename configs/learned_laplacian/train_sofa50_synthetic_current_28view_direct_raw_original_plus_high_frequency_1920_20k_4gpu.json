@@ -1,0 +1,146 @@
+{
+  "method": "synthetic_current_28view_hf_resolution_ablation",
+  "seed": 7,
+  "device": "cuda",
+  "dataset": {
+    "name": "Sofa50SyntheticCurrent28ViewNative1920",
+    "expected_split_counts": {"train": 200, "validation": 25, "test": 25},
+    "objects": 50,
+    "variants_per_object": 5,
+    "object_level_split": true
+  },
+  "input_mode": "coarse_plus_multiview",
+  "target_mode": "raw_laplacian",
+  "target_semantics": "current_graph_proxy_target",
+  "target_definition": "delta_target_raw=L_current@P_proxy",
+  "target_scaling": {
+    "method": "square_of_mean_incident_edge_length",
+    "source": "synthetic_current_graph",
+    "epsilon": 1e-12,
+    "clip_max_norm": null
+  },
+  "query_training": {
+    "enabled": false,
+    "exact_fraction": 0.2,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "max_offset_h": 0.001,
+    "apply_to_validation": false,
+    "zero_initial_laplacian": false
+  },
+  "local_query_jitter": {
+    "enabled": false,
+    "std_h": 0.003,
+    "distribution": "isotropic_gaussian_xyz_clipped_at_3sigma",
+    "maximum_offset_h": 0.009,
+    "scope": "training_only",
+    "frozen": ["proxy", "target", "h_current", "graph", "connectivity", "operator"]
+  },
+  "renderer_visibility": {
+    "condition": "backface_and_occlusion",
+    "source": "precomputed_current_graph_depth_tested_face_id_buffer",
+    "neighborhood_radius": 1,
+    "front_face_winding": "ccw",
+    "depth_image_used": false
+  },
+  "image_encoder": {
+    "feature_dim": 64,
+    "first_stride": 1,
+    "second_stride": 1,
+    "normalization": {"mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0]},
+    "feature_construction": {
+      "mode": "original_plus_high_frequency",
+      "kernel_size": 5,
+      "sigma": 1.0,
+      "padding": "reflect"
+    },
+    "view_chunk_size": 4,
+    "gradient_checkpointing": true
+  },
+  "model": {
+    "hidden_dim": 256,
+    "num_graph_layers": 3,
+    "dropout": 0.0,
+    "geometry_mode": "query_fourier",
+    "position_encoding": {"num_frequencies": 6, "include_input": true}
+  },
+  "confidence": {
+    "enabled": true,
+    "loss_weight": 1.0,
+    "regularizer": 0.01,
+    "minimum_confidence": 0.0001,
+    "quantile_bins": 5,
+    "recovery_weight": "renderer_visible_any_times_confidence_prediction"
+  },
+  "training": {
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "loss": "huber",
+    "huber_delta": 0.01,
+    "prediction_loss_space": "output_representation",
+    "gradient_clip_norm": 1.0,
+    "vertex_sampling": {"mode": "full"},
+    "amp": {"enabled": true, "dtype": "float16"},
+    "lr_scheduler": {
+      "type": "reduce_on_plateau",
+      "factor": 0.5,
+      "patience_validations": 10,
+      "threshold": 0.0001,
+      "threshold_mode": "abs",
+      "cooldown_validations": 1,
+      "min_lr": 0.000001
+    }
+  },
+  "data_loading": {
+    "num_workers": 0,
+    "pin_memory": true,
+    "persistent_workers": false,
+    "prefetch_factor": 2,
+    "multiprocessing_sharing_strategy": "file_system",
+    "cuda_prefetch": true,
+    "train_views_per_sample": null,
+    "validation_views_per_sample": null
+  },
+  "multi_object_training": {
+    "epochs": 2000,
+    "max_optimizer_steps": 20000,
+    "report_every_optimizer_steps": 200,
+    "gradient_accumulation_meshes": 1,
+    "shuffle": true,
+    "validation_every_epochs": 10,
+    "checkpoint_every_epochs": 200,
+    "checkpoint_epochs": [200, 500, 800],
+    "cache_prepared_samples_on_device": false,
+    "profile_training": true,
+    "early_stopping": {"enabled": false, "patience_validations": 15, "min_delta": 0.0001}
+  },
+  "recovery": {
+    "operator_type": "uniform",
+    "lambda_lap": 1.0,
+    "lambda_anchor": 0.01,
+    "lambda_edge": 0.0,
+    "num_iters": 200,
+    "learning_rate": 0.01,
+    "robust_loss": "huber",
+    "huber_delta": 0.01,
+    "unseen_anchor_weight": 0.0,
+    "write_legacy_prediction_names": false,
+    "denormalization": "none; model output is delta_pred_raw"
+  },
+  "experiment_metadata": {
+    "experiment": "sofa50_hf_resolution_960_vs_1920",
+    "arm": "HF_native1920_4gpu",
+    "baseline_arm": "C_original_plus_high_frequency_960_2gpu",
+    "capacity": "C2",
+    "feature_resolution": "F2",
+    "views": 28,
+    "input_resolution": 1920,
+    "render_resolution": 1920,
+    "distributed_world_size": 4,
+    "effective_global_batch_meshes": 4,
+    "baseline_effective_global_batch_meshes": 2,
+    "strict_single_variable_training_claim": false,
+    "non_resolution_execution_difference": "view chunks of 4 with gradient checkpointing; tested forward/gradient equivalent",
+    "comparison_type": "resolution_ablation_with_authorized_global_batch_difference"
+  }
+}
