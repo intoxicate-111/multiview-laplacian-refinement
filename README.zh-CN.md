@@ -4,7 +4,7 @@
 
 方法定义：[Sofa50 标准流程](docs/CANONICAL_SOFA50_PIPELINE.md)
 
-训练说明：[多网格 GT-query 训练](docs/MULTI_MESH_TRAINING.zh-CN.md)
+训练说明：[多网格训练](docs/MULTI_MESH_TRAINING.zh-CN.md)
 
 可见性与恢复：[可见性感知恢复报告](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
 
@@ -26,8 +26,9 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 
 | 组件 | 状态 | 结论 |
 |---|---|---|
-| GT-query 数据与训练流程 | 已实现 | 绝对 GT `h^2` 归一化 Laplacian 的直接监督训练可以运行。 |
-| Target 泄漏控制 | 已实现并测试 | 模型输入不包含 GT Laplacian。 |
+| Current-query/current-graph 训练流程 | 当前主线 | 模型直接预测 raw target `L_current @ P_proxy`；不进行 `h^2` target normalization 或 output denormalization。 |
+| 历史 GT-query 流程 | 保留用于对照 | 绝对 GT `h^2`-normalized Laplacian 监督仍可复现，但不再是当前训练主线。 |
+| Target 泄漏控制 | 已实现并测试 | 模型输入不包含 proxy positions 或监督 raw/normalized Laplacian 数值。 |
 | Sofa50 960 图像分辨率消融 | 已完成 | 在 50,000 个 optimizer steps 下，F2 的 exact-query error 低于 F0 和 F1。 |
 | Sofa50 960 C2F2 训练 | 已完成 | 三个 seed 均完成 50,000 个 optimizer steps。C2F2 是当前 exact-query error 最低的配置。 |
 | Sofa50 1920 C2F2 训练 | 已完成 | 三个 seed 均完成 20,000 个 optimizer steps。平均 endpoint error 和 recovery Chamfer 高于 960 结果；平均 cosine 更高。 |
@@ -49,57 +50,64 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 | Future2000 外部基线 | 未完成，不报告结论 | 现有分片诊断的样本级失败数较高；新对比任务仍仅使用本地脚本。 |
 | 自动化测试 | 当前文档改动对应检查通过 | Raw loss、dynamic expert/gate、image feature、native-1920 数据准备和分布式训练相关测试通过；下文验证命令是新 checkout 的最终依据。 |
 
-当前模型能够在 GT-query graph 上学习监督微分场，并使用 RGB 信息。从 GT-query
-graph 到 expanded 或 OpenMVS query graph 的迁移未产生几何改善。当前 recovery
-流程未达到端到端 coarse-mesh refinement 目标。
+当前训练主线是 Sofa50 synthetic-current、current-query/current-graph、direct-raw
+formulation。Query mesh 及其 connectivity 同时定义 prediction 与 recovery 使用的
+graph。监督场为 `L_current @ P_proxy`；它只作为 target，绝不会作为 inference
+feature 输入模型。当前 native-1920 实验保留 960 实验中效果最好的 high-frequency
+feature construction，只改变图像分辨率以及已经明确记录的 distributed global
+batch。
 
-当前扩展实验采用另一个明确的 current-graph 合同：query mesh 与 connectivity
-属于模型输入，监督 raw target 为 `L_current @ P_proxy`；配对分支改为直接预测
-vertex displacement。这些 target 是监督信号，不是额外的 inference 输入。
+早期 GT-query、`h^2`-normalized formulation 仍作为历史背景保留。该路径迁移到
+expanded/OpenMVS query graph 后未改善 geometry，因此不再作为下文数学定义的主线。
 
-## 方法
+## 当前训练方法
 
-模型根据标定后的多视图观测和图查询预测 GT 局部微分信号：
+模型根据 28 个标定视图和 current mesh graph，直接预测 raw target Laplacian：
 
 ```text
-多视图 RGB + 相机 + 3D query + 局部图上下文
-    -> 绝对 GT h^2 归一化 Laplacian
+28-view RGB + 相机 + current vertices/connectivity + 局部几何
+    -> direct raw current-graph Laplacian target
 ```
 
-对于 GT vertex `i`：
+对于存储的 current mesh `P_current`、faces `F_current` 和配对 proxy positions
+`P_proxy`：
 
 ```text
-delta_gt_i = (L_gt V_gt)_i
-h_i        = vertex i 的平均相邻 GT 边长
-target_i   = delta_gt_i / (h_i^2 + epsilon)
+L_current       = uniform_laplacian(P_current, F_current)
+target_raw      = L_current @ P_proxy
+prediction_raw  = model(images, cameras, P_current, F_current)
 ```
 
-训练使用 GT vertices 和 GT connectivity。一部分 query 保持精确 GT 位置，其余
-query 按照 `h_i` 加入有界的法向与切向扰动。Target 始终绑定到原始 GT vertex。
+这里不除以 `h_current^2`，不 clip target，也不反归一化 output。配置中的
+`target_scaling` 仍声明 edge-scale 定义，因为 `h_current` 用作局部几何 feature 和
+validity metadata；当 `target_mode = raw_laplacian` 时，它不会改变 raw target。
 
-当前 geometry mode 为 `query_fourier`。Fourier feature 在 query augmentation
-之后计算。Image feature、query position、normal、相对局部尺度、degree 和 graph
-connectivity 是模型输入。Raw 和 normalized GT Laplacian 仅用于监督。GT-query
-training sample 中的 `initial_laplacian` 为零。
+当前 geometry mode 为 `query_fourier`，local query jitter 关闭，query 就是 current
+vertex position。Image feature、Fourier-encoded query position、current vertex
+normal、relative local edge scale、degree、valid-view ratio 和 current connectivity
+属于 inference 输入。`P_proxy`、raw target 与 normalized target 都不是模型输入。
 
-推理使用独立生成的 coarse mesh 或 topology-expanded mesh：
+当前 high-frequency image branch 使用 encoder feature `F`、固定 Gaussian blur
+`G(F)`（kernel 5、sigma 1.0），并采样拼接结果 `[F, F-G(F)]`。Recovery 直接使用
+同一 raw 单位的 prediction：
 
 ```text
-coarse mesh vertices
-  -> 投影到标定视图
-  -> 聚合 image features
-  -> 预测 normalized Laplacian
-  -> 使用当前 query graph 尺度反归一化
+current mesh vertices
+  -> 投影到 28 个标定视图
+  -> 聚合 original + high-frequency image features
+  -> 直接预测 delta_pred_raw
   -> confidence/visibility 加权 Laplacian recovery
 ```
 
-推理 graph 不接收任何 GT differential value。GT geometry 仅用于评估。
+GT geometry 只用于构造监督与评估。Dynamic residual expert、gate、direct-
+displacement branch 和 raw-MSE loss 都是受控消融，不在当前 1920+HF 主线中启用。
 
 ## 数学定义
 
-以下公式对应当前实现。历史路径会单独标记。
+以下公式对应当前 direct-raw + high-frequency 训练路径。历史 normalized
+formulation 会在独立小节中说明。
 
-### Uniform Laplacian 与监督目标
+### Current-graph uniform Laplacian 与 direct-raw target
 
 令 `N(i)` 为 vertex `i` 的 one-ring neighbours，`d_i = |N(i)|`。Uniform graph
 Laplacian 为
@@ -110,51 +118,40 @@ $$
 L_{ii}=1,\quad L_{ij}=-\frac{1}{d_i}.
 $$
 
-Isolated vertex 对应零 Laplacian row。局部边尺度与绝对监督目标为
+Isolated vertex 对应零 Laplacian row。令训练 query mesh 为
+`X_0 = P_current`，`P_proxy` 与其具有完全相同的 vertex ordering。局部边尺度和
+当前监督 target 为
 
 $$
-h_i = \frac{1}{d_i}\sum_{j\in N(i)}\lVert V_i-V_j\rVert_2,
+h_i^{\mathrm{current}}=
+\frac{1}{d_i}\sum_{j\in N(i)}\lVert X_{0,i}-X_{0,j}\rVert_2,
 \qquad
-\delta_i^{\mathrm{GT}}=(L_{\mathrm{GT}}V_{\mathrm{GT}})_i,
+\delta_i^*=(L_{\mathrm{current}}P_{\mathrm{proxy}})_i.
 $$
 
-$$
-\widehat{\delta}_i^{\mathrm{GT}}
-=\frac{\delta_i^{\mathrm{GT}}}{h_i^2+\varepsilon},
-\qquad \varepsilon=10^{-12}.
-$$
-
-网络预测绝对 normalized vector `delta_hat_prediction`，不预测 displacement 或
-Laplacian residual。对于当前 inference graph：
+网络直接预测与 `delta_target_raw = delta*` 单位相同的 `delta_pred_raw`：
 
 $$
-\delta_i^{\mathrm{pred}}
-=\widehat{\delta}_i^{\mathrm{pred}}\left((h_i^{\mathrm{current}})^2+\varepsilon\right).
+f_\theta(I_{1:M},K_{1:M},E_{1:M},X_0,F)_i
+=\delta_i^{\mathrm{pred,raw}}\approx\delta_i^*.
 $$
 
-反归一化只执行一次，并使用当前 query graph 的尺度。
+两侧都不乘除 `(h_i^current)^2`。当前配置中，
+`target_scaling.method = square_of_mean_incident_edge_length` 只定义可用的尺度
+metadata；`target_mode = raw_laplacian` 会在 loss 前直接选择 raw tensor。
+`clip_max_norm = null`，因此 target 也不会被 clipping。
 
-### Query 扰动
+### Current-query 合同
 
-对于 perturbed GT query：
-
-$$
-q_i=V_i+h_i\left(\xi_i n_i+\zeta_i t_i\right),
-\qquad
-\xi_i\sim\mathcal N(0,\sigma_n^2),\quad
-\zeta_i\sim\mathcal N(0,\sigma_t^2),
-$$
-
-其中 `n_i` 是 vertex normal；`t_i` 是从 Gaussian 3D direction 中去除法向分量
-后得到的随机单位切向量。位移满足
+主线 query 就是 current vertex：
 
 $$
-\lVert q_i-V_i\rVert_2\leq \kappa h_i.
+q_i=X_{0,i}.
 $$
 
-Canonical settings 为 `sigma_n = sigma_t = 0.0003`、`kappa = 0.001`，
-exact-query fraction 为 `0.2`。Exact query 使用 `q_i = V_i`。扰动只改变 query
-position，不改变 graph 或 target。
+`query_training.enabled` 与 `local_query_jitter.enabled` 都是 false。因此 current
+connectivity、`P_proxy`、target、local scale 与 Laplacian operator 不会被训练期
+query augmentation 改变。
 
 ### 投影、renderer visibility 与多视图聚合
 
@@ -202,10 +199,25 @@ F_v=\mathrm{Conv}_{3\times3}^{64}\!\left(
 $$
 
 三个 convolution 均通过 padding 保持 input spatial resolution。
+当前 high-frequency construction 为
+
+$$
+F_v^{\mathrm{blur}}=G_{5,1.0}(F_v),
+\qquad
+F_v^{\mathrm{HF}}=F_v-F_v^{\mathrm{blur}},
+\qquad
+F_v^{\mathrm{out}}=[F_v,F_v^{\mathrm{HF}}].
+$$
+
+`G` 是使用 reflect padding 的固定 depthwise Gaussian operation，不增加 learned
+parameters。`F_v` 有 64 channels，因此 `F_v^out` 和 aggregated image feature 均为
+128 channels。Native-1920 训练以 4-view chunks 加 gradient checkpointing 处理
+视图；这些是执行/显存策略，不改变上述 feature 数学定义。因此在前面的 masked
+aggregation 中，当前分支实际采样 `F_v^out`，而不是未变换的 `F_v`。
 
 ### Visibility、confidence 与 Gaussian gates
 
-Canonical renderer gate 是严格的 any-view gate：
+当前主线 renderer gate 是严格的 any-view gate：
 
 $$
 m_i=\mathbf 1\!\left[\sum_{v=1}^{M}z_{vi}>0\right].
@@ -217,7 +229,7 @@ $$
 c_i=\mathrm{sigmoid}(g_\theta(x_i))\in[0,1].
 $$
 
-Canonical recovery weight 为
+当前主线 recovery weight 为
 
 $$
 w_i=m_i c_i.
@@ -237,8 +249,8 @@ $$
 
 其中 `d_i^surface` 是 coarse query 到 GT surface 的距离，`s` 为
 `distance_confidence_scale`。该 Gaussian gate 不是 renderer visibility，也不用于
-canonical GT-query training。Canonical training 使用 `z_vi` 进行 image-feature
-sampling；canonical recovery 使用 `m_i c_i`。
+当前 synthetic-current training。主线训练使用 `z_vi` 进行 image-feature
+sampling，主线 recovery 使用 `m_i c_i`。
 
 ### Vertex representation 与 graph network
 
@@ -270,11 +282,12 @@ x_i=\left[
 \right].
 $$
 
-对于 C2F2，`phi` 为 39 channels，完整 vertex input 为
-`39 + 3 + 1 + 1 + 1 + 64 = 109` channels。Graph backbone 为
-`109 -> 256 -> 256`，后接 3 个 256-channel message-passing blocks 和 output
-MLP `256 -> 256 -> 3`。Confidence side head 为 `109 -> 256 -> 1`，末端使用
-sigmoid。
+对于当前 HF construction 下的 C2F2，`phi` 为 39 channels，完整 vertex input 为
+`39 + 3 + 1 + 1 + 1 + 128 = 173` channels，分别对应 position encoding、normal、
+log relative edge scale、log degree、valid-view ratio 和 aggregated image feature。
+Graph backbone 为 `173 -> 256 -> 256`，后接 3 个 256-channel message-passing
+blocks 和 output MLP `256 -> 256 -> 3`。Confidence side head 为
+`173 -> 256 -> 1`，末端使用 sigmoid。
 
 经过 input MLP 后，第 `l` 个 graph layer 计算
 
@@ -290,16 +303,16 @@ u_i^{(l)}+operatorname{MLP}_l
 \right).
 $$
 
-Output MLP 将最终 graph state 映射为
-`delta_hat_prediction in R^3`。
+Output MLP 将最终 graph state 直接映射为 `delta_pred_raw in R^3`。Python result
+field 名为 `predicted_laplacian`；历史 `delta_hat_prediction` accessor 在
+`target_mode = raw_laplacian` 时不表示该 tensor 做过 normalization。
 
 ### 训练目标
 
 分量 residual 为
 
 $$
-r_{ik}=\widehat\delta^{\mathrm{pred}}_{ik}
--\widehat\delta^{\mathrm{GT}}_{ik}.
+r_{ik}=\delta^{\mathrm{pred,raw}}_{ik}-\delta^*_{ik}.
 $$
 
 逐分量 Huber function 为
@@ -323,8 +336,8 @@ e_i=\frac{1}{3}\sum_{k=1}^{3}H_\tau(r_{ik}),
 $$
 
 其中 `a_i` 是 prepared target-confidence/valid-scale weight。当前 full-vertex
-GT-query contract 对有效的非 isolated vertices 使用单位权重，对无效 local scale
-使用零权重。
+contract 对有效的非 isolated vertices 使用单位权重，对无效 local scale 使用零
+权重。这里没有 curvature weighting，predicted confidence 也不进入 primary loss。
 
 Confidence side head 使用 detached prediction error：
 
@@ -348,26 +361,26 @@ $$
 +\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}}.
 $$
 
-Canonical config 使用 `beta = 0.01`、`c_min = 10^-4` 和
+当前主线 config 使用 `beta = 0.01`、`c_min = 10^-4` 和
 `lambda_conf = 1`。Predicted confidence 不会重新加权 `L_lap`，因此 confidence
 head 不能通过降低 confidence 来抑制 primary supervision。
 
 ### Laplacian recovery 目标
 
 对固定 current graph `(X_0, F)` 构建 `L_current` 与 `h_current`，然后根据
-`delta_pred` 恢复 vertex positions `X`。Canonical dense objective 为
+`delta_pred_raw` 恢复 vertex positions `X`。当前主线 dense objective 为
 
 $$
 \mathcal L_{\mathrm{rec}}(X)=
 \lambda_{\mathrm{lap}}
 \sum_{i,k}H_\tau\!\left(
 \sqrt{w_i}\left[(L_{\mathrm{current}}X)_{ik}
--\delta_{ik}^{\mathrm{pred}}\right]\right)
+-\delta_{ik}^{\mathrm{pred,raw}}\right]\right)
 +\frac{\lambda_{\mathrm{anchor}}}{2}\lVert X-X_0\rVert_F^2
 +\mathcal L_{\mathrm{edge}}+\mathcal L_{\mathrm{unseen}}.
 $$
 
-当前 canonical values 为 `lambda_lap = 1`、`lambda_anchor = 0.01`、
+当前主线 values 为 `lambda_lap = 1`、`lambda_anchor = 0.01`、
 `lambda_edge = 0` 和 `lambda_unseen_anchor = 0`。Visibility/confidence weight
 通过 `sqrt(w_i)` 作用于完整 Laplacian equation row。
 
@@ -376,15 +389,15 @@ $$
 $$
 \mathcal L_{\mathrm{sparse}}(X)=
 \frac{\lambda_{\mathrm{lap}}}{N}
-\left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred}})\right\rVert_F^2
+\left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred,raw}})\right\rVert_F^2
 +\frac{\lambda_{\mathrm{anchor}}}{N}\lVert X-X_0\rVert_F^2,
 \qquad W=\mathrm{diag}(w).
 $$
 
 ### 报告指标
 
-对于 predicted 与 target normalized Laplacians `P` 和 `T`，主要 prediction
-metrics 为
+对于 raw prediction `P = delta_pred_raw` 和 raw target `T = delta*`，主要
+prediction metrics 为
 
 $$
 \mathrm{EPE}=\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2,
@@ -398,6 +411,19 @@ $$
 R_{\mathrm{norm}}=\frac{\lVert P\rVert_F}{\lVert T\rVert_F}.
 $$
 
+Raw RMS 和 maximum residual 为
+
+$$
+\mathrm{RMS}_{\mathrm{raw}}=
+\sqrt{\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2^2},
+\qquad
+\mathrm{Max}_{\mathrm{raw}}=\max_i\lVert P_i-T_i\rVert_2.
+$$
+
+Bottom-90%、Top-10% 和 Top-1% group 按全局 `||delta_i*||_2` 定义，而不是按
+prediction 定义。Recovery-weighted raw RMS 使用固定 evaluation recovery weights
+和同一组 raw residual。
+
 报告中的 bidirectional vertex-to-surface Chamfer 为
 
 $$
@@ -410,19 +436,40 @@ $$
 其中 `S_A` 和 `S_B` 是 triangle surfaces，`V_B'` 是实际评估或 subsampled GT
 vertex set。
 
+### 历史 `h^2`-normalized formulation
+
+早期 GT-query 实验使用
+
+$$
+\delta_i^{\mathrm{GT}}=(L_{\mathrm{GT}}V_{\mathrm{GT}})_i,
+\qquad
+\widehat\delta_i^{\mathrm{GT}}=
+\frac{\delta_i^{\mathrm{GT}}}{h_i^2+\varepsilon},
+$$
+
+并通过 `delta_pred_raw = delta_hat_prediction * (h_current^2 + epsilon)` 将
+normalized prediction 转回 raw space。该路径仍保留用于复现，但它不描述当前
+Sofa50 direct-raw + HF 训练。历史 normalized representation 的 native loss 不能与
+当前 raw-space loss 直接比较。
+
 ## 数据契约
 
-HPC 上使用的 Sofa50 数据目录为：
+HPC 上当前主线使用的 Sofa50 manifests 为：
 
 ```text
-/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_960
-/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_1920
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_synthetic_current_28view_v1/manifest.json
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_synthetic_current_28view_native1920_v1/manifest.json
 ```
 
-每个数据集包含 40 个 training、5 个 validation 和 5 个 held-out test objects。
-标准 960 实验对每个物体使用 14 个标定 RGB views。训练使用
-`gt_query_manifest.json`；expanded recovery 使用
-`expanded_inference_manifest.json`。Expanded manifest 仅用于推理。
+两者使用相同的 250 个 sample IDs、object-level split 和 28 个 camera poses：50 个
+objects、每个 5 个 variants，划分为 200 train、25 validation 和 25 held-out test。
+Native-1920 observations 由 renderer 直接以 1920 x 1920 生成，不是将 960 images
+resize 得到。两套数据中的 current graph、proxy positions、raw targets 和 renderer
+visibility 遵循同一合同。
+
+历史 GT-query 数据仍位于 `sofa50_refinement/multiview_960` 与
+`sofa50_refinement/multiview_1920`。它们使用 40/5/5 objects 和
+`gt_query_manifest.json`；expanded manifests 仅用于 inference，不是当前训练源。
 
 RGB 图像保存在磁盘上，并以 `uint8` 形式 lazy decode。CUDA 训练使用 pinned
 memory、non-blocking transfer，以及用于 CNN/GNN forward 的 AMP。Target scaling、

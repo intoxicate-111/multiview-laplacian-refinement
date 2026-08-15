@@ -4,7 +4,7 @@
 
 Method specification: [Canonical Sofa50 pipeline](docs/CANONICAL_SOFA50_PIPELINE.md)
 
-Training guide: [Multi-mesh GT-query training](docs/MULTI_MESH_TRAINING.md)
+Training guide: [Multi-mesh training](docs/MULTI_MESH_TRAINING.md)
 
 Visibility and recovery: [Visibility-aware recovery report](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
 
@@ -26,8 +26,9 @@ Status date: 2026-08-15 18:47 BST.
 
 | Component | State | Conclusion |
 |---|---|---|
-| GT-query dataset and training pipeline | Implemented | Direct supervision of the absolute GT `h^2`-normalised Laplacian is operational. |
-| Target-leakage controls | Implemented and tested | GT Laplacian values are excluded from model inputs. |
+| Current-query/current-graph training pipeline | Current mainline | The model directly predicts the raw target `L_current @ P_proxy`; no `h^2` target normalisation or output denormalisation is used. |
+| Historical GT-query pipeline | Retained for comparison | Absolute GT `h^2`-normalised Laplacian supervision remains implemented, but it is not the current training mainline. |
+| Target-leakage controls | Implemented and tested | Proxy positions and supervised raw/normalised Laplacian values are excluded from model inputs. |
 | Sofa50 960 image-resolution ablation | Complete | F2 has lower exact-query error than F0 and F1 at 50,000 optimiser steps. |
 | Sofa50 960 C2F2 training | Complete | Three seeds completed at 50,000 optimiser steps. C2F2 is the current lowest-error exact-query configuration. |
 | Sofa50 1920 C2F2 training | Complete | Three seeds completed at 20,000 optimiser steps. Mean endpoint error and recovery Chamfer are higher than the 960 result; mean cosine is higher. |
@@ -49,66 +50,71 @@ Status date: 2026-08-15 18:47 BST.
 | Future2000 external baselines | Incomplete, not final | The existing sharded diagnostic has a high sample-level failure count; no external-method conclusion is reported. New comparison launches remain local-only. |
 | Automated tests | Passing for the documented changes | Targeted raw-loss, dynamic-expert/gate, image-feature, native-1920 preparation and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
 
-The implemented model learns the supervised differential field on GT-query
-graphs and uses RGB information. Transfer from GT-query graphs to expanded or
-OpenMVS query graphs has not produced a geometry improvement. The end-to-end
-coarse-mesh refinement objective is not met by the current recovery path.
+The active training line is the Sofa50 synthetic-current,
+current-query/current-graph, direct-raw formulation. The query mesh and its connectivity define the
+graph used by both prediction and recovery. The supervised field is
+`L_current @ P_proxy`; it is a target only and is never passed to the model as
+an inference feature. The current native-1920 experiment retains the successful
+960 high-frequency feature construction and changes image resolution plus the
+documented distributed execution batch.
 
-The current scale-up experiment uses a different, explicit current-graph
-contract: the query mesh and connectivity are model inputs and the supervised
-raw target is `L_current @ P_proxy`. A paired branch predicts direct vertex
-displacement instead. These targets are supervision, not additional inference
-inputs.
+The earlier GT-query, `h^2`-normalised formulation remains useful historical
+context. Its transfer to expanded and OpenMVS query graphs did not improve
+geometry, and it is no longer the mathematical mainline described below.
 
-## Method
+## Current training method
 
-The model maps calibrated multi-view observations and a graph query to the GT
-local differential signal:
+The model maps 28 calibrated views and the current mesh graph directly to a raw
+target Laplacian field:
 
 ```text
-multi-view RGB + cameras + 3D query + local graph context
-    -> absolute GT h^2-normalised Laplacian
+28-view RGB + cameras + current vertices/connectivity + local geometry
+    -> direct raw current-graph Laplacian target
 ```
 
-For GT vertex `i`:
+For the stored current mesh `P_current`, its faces `F_current`, and the paired
+proxy positions `P_proxy`:
 
 ```text
-delta_gt_i = (L_gt V_gt)_i
-h_i        = mean incident GT edge length at i
-target_i   = delta_gt_i / (h_i^2 + epsilon)
+L_current       = uniform_laplacian(P_current, F_current)
+target_raw      = L_current @ P_proxy
+prediction_raw  = model(images, cameras, P_current, F_current)
 ```
 
-Training uses GT vertices and GT connectivity. A fixed fraction of queries
-remain at exact GT positions; the other queries receive bounded normal and
-tangent perturbations relative to `h_i`. The target remains attached to the
-original GT vertex.
+There is no division by `h_current^2`, no target clipping, and no output
+denormalisation. `target_scaling` retains the edge-scale definition because
+`h_current` is used as a local geometry feature and for validity bookkeeping;
+it does not change the raw target when `target_mode = raw_laplacian`.
 
-The current geometry mode is `query_fourier`. Fourier features are calculated
-after query augmentation. Image features, query position, normal, relative
-local scale, degree and graph connectivity are model inputs. The raw and
-normalised GT Laplacians are supervision only. `initial_laplacian` is zero in
-GT-query training samples.
+The current geometry mode is `query_fourier`, local query jitter is disabled,
+and the query is exactly the current vertex position. Image features, Fourier-
+encoded query position, current vertex normal, relative local edge scale,
+degree, valid-view ratio and current connectivity are inference inputs. Neither
+`P_proxy` nor either raw/normalised target is a model input.
 
-Inference uses an independently produced coarse or topology-expanded mesh:
+The current high-frequency image branch uses the encoder feature `F`, a fixed
+Gaussian blur `G(F)` with kernel size 5 and sigma 1.0, and samples the
+concatenation `[F, F-G(F)]`. Recovery then uses the prediction in the same raw
+units:
 
 ```text
-coarse mesh vertices
-  -> project into calibrated views
-  -> aggregate image features
-  -> predict normalised Laplacian
-  -> denormalise with the current query graph scale
+current mesh vertices
+  -> project into 28 calibrated views
+  -> aggregate original + high-frequency image features
+  -> predict delta_pred_raw directly
   -> confidence/visibility-weighted Laplacian recovery
 ```
 
-No GT differential value is transferred to the inference graph. GT geometry is
-used only for evaluation.
+GT geometry is used only for constructing supervision and evaluation. The
+dynamic residual expert, gate, direct-displacement branch and raw-MSE loss are
+controlled ablations and are not enabled in the active 1920+HF mainline.
 
 ## Mathematical specification
 
-The equations below describe the implemented code path. Legacy terms are marked
-explicitly.
+The equations below describe the active direct-raw + high-frequency training
+path. The historical normalised formulation is isolated in its own subsection.
 
-### Uniform Laplacian and supervised target
+### Current-graph uniform Laplacian and direct-raw target
 
 Let `N(i)` be the one-ring neighbours of vertex `i`, and let
 `d_i = |N(i)|`. The uniform graph Laplacian is
@@ -119,55 +125,41 @@ $$
 L_{ii}=1,\quad L_{ij}=-\frac{1}{d_i}.
 $$
 
-An isolated vertex has a zero Laplacian row. The local edge scale and the
-absolute supervised target are
+An isolated vertex has a zero Laplacian row. Let the training query mesh be
+`X_0 = P_current`, and let `P_proxy` be the paired proxy positions with the same
+vertex ordering. The local edge scale and active supervised target are
 
 $$
-h_i = \frac{1}{d_i}\sum_{j\in N(i)}\lVert V_i-V_j\rVert_2,
+h_i^{\mathrm{current}}=
+\frac{1}{d_i}\sum_{j\in N(i)}\lVert X_{0,i}-X_{0,j}\rVert_2,
 \qquad
-\delta_i^{\mathrm{GT}}=(L_{\mathrm{GT}}V_{\mathrm{GT}})_i,
+\delta_i^*=(L_{\mathrm{current}}P_{\mathrm{proxy}})_i.
 $$
 
-$$
-\widehat{\delta}_i^{\mathrm{GT}}
-=\frac{\delta_i^{\mathrm{GT}}}{h_i^2+\varepsilon},
-\qquad \varepsilon=10^{-12}.
-$$
-
-The network predicts the absolute normalised vector
-`delta_hat_prediction`; it does not predict a displacement or Laplacian
-residual. For a current inference graph,
+The network directly predicts `delta_pred_raw` in the same units as
+`delta_target_raw = delta*`:
 
 $$
-\delta_i^{\mathrm{pred}}
-=\widehat{\delta}_i^{\mathrm{pred}}\left((h_i^{\mathrm{current}})^2+\varepsilon\right).
+f_\theta(I_{1:M},K_{1:M},E_{1:M},X_0,F)_i
+=\delta_i^{\mathrm{pred,raw}}\approx\delta_i^*.
 $$
 
-This denormalisation is applied exactly once, using the current query graph.
+No factor of `(h_i^current)^2` is applied to either side. In the active config,
+`target_scaling.method = square_of_mean_incident_edge_length` defines available
+scale metadata, while `target_mode = raw_laplacian` selects the raw tensor before
+the loss. With `clip_max_norm = null`, the target is also not clipped.
 
-### Query perturbation
+### Current-query contract
 
-For perturbed GT queries,
-
-$$
-q_i=V_i+h_i\left(\xi_i n_i+\zeta_i t_i\right),
-\qquad
-\xi_i\sim\mathcal N(0,\sigma_n^2),\quad
-\zeta_i\sim\mathcal N(0,\sigma_t^2),
-$$
-
-where `n_i` is the vertex normal and `t_i` is a random unit tangent obtained by
-removing the normal component from a Gaussian 3D direction. The displacement is
-clamped to
+The mainline query is the current vertex itself:
 
 $$
-\lVert q_i-V_i\rVert_2\leq \kappa h_i.
+q_i=X_{0,i}.
 $$
 
-The canonical settings are
-`sigma_n = sigma_t = 0.0003`, `kappa = 0.001`, and an exact-query fraction of
-`0.2`. Exact queries set `q_i = V_i`. Perturbation changes the query position,
-not the graph or target.
+Both `query_training.enabled` and `local_query_jitter.enabled` are false. The
+current connectivity, `P_proxy`, target, local scales and Laplacian operator are
+therefore unchanged by training-time query augmentation.
 
 ### Projection, renderer visibility and multi-view aggregation
 
@@ -216,10 +208,26 @@ F_v=\mathrm{Conv}_{3\times3}^{64}\!\left(
 $$
 
 Padding preserves the input spatial resolution in all three convolutions.
+The active high-frequency construction is
+
+$$
+F_v^{\mathrm{blur}}=G_{5,1.0}(F_v),
+\qquad
+F_v^{\mathrm{HF}}=F_v-F_v^{\mathrm{blur}},
+\qquad
+F_v^{\mathrm{out}}=[F_v,F_v^{\mathrm{HF}}].
+$$
+
+`G` is a fixed depthwise Gaussian operation with reflect padding and adds no
+learned parameters. Since `F_v` has 64 channels, `F_v^out` and the aggregated
+image feature have 128 channels. The native-1920 run processes views in chunks
+of four with gradient checkpointing; these are execution choices, not a change
+to the feature definition. In the masked aggregation above, the active branch
+therefore samples `F_v^out` rather than the untransformed `F_v`.
 
 ### Visibility, confidence and Gaussian gates
 
-The canonical renderer gate is a strict any-view gate:
+The mainline renderer gate is a strict any-view gate:
 
 $$
 m_i=\mathbf 1\!\left[\sum_{v=1}^{M}z_{vi}>0\right].
@@ -231,7 +239,7 @@ $$
 c_i=\mathrm{sigmoid}(g_\theta(x_i))\in[0,1].
 $$
 
-The canonical recovery weight is
+The mainline recovery weight is
 
 $$
 w_i=m_i c_i,
@@ -251,9 +259,9 @@ $$
 
 Here `d_i^surface` is the distance from a coarse query to the GT surface and
 `s` is `distance_confidence_scale`. This Gaussian gate is not renderer
-visibility and is not used by the canonical GT-query training path. Canonical
-training uses `z_vi` for image-feature sampling; canonical recovery uses
-`m_i c_i`.
+visibility and is not used by the current synthetic-current training path.
+Mainline training uses `z_vi` for image-feature sampling; mainline recovery
+uses `m_i c_i`.
 
 ### Vertex representation and graph network
 
@@ -285,11 +293,13 @@ x_i=\left[
 \right].
 $$
 
-For C2F2, `phi` has 39 channels and the complete vertex input has
-`39 + 3 + 1 + 1 + 1 + 64 = 109` channels. The graph backbone is
-`109 -> 256 -> 256`, followed by three 256-channel message-passing blocks and
+For C2F2 with the active HF construction, `phi` has 39 channels and the complete
+vertex input has `39 + 3 + 1 + 1 + 1 + 128 = 173` channels. These terms are
+position encoding, normal, log relative edge scale, log degree, valid-view
+ratio and aggregated image feature. The graph backbone is
+`173 -> 256 -> 256`, followed by three 256-channel message-passing blocks and
 an output MLP `256 -> 256 -> 3`. The confidence side head is
-`109 -> 256 -> 1` with a final sigmoid.
+`173 -> 256 -> 1` with a final sigmoid.
 
 After an input MLP, graph layer `l` computes
 
@@ -305,16 +315,17 @@ u_i^{(l)}+operatorname{MLP}_l
 \right).
 $$
 
-The output MLP maps the final graph state to
-`delta_hat_prediction in R^3`.
+The output MLP maps the final graph state directly to
+`delta_pred_raw in R^3`. The Python result field is named
+`predicted_laplacian`; the legacy `delta_hat_prediction` accessor does not imply
+normalisation when `target_mode = raw_laplacian`.
 
 ### Training objective
 
 For component residual
 
 $$
-r_{ik}=\widehat\delta^{\mathrm{pred}}_{ik}
--\widehat\delta^{\mathrm{GT}}_{ik},
+r_{ik}=\delta^{\mathrm{pred,raw}}_{ik}-\delta^*_{ik},
 $$
 
 the component-wise Huber function is
@@ -338,8 +349,9 @@ e_i=\frac{1}{3}\sum_{k=1}^{3}H_\tau(r_{ik}),
 $$
 
 where `a_i` is the prepared target-confidence/valid-scale weight. The current
-full-vertex GT-query contract assigns unit weight to valid non-isolated
-vertices and zero weight to invalid local scales.
+full-vertex contract assigns unit weight to valid non-isolated vertices and
+zero weight to invalid local scales. There is no curvature weighting, and the
+predicted confidence does not enter this primary loss.
 
 The confidence side head uses detached prediction error:
 
@@ -363,7 +375,7 @@ $$
 +\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}},
 $$
 
-with `beta = 0.01`, `c_min = 10^-4`, and `lambda_conf = 1` in the canonical
+with `beta = 0.01`, `c_min = 10^-4`, and `lambda_conf = 1` in the mainline
 configuration. Predicted confidence does not reweight
 `L_lap`; this prevents the confidence head from suppressing the primary
 supervision.
@@ -371,7 +383,7 @@ supervision.
 ### Laplacian recovery objective
 
 For the fixed current graph `(X_0, F)`, construct `L_current` and
-`h_current`, then recover vertex positions `X` from `delta_pred`. The canonical
+`h_current`, then recover vertex positions `X` from `delta_pred_raw`. The mainline
 dense objective is
 
 $$
@@ -379,12 +391,12 @@ $$
 \lambda_{\mathrm{lap}}
 \sum_{i,k}H_\tau\!\left(
 \sqrt{w_i}\left[(L_{\mathrm{current}}X)_{ik}
--\delta_{ik}^{\mathrm{pred}}\right]\right)
+-\delta_{ik}^{\mathrm{pred,raw}}\right]\right)
 +\frac{\lambda_{\mathrm{anchor}}}{2}\lVert X-X_0\rVert_F^2
 +\mathcal L_{\mathrm{edge}}+\mathcal L_{\mathrm{unseen}}.
 $$
 
-The current canonical values are `lambda_lap = 1`,
+The current mainline values are `lambda_lap = 1`,
 `lambda_anchor = 0.01`, `lambda_edge = 0`, and
 `lambda_unseen_anchor = 0`. The visibility/confidence weight applies to the
 complete Laplacian equation row through `sqrt(w_i)`.
@@ -395,15 +407,15 @@ form:
 $$
 \mathcal L_{\mathrm{sparse}}(X)=
 \frac{\lambda_{\mathrm{lap}}}{N}
-\left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred}})\right\rVert_F^2
+\left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred,raw}})\right\rVert_F^2
 +\frac{\lambda_{\mathrm{anchor}}}{N}\lVert X-X_0\rVert_F^2,
 \qquad W=\mathrm{diag}(w).
 $$
 
 ### Reported metrics
 
-For predicted and target normalised Laplacians `P` and `T`, the principal
-prediction metrics are
+For the raw prediction `P = delta_pred_raw` and raw target `T = delta*`, the
+principal prediction metrics are
 
 $$
 \mathrm{EPE}=\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2,
@@ -417,6 +429,19 @@ $$
 R_{\mathrm{norm}}=\frac{\lVert P\rVert_F}{\lVert T\rVert_F}.
 $$
 
+Raw RMS and maximum residual are
+
+$$
+\mathrm{RMS}_{\mathrm{raw}}=
+\sqrt{\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2^2},
+\qquad
+\mathrm{Max}_{\mathrm{raw}}=\max_i\lVert P_i-T_i\rVert_2.
+$$
+
+Bottom-90%, Top-10% and Top-1% groups are defined globally by
+`||delta_i*||_2`, not by the prediction. Recovery-weighted raw RMS uses the
+fixed evaluation recovery weights and the same raw residual.
+
 The reported bidirectional vertex-to-surface Chamfer value is
 
 $$
@@ -429,19 +454,43 @@ $$
 where `S_A` and `S_B` are triangle surfaces and `V_B'` is the evaluated or
 subsampled GT vertex set.
 
+### Historical `h^2`-normalised formulation
+
+Older GT-query experiments used
+
+$$
+\delta_i^{\mathrm{GT}}=(L_{\mathrm{GT}}V_{\mathrm{GT}})_i,
+\qquad
+\widehat\delta_i^{\mathrm{GT}}=
+\frac{\delta_i^{\mathrm{GT}}}{h_i^2+\varepsilon},
+$$
+
+and converted a normalised prediction back with
+`delta_pred_raw = delta_hat_prediction * (h_current^2 + epsilon)`. That path is
+still implemented for reproducibility, but it does not describe the active
+Sofa50 direct-raw + HF training run. Native losses from the historical
+normalised representation must not be compared numerically with current
+raw-space loss values.
+
 ## Dataset contract
 
-The Sofa50 data roots used on the HPC are:
+The active Sofa50 manifests on the HPC are:
 
 ```text
-/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_960
-/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_refinement/multiview_1920
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_synthetic_current_28view_v1/manifest.json
+/networkhome/WMGDS/zhou_c/sofa_mesh/sofa50_synthetic_current_28view_native1920_v1/manifest.json
 ```
 
-Each dataset contains 40 training, 5 validation and 5 held-out test objects.
-The standard 960 experiment uses 14 calibrated RGB views per object. Training
-uses `gt_query_manifest.json`; expanded recovery uses
-`expanded_inference_manifest.json`. Expanded manifests are inference-only.
+Both use the same 250 sample IDs, object-level split and 28 camera poses:
+200 training, 25 validation and 25 held-out test variants from 50 objects with
+five variants each. The native-1920 observations are rendered at 1920 x 1920;
+they are not resized 960 images. Current graphs, proxy positions, raw targets
+and renderer visibility follow the same contract in both datasets.
+
+The historical GT-query data roots remain under
+`sofa50_refinement/multiview_960` and `sofa50_refinement/multiview_1920`.
+Those datasets contain 40/5/5 objects and use `gt_query_manifest.json`; their
+expanded manifests are inference-only and are not the active training source.
 
 RGB images remain on disk and are decoded lazily as `uint8`. CUDA training uses
 pinned memory, non-blocking transfer and AMP for CNN/GNN forward passes.
