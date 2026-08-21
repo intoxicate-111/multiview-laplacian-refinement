@@ -25,6 +25,7 @@ from mlr.baselines.future2000 import (
     ExternalSceneExport,
     export_nds_scene,
     export_nerf_scene,
+    export_nvdiffrec_scene,
     export_openmvs_scene,
 )
 from mlr.data import Mesh
@@ -33,7 +34,7 @@ from mlr.learned_laplacian.evaluation import evaluate_mesh_geometry
 from mlr.learned_laplacian.multi_dataset import PreparedMeshDataset
 
 
-METHODS = ("openmvs_refinemesh", "nds", "nerf2mesh", "exmesh")
+METHODS = ("openmvs_refinemesh", "nds", "nerf2mesh", "exmesh", "nvdiffrec")
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -49,21 +50,34 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             f"{method_config['commit']}."
         )
     dataset = PreparedMeshDataset.from_manifest(args.manifest, "test")
-    if len(dataset) != 1000:
-        raise ValueError(f"Expected 1000 test samples, found {len(dataset)}.")
+    if len(dataset) != args.expected_test_samples:
+        raise ValueError(
+            f"Expected {args.expected_test_samples} test samples, found {len(dataset)}."
+        )
+    manifest_payload = json.loads(args.manifest.read_text(encoding="utf-8"))
+    provenance = {
+        str(row["sample_id"]): dict(row) for row in manifest_payload["samples"]
+    }
     output = args.output_dir.resolve() / args.method
     shard_dir = output / "shards"
     sample_root = output / "samples"
     work_root = output / "work" / f"shard_{args.shard_index:03d}"
     for path in (shard_dir, sample_root, work_root):
         path.mkdir(parents=True, exist_ok=True)
-    indices = list(range(args.shard_index, len(dataset), args.shard_count))
+    if args.sample_id is None:
+        indices = list(range(args.shard_index, len(dataset), args.shard_count))
+    else:
+        matches = [index for index, value in enumerate(dataset.sample_ids) if value == args.sample_id]
+        if len(matches) != 1:
+            raise ValueError(f"Expected exactly one --sample-id match, found {matches}")
+        indices = matches if args.shard_index == 0 else []
     preflight_error = _preflight(args)
     rows: list[dict[str, Any]] = []
     started = time.perf_counter()
     for ordinal, index in enumerate(indices, start=1):
         static = dataset.load_static(index)
         sample_id = str(static["sample_id"])
+        source = provenance[sample_id]
         sample_dir = sample_root / sample_id
         sample_dir.mkdir(parents=True, exist_ok=True)
         status_path = sample_dir / "status.json"
@@ -76,8 +90,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 rows.append(existing["row"])
                 continue
         if preflight_error is not None:
-            row = _failure_row(static, args.method, "preflight", preflight_error)
-            _save_status(status_path, row, [], preflight_error)
+            row = _failure_row(static, source, args.method, "preflight", preflight_error)
+            _save_status(status_path, row, [], preflight_error, method_config)
             rows.append(row)
             continue
         work_dir = work_root / sample_id
@@ -86,9 +100,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         work_dir.mkdir(parents=True)
         commands: list[list[str]] = []
         try:
+            source_identity = _audit_source_identity(static, source)
             scene = _export(args.method, static, work_dir / "scene")
+            identity = _audit_initial_identity(static, scene)
             result_mesh_path, commands, runtime, peak_memory = _execute(
-                args, scene, work_dir, sample_id
+                args, scene, work_dir, sample_id, method_config
             )
             result_mesh = load_mesh(result_mesh_path).ensure_normals()
             copied_mesh = sample_dir / "refined.obj"
@@ -106,17 +122,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "peak_gpu_memory_mb": peak_memory,
                 "vertex_count": result_mesh.num_vertices,
                 "face_count": result_mesh.num_faces,
+                "final_mesh": str(copied_mesh),
+                "coordinate_transform_to_gt": "identity",
+                "method_config_path": str(args.config.resolve()),
+                **source_identity,
+                **identity,
                 **metrics,
             }
             shutil.copy2(scene.metadata_path, sample_dir / "input_contract.json")
-            _save_status(status_path, row, commands, None)
+            (sample_dir / "method_config.json").write_text(
+                json.dumps(method_config, indent=2) + "\n", encoding="utf-8"
+            )
+            _save_status(status_path, row, commands, None, method_config)
         except Exception as exc:
             reason = f"{exc.__class__.__name__}: {exc}"
-            row = _failure_row(static, args.method, "execution_or_evaluation", reason)
+            row = _failure_row(
+                static, source, args.method, "execution_or_evaluation", reason
+            )
             (sample_dir / "traceback.txt").write_text(
                 traceback.format_exc(), encoding="utf-8"
             )
-            _save_status(status_path, row, commands, reason)
+            _save_status(status_path, row, commands, reason, method_config)
         finally:
             if not args.keep_work and work_dir.exists():
                 shutil.rmtree(work_dir)
@@ -161,7 +187,13 @@ def _preflight(args: argparse.Namespace) -> str | None:
     else:
         if args.external_python is None or not Path(args.external_python).is_file():
             missing.append(str(args.external_python))
-        entry = args.external_root / ("reconstruct.py" if args.method == "nds" else "main.py" if args.method == "nerf2mesh" else "train.py")
+        entry = args.external_root / (
+            "reconstruct.py"
+            if args.method == "nds"
+            else "main.py"
+            if args.method == "nerf2mesh"
+            else "train.py"
+        )
         if not entry.is_file():
             missing.append(str(entry))
     if args.method == "exmesh" and args.exmesh_depth_root is None:
@@ -174,6 +206,8 @@ def _export(method: str, sample: dict[str, Any], scene_dir: Path) -> ExternalSce
         return export_openmvs_scene(sample, scene_dir)
     if method == "nds":
         return export_nds_scene(sample, scene_dir)
+    if method == "nvdiffrec":
+        return export_nvdiffrec_scene(sample, scene_dir)
     return export_nerf_scene(sample, scene_dir, method=method)
 
 
@@ -182,6 +216,7 @@ def _execute(
     scene: ExternalSceneExport,
     work_dir: Path,
     sample_id: str,
+    method_config: dict[str, Any],
 ) -> tuple[Path, list[list[str]], float, float | None]:
     commands: list[list[str]] = []
     started = time.perf_counter()
@@ -246,6 +281,7 @@ def _execute(
         result = work_dir / "refined.ply"
     elif args.method == "nds":
         output = work_dir / "nds_output"
+        nds_arguments = method_config["arguments"]
         command = [
             str(args.external_python),
             str(args.external_root / "reconstruct.py"),
@@ -258,7 +294,23 @@ def _execute(
             "--initial_mesh",
             str(scene.initial_obj),
             "--iterations",
-            "2000",
+            str(nds_arguments["iterations"]),
+            "--image_scale",
+            str(nds_arguments.get("image_scale", 1)),
+            "--lr_vertices",
+            str(nds_arguments.get("lr_vertices", 0.001)),
+            "--lr_shader",
+            str(nds_arguments.get("lr_shader", 0.001)),
+            "--upsample_iterations",
+            *[str(value) for value in nds_arguments.get("upsample_iterations", [])],
+            "--weight_mask",
+            str(nds_arguments.get("weight_mask", 2.0)),
+            "--weight_normal",
+            str(nds_arguments.get("weight_normal", 0.1)),
+            "--weight_laplacian",
+            str(nds_arguments.get("weight_laplacian", 40.0)),
+            "--weight_shading",
+            str(nds_arguments.get("weight_shading", 1.0)),
             "--run_name",
             sample_id,
             "--device",
@@ -266,7 +318,8 @@ def _execute(
         ]
         commands = [command]
         peak = _run_command(command, work_dir / "command_0.log", cwd=args.external_root)
-        result = output / sample_id / "meshes/mesh_002000.obj"
+        iterations = int(method_config["arguments"]["iterations"])
+        result = output / sample_id / "meshes" / f"mesh_{iterations:06d}.obj"
     elif args.method == "nerf2mesh":
         workspace = work_dir / "nerf2mesh_workspace"
         common = [
@@ -306,7 +359,7 @@ def _execute(
                 _run_command(command, work_dir / f"command_{number}.log", cwd=args.external_root),
             )
         result = workspace / "mesh_stage1/mesh.obj"
-    else:
+    elif args.method == "exmesh":
         prior_source = args.exmesh_depth_root / sample_id.split("__v", 1)[0]
         prior_destination = scene.scene_dir / "mono_priors/da3"
         if not prior_source.is_dir():
@@ -322,14 +375,61 @@ def _execute(
             "-m",
             str(output),
             "--iterations",
-            "10000",
+            str(method_config["arguments"]["iterations"]),
             "--save_iterations",
-            "10000",
+            str(method_config["arguments"]["iterations"]),
+            "--resolution",
+            str(method_config["arguments"].get("resolution", 1)),
             "--quiet",
         ]
         commands = [command]
         peak = _run_command(command, work_dir / "command_0.log", cwd=args.external_root)
-        result = output / "mesh/auto_mesh_iter_10000.ply"
+        iterations = int(method_config["arguments"]["iterations"])
+        result = output / "mesh" / f"auto_mesh_iter_{iterations}.ply"
+    else:
+        # Official nvdiffrec prefixes its out_dir with ``out/``.  Run it from
+        # the isolated per-sample work directory so the result stays scoped to
+        # that sample and is cleaned with the work directory.  Its renderer
+        # also loads the checked-in BSDF LUT through a hard-coded relative
+        # ``data/`` path, so expose that official read-only resource here.
+        os.symlink(args.external_root / "data", work_dir / "data")
+        output = work_dir / "out/nvdiffrec_output"
+        config_path = work_dir / "nvdiffrec_config.json"
+        config = {
+            "ref_mesh": str(scene.scene_dir),
+            "base_mesh": str(scene.initial_obj),
+            "random_textures": True,
+            "iter": int(method_config["arguments"]["iterations"]),
+            "save_interval": int(method_config["arguments"].get("save_interval", 100)),
+            "texture_res": list(method_config["arguments"].get("texture_res", [2048, 2048])),
+            "train_res": list(method_config["arguments"].get("train_res", [1920, 1920])),
+            "batch": int(method_config["arguments"].get("batch", 1)),
+            "spp": int(method_config["arguments"].get("spp", 1)),
+            "learning_rate": list(method_config["arguments"].get("learning_rate", [0.03, 0.01])),
+            "ks_min": [0, 0.08, 0.0],
+            "dmtet_grid": 128,
+            "mesh_scale": 2.1,
+            "laplace_scale": int(method_config["arguments"].get("laplace_scale", 3000)),
+            "background": "white",
+            "loss": "logl1",
+            "pre_load": True,
+            "validate": False,
+            "out_dir": "nvdiffrec_output",
+        }
+        config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        command = [
+            str(args.external_python),
+            str(ROOT / "scripts/run_nvdiffrec_exmesh.py"),
+            "--seed",
+            str(method_config.get("seed", 7)),
+            "--nvdiffrec-root",
+            str(args.external_root),
+            "--config",
+            str(config_path),
+        ]
+        commands = [command]
+        peak = _run_command(command, work_dir / "command_0.log", cwd=work_dir)
+        result = output / "mesh/mesh.obj"
     if not result.is_file():
         raise FileNotFoundError(f"Expected external result mesh was not produced: {result}")
     return result, commands, time.perf_counter() - started, peak or None
@@ -350,7 +450,9 @@ def _run_command(
         )
         peak = [0.0]
         stop = threading.Event()
-        monitor = threading.Thread(target=_monitor_gpu, args=(stop, peak), daemon=True)
+        monitor = threading.Thread(
+            target=_monitor_gpu, args=(stop, peak, process.pid), daemon=True
+        )
         monitor.start()
         return_code = process.wait()
         stop.set()
@@ -360,24 +462,52 @@ def _run_command(
     return peak[0]
 
 
-def _monitor_gpu(stop: threading.Event, peak: list[float]) -> None:
+def _monitor_gpu(stop: threading.Event, peak: list[float], root_pid: int) -> None:
     while not stop.wait(0.25):
         try:
             result = subprocess.run(
                 [
                     "nvidia-smi",
-                    "--query-compute-apps=used_gpu_memory",
+                    "--query-compute-apps=pid,used_gpu_memory",
                     "--format=csv,noheader,nounits",
                 ],
                 check=False,
                 capture_output=True,
                 text=True,
             )
-            values = [float(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+            owned = _process_tree(root_pid)
+            values = []
+            for line in result.stdout.splitlines():
+                fields = [value.strip() for value in line.split(",")]
+                if len(fields) != 2 or int(fields[0]) not in owned:
+                    continue
+                values.append(float(fields[1]))
             if values:
                 peak[0] = max(peak[0], sum(values))
         except (OSError, ValueError):
             return
+
+
+def _process_tree(root_pid: int) -> set[int]:
+    parents: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            lines = (entry / "status").read_text(encoding="utf-8").splitlines()
+            parent = next(line for line in lines if line.startswith("PPid:"))
+            parents[int(entry.name)] = int(parent.split()[1])
+        except (OSError, StopIteration, ValueError):
+            continue
+    owned = {int(root_pid)}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent in parents.items():
+            if parent in owned and pid not in owned:
+                owned.add(pid)
+                changed = True
+    return owned
 
 
 def _evaluate(
@@ -424,11 +554,108 @@ def _evaluate(
         else 0.0
     )
     result["improved"] = refined_chamfer < initial_chamfer
+    same_connectivity = bool(
+        result_mesh.num_vertices == initial.num_vertices
+        and result_mesh.num_faces == initial.num_faces
+        and np.array_equal(np.asarray(result_mesh.faces), np.asarray(initial.faces))
+    )
+    result["output_connectivity_preserved"] = same_connectivity
+    if same_connectivity:
+        from mlr.learned_laplacian.canonical_experiment import _topology_change
+
+        topology = _topology_change(initial.vertices, result_mesh.vertices, initial.faces)
+        result["introduced_flipped_faces"] = int(topology["introduced_flips"])
+        result["new_degenerate_faces"] = int(topology["new_degeneracies"])
+        result["introduced_flipped_faces_comparable"] = True
+    else:
+        result["introduced_flipped_faces"] = None
+        result["new_degenerate_faces"] = None
+        result["introduced_flipped_faces_comparable"] = False
     return result
 
 
+def _audit_initial_identity(
+    static: dict[str, Any], scene: ExternalSceneExport
+) -> dict[str, Any]:
+    exported = load_mesh(scene.initial_obj)
+    vertices = static["vertices"].detach().cpu().numpy()
+    faces = static["faces"].detach().cpu().numpy()
+    counts_match = exported.num_vertices == len(vertices) and exported.num_faces == len(faces)
+    faces_match = counts_match and np.array_equal(np.asarray(exported.faces), faces)
+    max_error = (
+        float(np.max(np.abs(np.asarray(exported.vertices) - vertices)))
+        if counts_match
+        else float("inf")
+    )
+    passed = bool(counts_match and faces_match and max_error <= 1e-6)
+    if not passed:
+        raise RuntimeError(
+            f"Adapter replaced the common initial mesh: counts={counts_match} "
+            f"faces={faces_match} max_vertex_error={max_error}"
+        )
+    return {
+        "adapter_initial_mesh_sha256": _sha256_file(scene.initial_obj),
+        "adapter_initial_vertex_count": exported.num_vertices,
+        "adapter_initial_face_count": exported.num_faces,
+        "adapter_initial_max_abs_vertex_error": max_error,
+        "adapter_initial_faces_exact": True,
+        "common_initial_identity_audit": True,
+    }
+
+
+def _audit_source_identity(
+    static: dict[str, Any], source: dict[str, Any]
+) -> dict[str, Any]:
+    initial_path = Path(str(source["common_initial_mesh"]))
+    expected_sha = str(source["common_initial_mesh_sha256"])
+    observed_sha = _sha256_file(initial_path)
+    if observed_sha != expected_sha:
+        raise RuntimeError(
+            f"Common initial mesh SHA changed: expected={expected_sha} observed={observed_sha}"
+        )
+    initial = load_mesh(initial_path)
+    vertices = static["vertices"].detach().cpu().numpy()
+    faces = static["faces"].detach().cpu().numpy()
+    counts_match = initial.num_vertices == len(vertices) and initial.num_faces == len(faces)
+    faces_match = counts_match and np.array_equal(np.asarray(initial.faces), faces)
+    max_error = (
+        float(np.max(np.abs(np.asarray(initial.vertices) - vertices)))
+        if counts_match
+        else float("inf")
+    )
+    if not (counts_match and faces_match and max_error <= 1e-6):
+        raise RuntimeError(
+            f"Canonical common initial changed: counts={counts_match} "
+            f"faces={faces_match} max_vertex_error={max_error}"
+        )
+    return {
+        "common_initial_mesh": str(initial_path),
+        "common_initial_mesh_sha256": observed_sha,
+        "initial_vertex_count": initial.num_vertices,
+        "initial_face_count": initial.num_faces,
+        "common_initial_source_identity_audit": True,
+        "image_directory": str(source["image_directory"]),
+        "view_count": int(source["view_count"]),
+        "camera_and_gt_container": str(source["camera_and_gt_container"]),
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _failure_row(
-    static: dict[str, Any], method: str, stage: str, reason: str
+    static: dict[str, Any],
+    source: dict[str, Any],
+    method: str,
+    stage: str,
+    reason: str,
 ) -> dict[str, Any]:
     return {
         "sample_id": str(static["sample_id"]),
@@ -440,6 +667,25 @@ def _failure_row(
         "peak_gpu_memory_mb": "",
         "vertex_count": "",
         "face_count": "",
+        "final_mesh": "",
+        "coordinate_transform_to_gt": "",
+        "method_config_path": "",
+        "common_initial_mesh": str(source.get("common_initial_mesh", "")),
+        "common_initial_mesh_sha256": str(
+            source.get("common_initial_mesh_sha256", "")
+        ),
+        "initial_vertex_count": source.get("initial_vertex_count", ""),
+        "initial_face_count": source.get("initial_face_count", ""),
+        "common_initial_source_identity_audit": "",
+        "image_directory": str(source.get("image_directory", "")),
+        "view_count": source.get("view_count", ""),
+        "camera_and_gt_container": str(source.get("camera_and_gt_container", "")),
+        "adapter_initial_mesh_sha256": "",
+        "adapter_initial_vertex_count": "",
+        "adapter_initial_face_count": "",
+        "adapter_initial_max_abs_vertex_error": "",
+        "adapter_initial_faces_exact": "",
+        "common_initial_identity_audit": "",
         "initial_chamfer": "",
         "refined_chamfer": "",
         "chamfer_improvement_rate": "",
@@ -452,11 +698,19 @@ def _failure_row(
         "initial_normal_consistency": "",
         "refined_normal_consistency": "",
         "improved": "",
+        "output_connectivity_preserved": "",
+        "introduced_flipped_faces": "",
+        "new_degenerate_faces": "",
+        "introduced_flipped_faces_comparable": "",
     }
 
 
 def _save_status(
-    path: Path, row: dict[str, Any], commands: list[list[str]], error: str | None
+    path: Path,
+    row: dict[str, Any],
+    commands: list[list[str]],
+    error: str | None,
+    method_config: dict[str, Any],
 ) -> None:
     path.write_text(
         json.dumps(
@@ -465,6 +719,7 @@ def _save_status(
                 "row": row,
                 "commands": [shlex.join(command) for command in commands],
                 "error": error,
+                "method_config": method_config,
             },
             indent=2,
         )
@@ -476,8 +731,15 @@ def _save_status(
 def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     if not rows:
         raise ValueError("External evaluation shard has no assigned samples.")
+    fieldnames = list(rows[0])
+    known = set(fieldnames)
+    for row in rows[1:]:
+        for key in row:
+            if key not in known:
+                fieldnames.append(key)
+                known.add(key)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -504,6 +766,8 @@ def main() -> int:
     parser.add_argument("--surface-samples", type=int, default=3000)
     parser.add_argument("--metric-seed", type=int, default=7)
     parser.add_argument("--fscore-threshold", type=float, default=0.01)
+    parser.add_argument("--expected-test-samples", type=int, default=1000)
+    parser.add_argument("--sample-id")
     parser.add_argument("--keep-work", action="store_true")
     parser.add_argument(
         "--retry-failed",

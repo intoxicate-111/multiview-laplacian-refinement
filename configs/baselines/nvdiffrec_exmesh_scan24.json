@@ -1,0 +1,20 @@
+{
+  "ref_mesh": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/exmesh_baselines/nvdiffrec/scan24/input",
+  "random_textures": true,
+  "iter": 5000,
+  "save_interval": 100,
+  "texture_res": [2048, 2048],
+  "train_res": [1162, 1554],
+  "batch": 1,
+  "spp": 1,
+  "learning_rate": [0.03, 0.01],
+  "ks_min": [0, 0.08, 0.0],
+  "dmtet_grid": 128,
+  "mesh_scale": 2.1,
+  "laplace_scale": 3000,
+  "background": "white",
+  "loss": "logl1",
+  "pre_load": true,
+  "validate": false,
+  "out_dir": "native_run"
+}

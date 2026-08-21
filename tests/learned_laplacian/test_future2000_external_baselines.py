@@ -10,6 +10,7 @@ from PIL import Image
 from mlr.baselines.future2000 import (
     export_nds_scene,
     export_nerf_scene,
+    export_nvdiffrec_scene,
     export_openmvs_scene,
 )
 from mlr.io import load_mesh
@@ -119,3 +120,26 @@ def test_openmvs_export_uses_current_mesh_and_same_cameras(tmp_path: Path) -> No
     assert "<colmap_dir>/sparse" in metadata["interface_command_contract"]
     assert "initial_current.ply" in metadata["interface_command_contract"]
     assert metadata["forbidden_fields_consumed"] == []
+
+
+def test_nvdiffrec_export_uses_exact_cameras_and_current_mesh(tmp_path: Path) -> None:
+    sample = _sample(tmp_path)
+    result = export_nvdiffrec_scene(sample, tmp_path / "nvdiffrec")
+    transforms = json.loads(
+        (result.scene_dir / "transforms_train.json").read_text(encoding="utf-8")
+    )
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    exported = load_mesh(result.initial_obj)
+    obj_text = result.initial_obj.read_text(encoding="utf-8")
+
+    assert np.allclose(exported.vertices, sample["vertices"].numpy())
+    assert np.array_equal(exported.faces, sample["faces"].numpy())
+    assert "mtllib initial_current.mtl" in obj_text
+    assert "usemtl defaultMat" in obj_text
+    assert (result.scene_dir / "initial_current.mtl").is_file()
+    assert len(transforms["frames"]) == 2
+    assert transforms["frames"][0]["intrinsics"] == sample["intrinsics"][0].tolist()
+    assert transforms["frames"][0]["resolution_wh"] == [8, 8]
+    assert metadata["geometry_path"].startswith("official DLMesh")
+    assert metadata["forbidden_fields_consumed"] == []
+    assert Image.open(result.scene_dir / "images/0000.png").mode == "RGBA"

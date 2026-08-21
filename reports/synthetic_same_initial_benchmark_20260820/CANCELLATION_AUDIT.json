@@ -1,0 +1,39 @@
+{
+  "audit_date": "2026-08-20",
+  "owner": "zhou_c",
+  "inspection": {
+    "queue_command": "squeue -u zhou_c",
+    "metadata_command": "scontrol show job -dd <job_id>",
+    "post_cancel_verified": true
+  },
+  "cancelled_jobs": [
+    {
+      "job_id": "16491",
+      "job_name": "exmesh_nvdr_s24",
+      "state_before": "RUNNING",
+      "command": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/scripts/HPC/run_exmesh_nvdiffrec_sanity.slurm",
+      "work_dir": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement",
+      "stdout": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/slurm_logs/exmesh_nvdr_s24_16491.out",
+      "stderr": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/slurm_logs/exmesh_nvdr_s24_16491.err",
+      "classification_reason": "obsolete ExMesh/DTU scan24 nvdiffrec sanity run from the incorrect comparison protocol",
+      "cancellation_result": "CANCELLED by 1922630442",
+      "start_time": "2026-08-20T15:57:35+01:00",
+      "end_time": "2026-08-20T16:47:32+01:00",
+      "elapsed": "00:49:57"
+    }
+  ],
+  "retained_jobs": [
+    {
+      "job_ids": ["16494", "16495"],
+      "names": ["uav_l40_night", "uav_l40_day"],
+      "reason": "unrelated video_sr_hpc UAV jobs"
+    },
+    {
+      "job_ids": ["16496", "16497"],
+      "names": ["star_l40_night", "star_l40_day"],
+      "reason": "unrelated video_sr_hpc STAR jobs"
+    }
+  ],
+  "obsolete_jobs_remaining_in_squeue": [],
+  "artifacts_deleted": false
+}

@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-08-15 18:47 BST，Europe/London。
+状态日期：2026-08-21 BST，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -18,7 +18,7 @@
 | F2 | 编码器步长 `1,1`；特征图分辨率等于输入分辨率。 |
 | K0/K2/K4/K6 | 使用 0、2、4 或 6 个频率的位置 Fourier 编码。 |
 
-Canonical absolute target 为
+历史 canonical GT-query target 为
 
 $$
 \delta_i=(LV)_i,
@@ -26,14 +26,15 @@ $$
 \widehat{\delta}_i=\frac{\delta_i}{h_i^2+10^{-12}}.
 $$
 
-Synthetic-current 实验的图和目标均定义在 current graph 上：
+当前 synthetic-current 实验的图和 raw target 均定义在 current graph 上：
 
 $$
-\delta_i^{\mathrm{current}}=(L_cP_{\mathrm{proxy}})_i,
-\qquad
-\widehat{\delta}_i^{\mathrm{current}}
-=\frac{\delta_i^{\mathrm{current}}}{(h_i^c)^2+10^{-12}}.
+\delta_i^{\mathrm{current}}=(L_cP_{\mathrm{proxy}})_i.
 $$
+
+模型直接预测这个 raw field。`h_current` 仍是输入 geometry feature 和 audit
+quantity；它不会对当前 target 做除法、clip 或 denormalization。`h^2` normalized
+数值只保留用于历史对比和 diagnostics。
 
 ## 数据集清单
 
@@ -45,8 +46,8 @@ $$
 | Query-resolution ablation v2 | 50 个对象；40/5/5 | 14 / 960 | 完成 | `multiview_960/query_resolution_ablation_v2` |
 | Synthetic current-query，14 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 14 / 960 | 完成并已复制到 HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query，28 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 28 / 960 | 完成 | HPC：`sofa50_synthetic_current_28view_v1` |
-| Synthetic current-query，native 1920 | 与 960 相同的 250 IDs 和 200/25/25 split | 28 / 1920 | 数据完成，HF 训练运行中 | HPC：`sofa50_synthetic_current_28view_native1920_v1` |
-| Future2000 GT-adaptive expanded current | 2,000 个对象，每个 5 个变体；变体划分 8000/1000/1000 | 28 / 960 | 数据完成，主训练停在 64k | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Synthetic current-query，native 1920 | 与 960 相同的 250 IDs 和 200/25/25 split | 28 / 1920 | 数据、HF 训练与评估均完成 | HPC：`sofa50_synthetic_current_28view_native1920_v1` |
+| Future2000 GT-adaptive expanded current | 2,000 个对象，每个 5 个变体；变体划分 8000/1000/1000 | 28 / 960 | 数据完成；200k 从零训练快照到 188k | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成 | HPC：`openmvs_texture_test_v6_48view` |
 | Thingi10K50 开发集 | 50 个对象；40/5/5 | 960 和 1920 变体 | 仅开发与 smoke run | 本地 `thingi10k50` 运行目录 |
 
@@ -277,25 +278,48 @@ Gaussian-only 改善 mean downstream geometry，却相对 original 恶化两个 
 `F + (F-Gaussian(F))` 获得最强 raw prediction/tail metrics，且 Bottom-90%
 没有实质退化。
 
-### Native-1920 + HF（运行快照）
+### Native-1920 + HF（已完成）
 
 Native renderer 复用 960 HF 的 sample IDs、28 个 camera extrinsics、split、graph、proxy、
 target 和 visibility contracts。Intrinsics 按 1920 缩放，native 与 resized 的最小 pixel
-MAE 为 `0.0205764`，排除 resize-only 路径。Job 15854 使用 4×L40 从零训练
-20,000 global optimizer steps。Step 500 train/validation loss 为 `7.02343e-5` /
-`6.34615e-5`，同期 960 为 `7.47579e-5` / `9.61499e-5`。
+MAE 为 `0.0205764`，排除 resize-only 路径。Job 15854 使用 4×L40 从零完成
+20,000 global optimizer steps。
 
 1920 global batch 为 4，960 基线为 2。View chunk 和 gradient checkpointing 已通过数学
-等价测试，但 batch 差异使训练对比非严格。在 jobs 15864/15865 完成 paired
-Top-10%/Top-1% 与 downstream 评估前，不报告分辨率结论。
+等价测试，但 batch 差异使训练对比非严格。
+
+| 分辨率 + HF | Raw EPE ↓ | Raw RMS ↓ | Bottom 90% ↓ | Top 10% ↓ | Top 1% ↓ | Chamfer ↓ | P2S ↓ | Normal ↑ | Flips | 改善数 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 960 | **0.00288618** | **0.00628203** | 0.00190107 | **0.0117522** | **0.0347895** | **0.00377857** | **0.00377999** | 0.942504 | 6303 | **20/25** |
+| Native 1920 | 0.00290615 | 0.00690893 | **0.00183806** | 0.0125190 | 0.0389263 | 0.00378509 | 0.00378489 | **0.944522** | **5777** | 18/25 |
+
+Native 1920 未改善 Top-10%、Top-1%、raw RMS、recovery-weighted RMS、Chamfer
+或 P2S。它改善 normal consistency 并减少 flips。Runtime 从 2 GPUs × 3.98 h
+（`7.95` GPU-hours）增加到 4 GPUs × 22.35 h（`89.39` GPU-hours）。
+
+### GT-query direct-raw zero-shot transfer
+
+另一组 2×Blackwell、20,000-step control 在 exact GT query 上使用 raw target
+`L_gt @ V_gt` 训练，再把 frozen model 应用于 current mesh。Contract audit 通过，GT
+只在 prediction 之后用于 surface evaluation。Correct/zero/shuffled RGB controls
+确认 image features 会影响 held-out prediction。
+
+| Arm | Current-mesh Chamfer ↓ | P2S ↓ | Normal ↑ | Flips | 改善数 |
+|---|---:|---:|---:|---:|---:|
+| 历史 GT-query `h^2` normalized | 0.00581764 | 0.00606854 | 0.922509 | 11795 | 0/25 |
+| GT-query direct raw + HF | 0.00400486 | 0.00401379 | **0.948067** | **3087** | 4/25 |
+| Current-query direct raw + HF | **0.00377832** | **0.00377984** | 0.942475 | 6326 | **20/25** |
+
+移除 normalization 相对历史 GT-query transfer 明显改善，但没有弥合与 supervised
+current-query training 的 query-distribution gap。历史 arm 早于 HF，因此这不是严格
+单变量 normalization ablation。
 
 ## Future2000 GT-adaptive 扩展实验
 
-快照时间：2026-08-15 18:47 BST。数据集包含 2,000 个源物体，每个物体 5 个
+快照时间：2026-08-21 BST。数据集包含 2,000 个源物体，每个物体 5 个
 确定性 expanded-current variants；object-level split 为 8,000 train、1,000
 validation、1,000 test。主分支使用 28 views、GT-adaptive subdivision、C2F2 和
-raw current-graph target `L_current @ P_proxy`；配对 control 直接预测 vertex
-displacement。
+original-plus-HF features，raw current-graph target 为 `L_current @ P_proxy`。
 
 | Step | Train loss | Validation loss | 记录 |
 |---:|---:|---:|---|
@@ -305,6 +329,8 @@ displacement。
 | 50,000 | 4.26000e-6 | 4.23000e-6 | 恢复运行 |
 | 60,000 | 4.19000e-6 | 5.27000e-6 | 恢复运行 |
 | 64,000 | **3.99000e-6** | — | 最新完整 checkpoint |
+| 132,000 | 2.10e-6 | — | 当前 7×Blackwell 从零 run |
+| 188,000 | **1.72e-6** | step 182,880 附近为 2.87e-6 | 94% 快照 |
 
 Job 15794 使用四张 L40，正常速度约 `3.076` optimizer steps/s，但 persistent
 DataLoader worker 在 32,000 step 耗尽 51,200 个文件描述符；其余 ranks 在 30
@@ -313,9 +339,36 @@ DataLoader worker 在 32,000 step 耗尽 51,200 个文件描述符；其余 rank
 
 替代 job 15795 使用 `file_system` sharing 和 non-persistent workers 恢复，到
 step 64,000 后因 worker 耗尽 `/dev/shm` 失败（`Bus error` / `No space left on
-device`）。Step-64k checkpoint 仍可恢复。配对 displacement jobs 15759/15760 已取消，
-尚无最终 prediction/geometry 对比。External array 15791 仍不完整且样本级失败率高；
-新任务仅通过 `scripts/local/run_future2000_comparisons.sh` 在本地启动。
+device`）。配对 displacement jobs 15759/15760 已取消。这些 run 只保留为基础设施
+历史，不是当前 active run。
+
+Job 16607 使用 7 张 NVIDIA RTX PRO 6000 Blackwell Server Edition 从零启动，global
+batch 为 7；全部 RGB stage 到 node-local storage，DataLoader workers 为 0，output
+directory 中存在旧 checkpoint 时会直接拒绝启动。当前快照为
+188,000/200,000 steps，rolling train loss `1.72e-6`，最近完成的 step 182,880 附近
+validation 为 `2.87e-6`。尚无最终 test 或 recovery 结果。
+
+## Sofa50 同初始网格外部 benchmark
+
+Ours、NDS、nvdiffrec 和 ExMesh 使用完全相同的 25 个 current/coarse meshes、
+native-1920 28-view RGB observations 与 cameras。四种方法均完成 `25/25`，input
+identity 与 unified metric audits 通过。
+
+第一次聚合混用了 method-native Chamfer，使 common initial mesh 同时出现
+`0.00391323` 与 `0.01707047`，证明该表不具备 metric compatibility。修正聚合使用
+`evaluate_mesh_geometry`、3,000 surface samples 和 seed 7，对全部归档 initial/final
+mesh 统一重算。Native metrics 只作 provenance。详见双语
+[事故报告](CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md) 和
+[修正产物](../reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)。
+
+| 方法 | Initial Chamfer | Final Chamfer ↓ | Improvement | 改善数 | Normal ↑ |
+|---|---:|---:|---:|---:|---:|
+| Ours | 0.017070468 | 0.011347800 | 33.52% | **25/25** | **0.944514** |
+| NDS | 0.017070468 | **0.011204992** | **34.36%** | 22/25 | 0.873805 |
+| nvdiffrec | 0.017070468 | 0.013654660 | 20.01% | 18/25 | 0.848122 |
+| ExMesh | 0.017070468 | 0.020170615 | -18.16% | 8/25 | 0.845337 |
+
+这是 supplied-initial Sofa50 synthetic comparison，不是官方 DTU ExMesh 毫米制协议。
 
 ## 其他诊断实验
 
@@ -367,8 +420,11 @@ device`）。Step-64k checkpoint 仍可恢复。配对 displacement jobs 15759/1
 | 15844 | Gaussian feature，20k | 完成 | 2×L40；elapsed `03:31:05`。 |
 | 15845 | Original + HF feature，20k | 完成 | 2×L40；elapsed `03:58:50`。 |
 | 15846/15847 | Image-feature 评估/报告 | 完成 | 4 个 shards 都在 2 分钟内完成，merge 11 秒。 |
-| 15854 | Native-1920 + HF，20k | 快照时运行中 | 4×L40；从零训练，global batch 4，最新完整 checkpoint step 900。 |
-| 15864/15865 | Native-1920 paired evaluation/report | 依赖等待 | 仅在 job 15854 成功完成后启动。 |
+| 15854 | Native-1920 + HF，20k | 已完成 | 4×L40；从零训练，global batch 4；完成全部 20,000 steps。 |
+| 15864/15865 | Native-1920 paired evaluation/report | 已完成 | Contract audit 通过；1920 未改善 Top-10%/Top-1% 或 mean Chamfer/P2S。 |
+| 16584 | GT-query direct-raw transfer，20k | 已完成 | 2×Blackwell；contract 通过；current-mesh recovery `4/25`，低于 current-query HF 的 `20/25`。 |
+| 16607 | Future2000 direct-raw + HF，200k | 快照时运行中 | 7×Blackwell；从零训练；188,000/200,000 steps，rolling train loss `1.72e-6`。 |
+| 16736 | Sofa50 same-initial unified report | 已完成 | 四种方法均 25/25；使用 deterministic unified evaluator；`contract_audit=true`。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 
@@ -389,7 +445,12 @@ Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于�
 - Learned residual expert 在无 spatial gate 时已有效；learned gate 在 validation-selected
   constant scale 之上还提供较小的 placement-specific 增益。
 - 960 original+HF 的 raw/tail prediction 最好，Gaussian-only 的 mean recovery 最好。
-  Native-1920+HF 尚待完成，early validation loss 不是最终分辨率结论。
+  Native-1920+HF 未改善 tail 或 mean downstream distance，尽管 normal/flips 更好且
+  使用更多计算资源。
+- GT-query direct-raw training 相对历史 normalized GT-query transfer 明显改善，但在
+  current-mesh recovery 上仍未达到 current-query supervision。
+- Same-initial 跨方法 Chamfer 必须来自 unified evaluator。Method-native geometry
+  metrics 只作为 provenance，不能定义 primary ranking。
 
 ## 数据来源优先级
 

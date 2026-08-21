@@ -49,12 +49,20 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     import torch
 
     dataset = PreparedMeshDataset.from_manifest(args.manifest, "test")
-    if len(dataset) != 1000:
-        raise ValueError(f"Expected 1000 test samples, found {len(dataset)}.")
+    if len(dataset) != args.expected_test_samples:
+        raise ValueError(
+            f"Expected {args.expected_test_samples} test samples, found {len(dataset)}."
+        )
     representatives = representative_indices(dataset)
-    if len(representatives) != 200:
-        raise ValueError(f"Expected 200 test objects, found {len(representatives)}.")
+    if len(representatives) != args.expected_test_objects:
+        raise ValueError(
+            f"Expected {args.expected_test_objects} test objects, found {len(representatives)}."
+        )
     _validate_shared_observations(dataset)
+    if args.object_id is not None:
+        representatives = [item for item in representatives if item[0] == args.object_id]
+        if len(representatives) != 1:
+            raise ValueError(f"Expected exactly one --object-id match, found {representatives}")
     assigned = representatives[args.shard_index :: args.shard_count]
     device = torch.device(args.device)
     model = DepthAnything3.from_pretrained(prior_config["model"]).to(device)
@@ -213,6 +221,9 @@ def main() -> int:
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--expected-test-samples", type=int, default=1000)
+    parser.add_argument("--expected-test-objects", type=int, default=200)
+    parser.add_argument("--object-id")
     args = parser.parse_args()
     print(json.dumps(run(args), indent=2))
     return 0

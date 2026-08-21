@@ -1,0 +1,97 @@
+{
+  "experiment": "sofa50_same_prepared_mesh_same_rgb_same_cameras",
+  "test_samples": 25,
+  "input_contract": "exact prepared synthetic current mesh + same 28 native-1920 RGB images + same cameras; GT evaluation only",
+  "no_test_tuning": true,
+  "methods": {
+    "nds": {
+      "repository": "https://github.com/fraunhoferhhi/neural-deferred-shading",
+      "commit": "760e4549f59adaed9adf1bd705599786a00ba6b8",
+      "group": "A_same_initial_mesh",
+      "arguments": {
+        "iterations": 2000,
+        "image_scale": 1,
+        "lr_vertices": 0.001,
+        "lr_shader": 0.001,
+        "upsample_iterations": [2001],
+        "weight_mask": 2.0,
+        "weight_normal": 0.1,
+        "weight_laplacian": 40.0,
+        "weight_shading": 1.0
+      },
+      "initial_mesh_argument": "--initial_mesh initial_current.obj",
+      "default_visual_hull_bypassed": true,
+      "topology_compatibility": "fixed_topology_nonmanifold_input",
+      "topology_compatibility_reason": "The exact common prepared mesh is non-manifold; official Botsch remeshing rejects it. Upsampling is scheduled after the 2000-step budget so NDS optimizes the unchanged common topology instead of repairing or substituting the input geometry."
+    },
+    "exmesh": {
+      "repository": "https://github.com/Fan-Treasure/ExMesh",
+      "commit": "09950d283fc5372a09079e30c88d998f1c40b2d0",
+      "group": "A_same_initial_mesh",
+      "arguments": {
+        "iterations": 10000,
+        "resolution": 1,
+        "position_lr_max_steps": 10000,
+        "feature_lr": 0.0025,
+        "lambda_dssim": 0.2,
+        "split_from_iter": 1000,
+        "split_until_iter": 7000,
+        "lambda_dist": 0.01,
+        "lambda_smooth": 3000,
+        "lambda_deviation": 10000,
+        "lambda_silhouette": 0.005,
+        "lambda_depth": 0.003
+      },
+      "initial_mesh_path": "<scene>/mesh.ply",
+      "default_pgsr_bypassed": true,
+      "depth_prior": {
+        "repository": "https://github.com/ByteDance-Seed/depth-anything-3",
+        "commit": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
+        "model": "depth-anything/DA3NESTED-GIANT-LARGE",
+        "input_contract": "same 28 RGB images and cameras only; no GT"
+      }
+    },
+    "nvdiffrec": {
+      "repository": "https://github.com/NVlabs/nvdiffrec",
+      "commit": "abf3a34b1eb6e782abffefc2462c7e9bcd89f9bb",
+      "group": "A_same_initial_mesh",
+      "seed": 7,
+      "arguments": {
+        "iterations": 5000,
+        "save_interval": 100,
+        "texture_res": [2048, 2048],
+        "train_res": [1920, 1920],
+        "batch": 1,
+        "spp": 1,
+        "learning_rate": [0.03, 0.01],
+        "laplace_scale": 3000
+      },
+      "initial_mesh_argument": "base_mesh -> official DLMesh fixed-topology path"
+    },
+    "neuralangelo": {
+      "repository": "https://github.com/NVlabs/neuralangelo",
+      "commit": "94390b64683c067c620d9e075224ccfe582647d0",
+      "group": "B_image_based_reconstruction_reference",
+      "reason": "optimizes a neural SDF from images and extracts a new marching-cubes mesh; no arbitrary triangular initial-mesh refinement path"
+    },
+    "matcha": {
+      "repository": "https://github.com/anttwo/MAtCha",
+      "commit": "b119fd96e484fc81eb40623c1ea92ad3dbd3c21e",
+      "group": "B_image_based_reconstruction_reference",
+      "reason": "builds MASt3R/point-map and 2D-Gaussian/chart geometry then extracts a mesh; no supplied triangular initial-mesh optimizer"
+    }
+  },
+  "evaluation": {
+    "surface_samples": 3000,
+    "surface_sampling_seed": 7,
+    "fscore_threshold": 0.01,
+    "metrics": [
+      "chamfer",
+      "point_to_surface_mean",
+      "point_to_surface_p95",
+      "fscore",
+      "normal_consistency",
+      "introduced_flipped_faces_when_connectivity_is_preserved"
+    ]
+  }
+}

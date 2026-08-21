@@ -10,6 +10,10 @@
 
 实验指标与运行状态：[实验数据汇总](docs/EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
+Chamfer evaluator 事故：[中文报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md) | [English report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md)
+
+Sofa50 同初始网格外部对比：[修正后的最终报告](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)
+
 当前 Sofa50 受控消融：[Direct-raw/loss/expert/image-feature 报告](docs/SOFA50_CONTROLLED_ABLATIONS_REPORT.zh-CN.md)
 
 Future2000 本地对比任务：[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
@@ -22,7 +26,7 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 
 ## 项目状态
 
-状态日期：2026-08-15 18:47 BST。
+状态日期：2026-08-21 BST。
 
 | 组件 | 状态 | 结论 |
 |---|---|---|
@@ -45,17 +49,19 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 | Raw MSE 与 Huber | 已完成 | Raw MSE 未降低 test Top-10%/Top-1% error，也未降低 mean Chamfer/P2S。MSE 使用 global batch 6，基线为 2，因此不是严格单变量训练对比。 |
 | Learned dynamic residual expert 与 gate | 已完成 | Learned final 在 25/25 test samples 上的 raw EPE、Chamfer 和 P2S 均优于联合训练的 base。Validation-selected constant gate 与 5 个 mesh 内 shuffle 干预表明：expert 是主要贡献，vertex-level placement 还提供较小但可测的额外增益。 |
 | 960 image-feature 消融 | 已完成 | `F + (F-Gaussian(F))` 的 test raw EPE、RMS、Top-10% 和 Top-1% 最低；Gaussian-only 的 mean Chamfer、normal consistency 和改善数（`21/25`）最好。 |
-| Native-1920 + high-frequency residual | 运行中，尚无最终结论 | Native renderer 观测已通过 camera/split/graph/target/visibility audit。4×L40 job 15854 从零训练 20,000 steps；global batch 4 与 960 基线的 2 不同。 |
-| Future2000 GT-adaptive 扩展 | 停在 step 64,000，可恢复 | Job 15795 从 32,000 继续到 64,000，后因 DataLoader worker 耗尽 shared memory 失败。Checkpoint 完整，尚无最终 geometry 结果。 |
-| Future2000 外部基线 | 未完成，不报告结论 | 现有分片诊断的样本级失败数较高；新对比任务仍仅使用本地脚本。 |
-| 自动化测试 | 当前文档改动对应检查通过 | Raw loss、dynamic expert/gate、image feature、native-1920 数据准备和分布式训练相关测试通过；下文验证命令是新 checkout 的最终依据。 |
+| Native-1920 + high-frequency residual | 已完成；非严格 resolution ablation | 4×L40、20,000-step 实验降低 Bottom-90% error，但相对 960+HF 恶化 test raw EPE/RMS、Top-10%/Top-1%、Chamfer 和 P2S；normal consistency 改善，flips 减少。Global batch 为 4 对 2。 |
+| GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
+| Future2000 GT-adaptive 扩展 | 从零训练中 | 7×Blackwell job 16607 在 8 月 21 日快照达到 188,000/200,000 steps。Rolling train loss 为 `1.72e-6`，最近完成的 step 182,880 附近 validation 为 `2.87e-6`；尚无最终 test/recovery 结论。 |
+| Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |
+| Future2000 外部基线 | 未完成，不报告结论 | 早期分片诊断只保留为失败证据，不提升为正式对比。 |
+| 自动化测试 | 当前文档改动对应检查通过 | External adapters、same-initial aggregation、raw loss、dynamic expert/gate、image feature、native-1920 和分布式训练相关 targeted tests 通过；下文命令仍是新 checkout 的最终依据。 |
 
-当前训练主线是 Sofa50 synthetic-current、current-query/current-graph、direct-raw
-formulation。Query mesh 及其 connectivity 同时定义 prediction 与 recovery 使用的
+当前方法主线是在 Sofa50 上确定、并扩展到 Future2000 2,000-object 数据集的
+synthetic-current、current-query/current-graph、direct-raw formulation。Query mesh
+及其 connectivity 同时定义 prediction 与 recovery 使用的
 graph。监督场为 `L_current @ P_proxy`；它只作为 target，绝不会作为 inference
-feature 输入模型。当前 native-1920 实验保留 960 实验中效果最好的 high-frequency
-feature construction，只改变图像分辨率以及已经明确记录的 distributed global
-batch。
+feature 输入模型。当前 Future2000 run 使用 960 high-frequency feature construction、
+28 views、C2F2 与 200,000 optimizer steps。
 
 早期 GT-query、`h^2`-normalized formulation 仍作为历史背景保留。该路径迁移到
 expanded/OpenMVS query graph 后未改善 geometry，因此不再作为下文数学定义的主线。
@@ -591,26 +597,34 @@ Gaussian-only 略微恶化 high-curvature tail，却获得最好的 mean downstr
 `F + (F-Gaussian(F))` 获得最好的 prediction/tail metrics，且 mean
 Chamfer/P2S 仍优于 original Arm B。
 
-### Native 1920 + high-frequency residual（运行中）
+### Native 1920 + high-frequency residual（已完成）
 
 Native-1920 数据使用相同的 250 个 sample IDs、`200/25/25` split、28 个
 camera extrinsics、current graph、proxy、raw target 和 visibility tensor。Intrinsics 按
 native 1920 渲染缩放，不是 960 resize；native 与 resized 的最小 pixel MAE 为
 `0.0205764`。
 
-4×L40 job 15854 从零训练 20,000 steps。View chunk=4 和 gradient checkpointing
-已通过 forward/gradient equivalence tests。实际 global batch 为 4，960 HF 基线为 2，
-因此最终对比会标记为非严格单变量。8 月 15 日 18:47 快照的完整 checkpoint
-为 step 900；step-500 validation loss 为 `6.34615e-5`，同期 960 HF 为
-`9.61499e-5`。这一 early loss 差异不是 Top-10%/Top-1% 或 downstream 结论。
-Jobs 15864/15865 将在训练后执行 paired evaluation 和 report merge。
+4×L40 job 15854 已从零完成 20,000 steps。View chunk=4 和 gradient checkpointing
+通过 forward/gradient equivalence tests。实际 global batch 为 4，960 HF 基线为 2，
+因此这不是严格单变量训练对比。
+
+| 分辨率 + HF | Raw EPE ↓ | Raw RMS ↓ | Bottom 90% ↓ | Top 10% ↓ | Top 1% ↓ | Chamfer ↓ | Normal ↑ | Flips | 改善数 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 960 | **0.00288618** | **0.00628203** | 0.00190107 | **0.0117522** | **0.0347895** | **0.00377857** | 0.942504 | 6303 | **20/25** |
+| Native 1920 | 0.00290615 | 0.00690893 | **0.00183806** | 0.0125190 | 0.0389263 | 0.00378509 | **0.944522** | **5777** | 18/25 |
+
+Native 1920 没有改善 high-curvature tail 或 mean downstream distance。它改善
+normal consistency 并减少 flips，但计算成本为 4 GPUs × 22.35 h（`89.39`
+GPU-hours），而 960 为 2 GPUs × 3.98 h（`7.95` GPU-hours）。
 
 ### Future2000 GT-adaptive 扩展实验
 
-当前扩展实验包含 2,000 个上游 meshes，每个物体生成 5 个确定性 current-mesh
+扩展实验包含 2,000 个上游 meshes，每个物体生成 5 个确定性 current-mesh
 variants，按物体执行 80/10/10 split（`8000/1000/1000` samples），使用 28 个标定
-views、GT-adaptive subdivision、C2F2 和 current-graph direct-raw target。HPC 启动
-参数把配置中的开发预算覆盖为 200,000 个 global optimizer steps，并使用四张 L40。
+views、GT-adaptive subdivision、C2F2、original-plus-HF image features 和
+current-graph direct-raw target。Job 16607 使用全新初始化，在 7 张 NVIDIA RTX PRO
+6000 Blackwell Server Edition 上执行 200,000 个 global optimizer steps，global
+batch 为 7。
 
 | Step | Rolling train loss | Validation loss |
 |---:|---:|---:|
@@ -620,12 +634,39 @@ views、GT-adaptive subdivision、C2F2 和 current-graph direct-raw target。HPC
 | 50,000 | 4.26000e-6 | 4.23000e-6 |
 | 60,000 | 4.19000e-6 | 5.27000e-6 |
 | 64,000 | **3.99000e-6** | — |
+| 132,000 | 2.10e-6 | — |
+| 188,000 | **1.72e-6** | 最近完成的 step 182,880 附近为 2.87e-6 |
 
-Job 15794 在 32,000 step 因文件描述符耗尽停止。替代 job 15795 使用
+历史 job 15794 在 32,000 step 因文件描述符耗尽停止。替代 job 15795 使用
 `file_system` sharing strategy 和 non-persistent workers 恢复，到 step 64,000 后因
 DataLoader worker 耗尽 `/dev/shm` 失败（`Bus error` / `No space left on device`）。
-Step-64k checkpoint 完整可恢复。配对 direct-displacement jobs 已取消，尚无最终
-prediction 或 geometry 对比。
+这些 run 只保留为基础设施历史。Job 16607 不复用上述 checkpoint：RGB 被 stage 到
+node-local storage，workers 关闭，overwrite/resume guards 强制执行 from-scratch
+contract。8 月 21 日快照进度为 94%；最终 test 与 geometry evaluation 必须等待
+step 200,000。
+
+### Sofa50 同初始网格外部对比
+
+Ours、NDS、nvdiffrec 与 ExMesh 在相同的 25 个 native-1920 Sofa50 test inputs 上
+运行：完全相同的 current/coarse mesh、28 个 RGB observations 和 cameras。GT 只由
+common evaluator 使用。四种方法均完成 `25/25`，input identity audit 通过。
+
+初步聚合错误地混用了各方法原生 Chamfer implementation，使同一个 initial mesh
+同时出现 `0.00391323` 和 `0.01707047` 两个分数，该表因此失效。修正报告对 common
+initial 与全部 final mesh 使用同一个 deterministic 3,000-surface-point evaluator
+（seed 7）重算；native 数值仅保留为 provenance，`contract_audit=true`。详见双语
+[事故报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md) 与
+[修正后的最终报告](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)。
+
+| 方法 | Unified final Chamfer ↓ | Improvement | 改善数 | Normal ↑ |
+|---|---:|---:|---:|---:|
+| Ours | 0.011347800 | 33.52% | **25/25** | **0.944514** |
+| NDS | **0.011204992** | **34.36%** | 22/25 | 0.873805 |
+| nvdiffrec | 0.013654660 | 20.01% | 18/25 | 0.848122 |
+| ExMesh | 0.020170615 | -18.16% | 8/25 | 0.845337 |
+
+NDS 的 mean Chamfer 略低；ours 的逐 sample 一致性更好，normal 也明显更高。这些
+synthetic-protocol 数值不是官方 DTU ExMesh 毫米制指标。
 
 ## 安装与验证
 
@@ -678,11 +719,9 @@ bash scripts/HPC/submit_sofa50_image_feature_ablation_2x2gpu.sh
 # Native-1920 original-plus-high-frequency 数据、训练和评估链
 bash scripts/HPC/submit_sofa50_hf1920_4gpu.sh
 
-# Future2000 合同审计与四张 L40 current-graph 训练
-sbatch scripts/HPC/audit_future2000_gt_adaptive_2000mesh.slurm
-sbatch scripts/HPC/train_future2000_gt_adaptive_fast_io.slurm \
-  configs/learned_laplacian/train_future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k.json \
-  runs/learned_laplacian/future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k_seed7
+# Future2000 200k from-scratch smoke 与 7×Blackwell 训练
+sbatch scripts/HPC/smoke_future2000_current_28view_hf_7gpu_blackwell.slurm
+sbatch scripts/HPC/train_future2000_current_28view_hf_200k_7gpu_blackwell.slurm
 ```
 
 ### 分布式多 GPU 训练
@@ -717,9 +756,11 @@ Global mesh batch 为 `world_size * gradient_accumulation_meshes`。
 每次 update 以及固定 optimizer-step budget 对应的 mesh exposures 数量会增加。
 
 使用 worker 的 lazy-image 训练支持
-`data_loading.multiprocessing_sharing_strategy`。Future2000 使用 `file_system`
-和 non-persistent workers，避免 persistent workers 传递 tensor 时持续累积文件
-描述符。外部方法对比由[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
+`data_loading.multiprocessing_sharing_strategy`。历史 Future2000 recovery run 在
+descriptor exhaustion 后使用 `file_system` 和 non-persistent workers；当前
+7×Blackwell run 改用 0 个 DataLoader workers，并把 RGB observations stage 到
+node-local storage，从而同时规避 descriptor 与 shared-memory failure。外部方法对比
+由[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 管理，不应重新通过 Slurm 提交。
 
 已生成的 14/28/56-view 数据集位于：
@@ -793,3 +834,15 @@ runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recov
 
 Source repository 不包含 checkpoints、prepared datasets 和 HPC result
 directories。
+
+### 独立 ExMesh 官方协议 benchmark
+
+ExMesh 官方 DTU 对比是一个完全独立的 external benchmark，不复用上面列出的
+synthetic 数据、相机、renderer 或重建 mesh。官方源码版本、15-scene 复现 gate、
+common contract 抽取、失败记录规则以及六方法单场景 sanity gate 见
+[ExMesh baseline suite 说明](docs/EXMESH_BASELINE_SUITE.md)。发布版 ExMesh 的
+15-scene 复现 gate 已通过（复现 mean CD 0.60484 mm，论文 0.58 mm）。官方
+six-method DTU benchmark 与上面的 Sofa50 same-initial comparison 相互独立；其完整
+执行仍由 scan-24 shared-coordinate-frame audit 控制。Learned-method 预期使用的
+DTU scan-24 current mesh lineage 见[溯源报告](reports/DTU_SCAN24_PREPARED_CURRENT_PROVENANCE.md)：
+该 mesh 从未生成，且明确禁止把 ExMesh PGSR mesh 静默替代为 primary input。

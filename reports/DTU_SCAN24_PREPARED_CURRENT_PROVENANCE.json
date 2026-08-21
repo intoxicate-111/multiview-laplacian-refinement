@@ -1,0 +1,63 @@
+{
+  "audit_date": "2026-08-20",
+  "scope": "provenance_only_no_inference_no_generation_no_job_submission",
+  "decision": {
+    "provenance_status": "never_generated",
+    "distinct_prepared_current_mesh_found": false,
+    "generated_but_unsynchronized": false,
+    "confidence": "high",
+    "proof_basis": "generation_command_and_file_lineage"
+  },
+  "request_timeline": {
+    "original_exmesh_protocol_saved_bst": "2026-08-16 01:45:26",
+    "original_contract": "use the same ExMesh-generated initial mesh; use geometry produced by ExMesh as current/coarse input",
+    "first_prepared_mesh_correction_saved_bst": "2026-08-20 16:17:57"
+  },
+  "successful_pgsr_lineage": {
+    "sha256": "642675e1122a4b0ba6369d219f742cc34ed0c21ee1645fa0c6e9437daae6c66a",
+    "files": [
+      {
+        "role": "pgsr_output",
+        "path": "/networkhome/WMGDS/zhou_c/external_baselines/ExMesh/outputs/coarse_meshes/dtu_scan24/test/mesh/tsdf_fusion_post.ply",
+        "bytes": 1529861,
+        "mtime_bst": "2026-08-16 03:01:07"
+      },
+      {
+        "role": "exmesh_scene_mesh",
+        "path": "/networkhome/WMGDS/zhou_c/external_baselines/ExMesh/workdir/DTU/scan24/mesh.ply",
+        "bytes": 1529861,
+        "mtime_bst": "2026-08-16 03:14:53"
+      },
+      {
+        "role": "archived_exmesh_initial",
+        "path": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/exmesh_baselines/exmesh_initial/scan24/meshes/final_mesh.ply",
+        "bytes": 1529861,
+        "mtime_bst": "2026-08-16 03:01:08"
+      }
+    ]
+  },
+  "cancelled_candidate_lineage": {
+    "sha256": "74c95e51eb018e3d1ad99549ca41e7a070b83eb651df3a14691cacd348a74bb1",
+    "current_mesh_path": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/exmesh_baselines/_cancelled/15910/current_meshes/scan24_mesh.ply",
+    "initial_mesh_path": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/exmesh_baselines/_cancelled/15910/exmesh_initial/scan24/meshes/final_mesh.ply",
+    "lineage": "both copied from that job's PGSR tsdf_fusion_post.ply",
+    "is_distinct_preparation": false
+  },
+  "existing_pipeline_audit": {
+    "sofa50_synthetic_current": "GT-derived geometry generator; invalid for DTU test input",
+    "sofa50_28view_attachment": "observation attachment only",
+    "sofa50_native1920": "rerender only; graph tensors unchanged",
+    "gt_adaptive": "GT-surface subdivision; invalid for DTU evaluation and changes topology",
+    "prepare_single_object_sample": "packages an existing coarse mesh; not a generator",
+    "exmesh_hf_runner": "consumes an externally supplied mesh; not a generator"
+  },
+  "exact_existing_scan24_generator": {
+    "pipeline": "official ExMesh PGSR train.py then render.py",
+    "output": "outputs/coarse_meshes/dtu_scan24/test/mesh/tsdf_fusion_post.ply",
+    "allowed_as_corrected_primary_input": false,
+    "reason": "direct PGSR substitution is explicitly prohibited"
+  },
+  "safe_existing_non_pgsr_generation_command": null,
+  "required_new_input_definition": "select and declare a non-GT image-derived upstream coarse reconstruction in the ExMesh scan24 frame, then prepare graph/normals/visibility without changing its vertices/faces",
+  "inference_run": "not_started"
+}

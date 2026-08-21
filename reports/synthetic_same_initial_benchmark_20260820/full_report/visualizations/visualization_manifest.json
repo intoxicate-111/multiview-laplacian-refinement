@@ -1,0 +1,138 @@
+{
+  "status": "completed",
+  "selection": "quantiles of ours per-sample Chamfer improvement",
+  "sample_count": 5,
+  "identical_fixed_camera_for_every_method_within_each_sample": true,
+  "records": [
+    {
+      "sample_id": "038b62bb-b277-4d92-8afe-3ff115add02c__v04",
+      "fixed_camera_view": 0,
+      "panel": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/fixed_camera/01_038b62bb-b277-4d92-8afe-3ff115add02c__v04.png",
+      "surface_error_definition": "output vertex to GT triangle-surface distance",
+      "shared_color_range": [
+        0.0,
+        0.03472774463123112
+      ],
+      "shared_color_clipping": "per-sample global p99 across common initial and all four refined outputs",
+      "colormap": "turbo",
+      "engines": {
+        "COMMON INITIAL": "trimesh_rtree_exact",
+        "OURS": "trimesh_rtree_exact",
+        "EXMESH": "trimesh_rtree_exact",
+        "NDS": "trimesh_rtree_exact",
+        "NVDIFFREC": "trimesh_rtree_exact"
+      },
+      "surface_error_ply": {
+        "COMMON INITIAL": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v04/common_initial.ply",
+        "OURS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v04/ours.ply",
+        "EXMESH": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v04/exmesh.ply",
+        "NDS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v04/nds.ply",
+        "NVDIFFREC": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v04/nvdiffrec.ply"
+      }
+    },
+    {
+      "sample_id": "038b62bb-b277-4d92-8afe-3ff115add02c__v00",
+      "fixed_camera_view": 0,
+      "panel": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/fixed_camera/02_038b62bb-b277-4d92-8afe-3ff115add02c__v00.png",
+      "surface_error_definition": "output vertex to GT triangle-surface distance",
+      "shared_color_range": [
+        0.0,
+        0.04092758343972573
+      ],
+      "shared_color_clipping": "per-sample global p99 across common initial and all four refined outputs",
+      "colormap": "turbo",
+      "engines": {
+        "COMMON INITIAL": "trimesh_rtree_exact",
+        "OURS": "trimesh_rtree_exact",
+        "EXMESH": "trimesh_rtree_exact",
+        "NDS": "trimesh_rtree_exact",
+        "NVDIFFREC": "trimesh_rtree_exact"
+      },
+      "surface_error_ply": {
+        "COMMON INITIAL": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v00/common_initial.ply",
+        "OURS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v00/ours.ply",
+        "EXMESH": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v00/exmesh.ply",
+        "NDS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v00/nds.ply",
+        "NVDIFFREC": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/038b62bb-b277-4d92-8afe-3ff115add02c__v00/nvdiffrec.ply"
+      }
+    },
+    {
+      "sample_id": "5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v00",
+      "fixed_camera_view": 0,
+      "panel": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/fixed_camera/03_5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v00.png",
+      "surface_error_definition": "output vertex to GT triangle-surface distance",
+      "shared_color_range": [
+        0.0,
+        0.19859414762852748
+      ],
+      "shared_color_clipping": "per-sample global p99 across common initial and all four refined outputs",
+      "colormap": "turbo",
+      "engines": {
+        "COMMON INITIAL": "trimesh_rtree_exact",
+        "OURS": "trimesh_rtree_exact",
+        "EXMESH": "trimesh_rtree_exact",
+        "NDS": "trimesh_rtree_exact",
+        "NVDIFFREC": "trimesh_rtree_exact"
+      },
+      "surface_error_ply": {
+        "COMMON INITIAL": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v00/common_initial.ply",
+        "OURS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v00/ours.ply",
+        "EXMESH": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v00/exmesh.ply",
+        "NDS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v00/nds.ply",
+        "NVDIFFREC": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v00/nvdiffrec.ply"
+      }
+    },
+    {
+      "sample_id": "5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02",
+      "fixed_camera_view": 0,
+      "panel": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/fixed_camera/04_5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.png",
+      "surface_error_definition": "output vertex to GT triangle-surface distance",
+      "shared_color_range": [
+        0.0,
+        0.1890067808860844
+      ],
+      "shared_color_clipping": "per-sample global p99 across common initial and all four refined outputs",
+      "colormap": "turbo",
+      "engines": {
+        "COMMON INITIAL": "trimesh_rtree_exact",
+        "OURS": "trimesh_rtree_exact",
+        "EXMESH": "trimesh_rtree_exact",
+        "NDS": "trimesh_rtree_exact",
+        "NVDIFFREC": "trimesh_rtree_exact"
+      },
+      "surface_error_ply": {
+        "COMMON INITIAL": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02/common_initial.ply",
+        "OURS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02/ours.ply",
+        "EXMESH": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02/exmesh.ply",
+        "NDS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02/nds.ply",
+        "NVDIFFREC": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02/nvdiffrec.ply"
+      }
+    },
+    {
+      "sample_id": "5ac05fe8-b550-4786-8e8c-c5a43c30d112__v04",
+      "fixed_camera_view": 0,
+      "panel": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/fixed_camera/05_5ac05fe8-b550-4786-8e8c-c5a43c30d112__v04.png",
+      "surface_error_definition": "output vertex to GT triangle-surface distance",
+      "shared_color_range": [
+        0.0,
+        0.05271329734271672
+      ],
+      "shared_color_clipping": "per-sample global p99 across common initial and all four refined outputs",
+      "colormap": "turbo",
+      "engines": {
+        "COMMON INITIAL": "trimesh_rtree_exact",
+        "OURS": "trimesh_rtree_exact",
+        "EXMESH": "trimesh_rtree_exact",
+        "NDS": "trimesh_rtree_exact",
+        "NVDIFFREC": "trimesh_rtree_exact"
+      },
+      "surface_error_ply": {
+        "COMMON INITIAL": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5ac05fe8-b550-4786-8e8c-c5a43c30d112__v04/common_initial.ply",
+        "OURS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5ac05fe8-b550-4786-8e8c-c5a43c30d112__v04/ours.ply",
+        "EXMESH": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5ac05fe8-b550-4786-8e8c-c5a43c30d112__v04/exmesh.ply",
+        "NDS": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5ac05fe8-b550-4786-8e8c-c5a43c30d112__v04/nds.ply",
+        "NVDIFFREC": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/sofa50_same_initial_20260820/full_report/visualizations/surface_error_ply/5ac05fe8-b550-4786-8e8c-c5a43c30d112__v04/nvdiffrec.ply"
+      }
+    }
+  ]
+}

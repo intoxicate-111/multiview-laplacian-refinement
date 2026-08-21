@@ -1,0 +1,145 @@
+{
+  "method": "sofa50_gt_query_direct_raw_zero_shot_transfer",
+  "seed": 7,
+  "device": "cuda",
+  "dataset": {
+    "name": "Sofa50GTQuery28View960",
+    "expected_split_counts": {"train": 40, "validation": 5, "test": 5},
+    "objects": 50,
+    "variants_per_object": 1,
+    "object_level_split": true
+  },
+  "input_mode": "coarse_plus_multiview",
+  "target_mode": "raw_laplacian",
+  "target_semantics": "direct_raw_gt_graph_target",
+  "target_definition": "delta_gt_raw=L_gt@V_gt",
+  "target_scaling": {
+    "method": "square_of_mean_incident_edge_length",
+    "source": "gt_graph_diagnostic_only",
+    "epsilon": 1e-12,
+    "clip_max_norm": null
+  },
+  "query_training": {
+    "enabled": false,
+    "exact_fraction": 0.2,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "max_offset_h": 0.001,
+    "apply_to_validation": false,
+    "zero_initial_laplacian": true
+  },
+  "local_query_jitter": {
+    "enabled": false,
+    "std_h": 0.003,
+    "distribution": "isotropic_gaussian_xyz_clipped_at_3sigma",
+    "maximum_offset_h": 0.009,
+    "scope": "training_only",
+    "frozen": ["vertices", "target", "h_gt", "graph", "connectivity", "operator"]
+  },
+  "renderer_visibility": {
+    "condition": "backface_and_occlusion",
+    "source": "precomputed_gt_graph_depth_tested_face_id_buffer",
+    "neighborhood_radius": 1,
+    "front_face_winding": "ccw",
+    "depth_image_used": false
+  },
+  "image_encoder": {
+    "feature_dim": 64,
+    "first_stride": 1,
+    "second_stride": 1,
+    "normalization": {"mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0]},
+    "feature_construction": {
+      "mode": "original_plus_high_frequency",
+      "kernel_size": 5,
+      "sigma": 1.0,
+      "padding": "reflect"
+    }
+  },
+  "model": {
+    "hidden_dim": 256,
+    "num_graph_layers": 3,
+    "dropout": 0.0,
+    "geometry_mode": "query_fourier",
+    "position_encoding": {"num_frequencies": 6, "include_input": true}
+  },
+  "confidence": {
+    "enabled": true,
+    "loss_weight": 1.0,
+    "regularizer": 0.01,
+    "minimum_confidence": 0.0001,
+    "quantile_bins": 5,
+    "recovery_weight": "renderer_visible_any_times_confidence_prediction"
+  },
+  "training": {
+    "learning_rate": 0.001,
+    "weight_decay": 0.0,
+    "loss": "huber",
+    "huber_delta": 0.01,
+    "prediction_loss_space": "output_representation",
+    "gradient_clip_norm": 1.0,
+    "vertex_sampling": {"mode": "full"},
+    "amp": {"enabled": true, "dtype": "float16"},
+    "lr_scheduler": {
+      "type": "reduce_on_plateau",
+      "factor": 0.5,
+      "patience_validations": 10,
+      "threshold": 0.0001,
+      "threshold_mode": "abs",
+      "cooldown_validations": 1,
+      "min_lr": 0.000001
+    }
+  },
+  "data_loading": {
+    "num_workers": 0,
+    "pin_memory": true,
+    "persistent_workers": false,
+    "prefetch_factor": 2,
+    "multiprocessing_sharing_strategy": "file_system",
+    "cuda_prefetch": true,
+    "train_views_per_sample": null,
+    "validation_views_per_sample": null
+  },
+  "multi_object_training": {
+    "epochs": 2000,
+    "max_optimizer_steps": 20000,
+    "report_every_optimizer_steps": 200,
+    "gradient_accumulation_meshes": 1,
+    "shuffle": true,
+    "validation_every_epochs": 25,
+    "checkpoint_every_epochs": 100,
+    "checkpoint_epochs": [250, 500, 750, 1000],
+    "checkpoint_optimizer_steps": [5000, 10000, 15000, 20000],
+    "cache_prepared_samples_on_device": false,
+    "profile_training": true,
+    "early_stopping": {"enabled": false, "patience_validations": 15, "min_delta": 0.0001}
+  },
+  "recovery": {
+    "operator_type": "uniform",
+    "lambda_lap": 1.0,
+    "lambda_anchor": 0.01,
+    "lambda_edge": 0.0,
+    "num_iters": 200,
+    "learning_rate": 0.01,
+    "robust_loss": "huber",
+    "huber_delta": 0.01,
+    "unseen_anchor_weight": 0.0,
+    "write_legacy_prediction_names": false,
+    "denormalization": "none; model output is delta_pred_raw"
+  },
+  "experiment_metadata": {
+    "experiment": "sofa50_gt_query_direct_raw_zero_shot_transfer",
+    "arm": "B_gt_query_direct_raw_hf",
+    "comparison_a": "previous_gt_query_h2_normalized",
+    "comparison_c": "current_query_direct_raw_hf",
+    "capacity": "C2",
+    "feature_resolution": "F2",
+    "feature_mode": "original_plus_high_frequency",
+    "views": 28,
+    "input_resolution": 960,
+    "distributed_world_size": 2,
+    "effective_global_batch_meshes": 2,
+    "optimizer_steps": 20000,
+    "zero_shot_current_graph_adaptation": false,
+    "coarse_vertexwise_raw_metrics_allowed": false
+  }
+}

@@ -10,6 +10,10 @@ Visibility and recovery: [Visibility-aware recovery report](docs/VISIBILITY_AWAR
 
 Experiment metrics and run status: [Experiment data summary](docs/EXPERIMENT_DATA_SUMMARY.md)
 
+Chamfer evaluator incident: [English report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md) | [中文报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md)
+
+Sofa50 same-initial external comparison: [Corrected final report](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)
+
 Current Sofa50 controlled ablations: [Direct-raw/loss/expert/image-feature report](docs/SOFA50_CONTROLLED_ABLATIONS_REPORT.zh-CN.md)
 
 Future2000 local comparisons: [Local task guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
@@ -22,7 +26,7 @@ View-count and query-resolution results: [Ablation report](runs/learned_laplacia
 
 ## Project status
 
-Status date: 2026-08-15 18:47 BST.
+Status date: 2026-08-21 BST.
 
 | Component | State | Conclusion |
 |---|---|---|
@@ -45,18 +49,20 @@ Status date: 2026-08-15 18:47 BST.
 | Raw MSE versus Huber | Complete | Raw MSE does not lower test Top-10%/Top-1% error or mean Chamfer/P2S. The MSE run used global batch 6 versus 2, so it is not a strict single-variable training comparison. |
 | Learned dynamic residual expert and gate | Complete | The learned final improves the jointly trained base on every test sample for raw EPE, Chamfer and P2S. Validation-selected constant-gate and five within-mesh shuffle interventions show that the residual expert is the main contribution and vertex-level gate placement adds a smaller, measurable gain. |
 | 960 image-feature ablation | Complete | `F + (F-Gaussian(F))` has the lowest test raw EPE, RMS, Top-10% and Top-1% errors. Gaussian-only features have the best mean Chamfer, normal consistency and improved count (`21/25`). |
-| Native-1920 plus high-frequency residual | Running, not final | Native renderer observations pass camera/split/graph/target/visibility audits. Four-L40 job 15854 is a 20,000-step from-scratch run; global batch 4 versus the 960 baseline's 2 prevents a strict single-variable claim. |
-| Future2000 GT-adaptive scale-up | Stopped at step 64,000, resumable | Job 15795 progressed from step 32,000 to 64,000, then a DataLoader worker exhausted shared memory. The checkpoint is intact; no final geometry result exists. |
-| Future2000 external baselines | Incomplete, not final | The existing sharded diagnostic has a high sample-level failure count; no external-method conclusion is reported. New comparison launches remain local-only. |
-| Automated tests | Passing for the documented changes | Targeted raw-loss, dynamic-expert/gate, image-feature, native-1920 preparation and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
+| Native-1920 plus high-frequency residual | Complete; non-strict resolution ablation | The 20,000-step four-L40 run lowers Bottom-90% error but worsens test raw EPE/RMS, Top-10%/Top-1%, Chamfer and P2S versus 960+HF. Normal consistency improves and flips decrease. Global batch is 4 versus 2. |
+| GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
+| Future2000 GT-adaptive scale-up | Running from scratch | Seven-Blackwell job 16607 reached step 188,000/200,000 at the 21 August snapshot. Rolling train loss is `1.72e-6`; the latest completed validation near step 182,880 is `2.87e-6`. No final test/recovery conclusion exists yet. |
+| Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
+| Future2000 external baselines | Incomplete, not final | Earlier sharded diagnostics are retained as failure evidence and are not promoted to a final comparison. |
+| Automated tests | Passing for the documented changes | Targeted external-adapter, same-initial aggregation, raw-loss, dynamic-expert/gate, image-feature, native-1920 and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
 
-The active training line is the Sofa50 synthetic-current,
-current-query/current-graph, direct-raw formulation. The query mesh and its connectivity define the
+The active method is the synthetic-current, current-query/current-graph,
+direct-raw formulation established on Sofa50 and currently being scaled to the
+Future2000 2,000-object dataset. The query mesh and its connectivity define the
 graph used by both prediction and recovery. The supervised field is
 `L_current @ P_proxy`; it is a target only and is never passed to the model as
-an inference feature. The current native-1920 experiment retains the successful
-960 high-frequency feature construction and changes image resolution plus the
-documented distributed execution batch.
+an inference feature. The active Future2000 run uses the 960 high-frequency
+feature construction, 28 views, C2F2 and 200,000 optimiser steps.
 
 The earlier GT-query, `h^2`-normalised formulation remains useful historical
 context. Its transfer to expanded and OpenMVS query graphs did not improve
@@ -631,7 +637,7 @@ improving mean downstream geometry. Adding `F-Gaussian(F)` to the original
 feature gives the best prediction and tail metrics and still improves mean
 Chamfer/P2S over original Arm B.
 
-### Native 1920 plus high-frequency residual, running
+### Native 1920 plus high-frequency residual, complete
 
 The native-1920 dataset contains the same 250 sample IDs, object-level
 `200/25/25` split, 28 camera extrinsics, current graphs, proxy positions,
@@ -640,23 +646,30 @@ Intrinsics are scaled for native 1920 rendering; the observations are not
 resized 960 images. The minimum native-versus-resized pixel MAE across the
 audit is `0.0205764`.
 
-Four-L40 job 15854 trains from scratch for 20,000 optimiser steps. View chunks
+Four-L40 job 15854 completed 20,000 optimiser steps from scratch. View chunks
 of four and gradient checkpointing are execution-only memory controls covered
 by forward/gradient equivalence tests. The actual global batch is 4 versus 2
-for the completed 960 HF baseline, so the final report will explicitly label
-the comparison non-strict. At the 15 August 18:47 snapshot the latest complete
-checkpoint is step 900; step-500 validation loss is `6.34615e-5` versus
-`9.61499e-5` for 960 HF at the same step. This early loss difference is not a
-Top-10%/Top-1% or downstream conclusion. Jobs 15864 and 15865 will run the
-four-shard paired evaluation and report merge after training.
+for the 960 HF baseline, so this is not a strict single-variable training
+comparison.
+
+| Resolution + HF | Raw EPE ↓ | Raw RMS ↓ | Bottom 90% ↓ | Top 10% ↓ | Top 1% ↓ | Chamfer ↓ | Normal ↑ | Flips | Improved |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 960 | **0.00288618** | **0.00628203** | 0.00190107 | **0.0117522** | **0.0347895** | **0.00377857** | 0.942504 | 6303 | **20/25** |
+| Native 1920 | 0.00290615 | 0.00690893 | **0.00183806** | 0.0125190 | 0.0389263 | 0.00378509 | **0.944522** | **5777** | 18/25 |
+
+Native 1920 does not improve the high-curvature tail or mean downstream
+distance. It improves normal consistency and reduces flips, but costs 22.35
+hours on four GPUs (`89.39` GPU-hours) versus 3.98 hours on two GPUs (`7.95`
+GPU-hours) for 960.
 
 ### Future2000 GT-adaptive scale-up
 
-The stopped, resumable scale-up uses 2,000 upstream meshes, five deterministic current-mesh
+The scale-up uses 2,000 upstream meshes, five deterministic current-mesh
 variants per object, an object-level 80/10/10 split (`8000/1000/1000` samples),
-28 calibrated views, GT-adaptive subdivision, C2F2 and the current-graph
-direct-raw target. The launch overrides the stored development budget to
-200,000 global optimiser steps on four L40 GPUs.
+28 calibrated views, GT-adaptive subdivision, C2F2, original-plus-HF image
+features and the current-graph direct-raw target. Job 16607 starts from a fresh
+initialization and runs 200,000 global optimiser steps on seven NVIDIA RTX PRO
+6000 Blackwell Server Edition GPUs with global batch 7.
 
 | Step | Rolling train loss | Validation loss |
 |---:|---:|---:|
@@ -666,15 +679,45 @@ direct-raw target. The launch overrides the stored development budget to
 | 50,000 | 4.26000e-6 | 4.23000e-6 |
 | 60,000 | 4.19000e-6 | 5.27000e-6 |
 | 64,000 | **3.99000e-6** | — |
+| 132,000 | 2.10e-6 | — |
+| 188,000 | **1.72e-6** | 2.87e-6 at the latest completed validation near step 182,880 |
 
-Job 15794 stopped at step 32,000 after a DataLoader worker exhausted 51,200
+Historical job 15794 stopped at step 32,000 after a DataLoader worker exhausted 51,200
 file descriptors; the other DDP ranks then reached the 30-minute NCCL watchdog
 timeout. Replacement job 15795 resumed the intact checkpoint with PyTorch's
 `file_system` sharing strategy and non-persistent workers, reached step 64,000,
 then failed when a DataLoader worker exhausted `/dev/shm` (`Bus error` and `No
-space left on device`). The step-64k checkpoint remains resumable. The paired
-direct-displacement jobs were cancelled, so this experiment has no final
-prediction or geometry comparison.
+space left on device`). These runs are retained as infrastructure history only.
+Job 16607 does not reuse either checkpoint: RGB files are staged to node-local
+storage, workers are disabled, and overwrite/resume guards enforce the
+from-scratch contract. At the 21 August snapshot it is at 94%; final test and
+geometry evaluation must wait for step 200,000.
+
+### Sofa50 same-initial external comparison
+
+Ours, NDS, nvdiffrec and ExMesh were run on the same 25 native-1920 Sofa50 test
+inputs: identical current/coarse mesh, 28 RGB observations and cameras. GT is
+used only by the common evaluator. All four methods completed `25/25` and the
+input identity audit passed.
+
+The preliminary aggregation mixed method-native Chamfer implementations. The
+shared initial mesh consequently appeared as both `0.00391323` and
+`0.01707047`, which invalidated that table. The corrected report recomputes the
+common initial and every final mesh using one deterministic 3,000-surface-point
+evaluator (seed 7). Native numbers are provenance-only and
+`contract_audit=true`. See the bilingual [incident report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md)
+and the [corrected final report](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md).
+
+| Method | Unified final Chamfer ↓ | Improvement | Improved | Normal ↑ |
+|---|---:|---:|---:|---:|
+| Ours | 0.011347800 | 33.52% | **25/25** | **0.944514** |
+| NDS | **0.011204992** | **34.36%** | 22/25 | 0.873805 |
+| nvdiffrec | 0.013654660 | 20.01% | 18/25 | 0.848122 |
+| ExMesh | 0.020170615 | -18.16% | 8/25 | 0.845337 |
+
+NDS is marginally lower in mean Chamfer; ours is more consistent across
+samples and preserves substantially better normals. These synthetic-protocol
+values are not the official DTU ExMesh millimetre metric.
 
 ## Installation and verification
 
@@ -728,11 +771,9 @@ bash scripts/HPC/submit_sofa50_image_feature_ablation_2x2gpu.sh
 # Native-1920 original-plus-high-frequency data, training and evaluation chain
 bash scripts/HPC/submit_sofa50_hf1920_4gpu.sh
 
-# Future2000 contract audit and four-L40 current-graph training
-sbatch scripts/HPC/audit_future2000_gt_adaptive_2000mesh.slurm
-sbatch scripts/HPC/train_future2000_gt_adaptive_fast_io.slurm \
-  configs/learned_laplacian/train_future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k.json \
-  runs/learned_laplacian/future2000_gt_adaptive_2000mesh_expanded_current_28view_direct_raw_20k_seed7
+# Future2000 200k from-scratch smoke and seven-Blackwell training
+sbatch scripts/HPC/smoke_future2000_current_28view_hf_7gpu_blackwell.slurm
+sbatch scripts/HPC/train_future2000_current_28view_hf_200k_7gpu_blackwell.slurm
 ```
 
 ### Distributed multi-GPU training
@@ -769,9 +810,11 @@ the world size therefore increases the number of mesh exposures per update and
 per fixed optimizer-step budget.
 
 Worker-backed lazy-image training accepts
-`data_loading.multiprocessing_sharing_strategy`. The Future2000 run uses
-`file_system` and non-persistent workers to prevent the per-tensor descriptor
-growth seen with persistent workers. External-method comparison jobs are
+`data_loading.multiprocessing_sharing_strategy`. Historical Future2000 recovery
+runs used `file_system` and non-persistent workers after descriptor exhaustion.
+The active seven-Blackwell run instead uses zero DataLoader workers and stages
+RGB observations to node-local storage, avoiding both descriptor and shared-
+memory failure modes. External-method comparison jobs are
 documented in the [local runner guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 and should not be resubmitted through Slurm.
 
@@ -851,3 +894,19 @@ runs/learned_laplacian/sofa50_openmvs_coarse_14view_c2f2_48mesh_opengl_480_recov
 
 Checkpoints, prepared datasets and HPC result directories are not distributed
 with the source repository.
+
+### Independent ExMesh-protocol benchmark
+
+The official ExMesh DTU comparison is a separate external benchmark. It does
+not reuse the synthetic datasets, cameras, renderer, or reconstructed meshes
+listed above. Its official-source pins, reproduction gate, common-contract
+extractor, failure policy, and six-method sanity gate are documented in
+[the ExMesh baseline suite guide](docs/EXMESH_BASELINE_SUITE.md). Its full
+execution is distinct from the Sofa50 same-initial comparison above. The
+released ExMesh 15-scene reproduction gate has passed (0.60484 mm reproduced
+mean CD versus 0.58 mm in the paper); the complete official six-method DTU
+benchmark remains gated by the scan-24 shared-coordinate-frame audit. The
+intended learned-method DTU scan-24 current-mesh lineage is documented in the
+[provenance report](reports/DTU_SCAN24_PREPARED_CURRENT_PROVENANCE.md); it was
+never generated, and the ExMesh PGSR mesh is explicitly rejected as a silent
+substitute.

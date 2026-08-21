@@ -212,6 +212,93 @@ def export_nerf_scene(
     )
 
 
+def export_nvdiffrec_scene(
+    sample: Mapping[str, Any], output_dir: str | Path
+) -> ExternalSceneExport:
+    """Export exact per-view cameras and the current mesh for nvdiffrec DLMesh.
+
+    The official DatasetNERF assumes centered single-FOV cameras.  The project
+    wrapper consumes the additional exact-intrinsics fields written here while
+    leaving nvdiffrec's official fixed-topology ``DLMesh`` optimizer unchanged.
+    """
+
+    core = _baseline_input(sample)
+    output = Path(output_dir).resolve()
+    images_dir = output / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    mesh = _current_mesh(core)
+    initial_obj, initial_ply = _write_initial_meshes(mesh, output)
+    # The official nvdiffrec OBJ loader assumes that every input OBJ names at
+    # least one material.  Our generic mesh writer intentionally emits only
+    # geometry, so add the smallest legal material contract here.  This changes
+    # neither vertex positions nor face ordering and is specific to this adapter.
+    material_path = output / "initial_current.mtl"
+    material_path.write_text(
+        "newmtl defaultMat\n"
+        "Kd 0.5 0.5 0.5\n"
+        "Ks 0.0 0.0 0.0\n"
+        "Ns 1.0\n",
+        encoding="utf-8",
+    )
+    original_obj = initial_obj.read_text(encoding="utf-8")
+    initial_obj.write_text(
+        f"mtllib {material_path.name}\nusemtl defaultMat\n{original_obj}",
+        encoding="utf-8",
+    )
+    images = _resolved_images(core)
+    cameras = _cameras(core, images)
+    cv_to_gl = np.diag([1.0, -1.0, -1.0, 1.0])
+    frames = []
+    for index, (image_path, camera) in enumerate(zip(images, cameras, strict=True)):
+        stem = f"{index:04d}"
+        destination = images_dir / f"{stem}.png"
+        _write_rgba_without_gt(image_path, destination)
+        world_to_camera_cv = np.eye(4, dtype=np.float64)
+        world_to_camera_cv[:3, :3] = camera.rotation
+        world_to_camera_cv[:3, 3] = camera.translation
+        width, height = camera.image_size or Image.open(image_path).size
+        frames.append(
+            {
+                "file_path": f"images/{stem}",
+                "intrinsics": np.asarray(camera.intrinsics).tolist(),
+                "world_to_camera_opengl": (cv_to_gl @ world_to_camera_cv).tolist(),
+                "resolution_wh": [int(width), int(height)],
+            }
+        )
+    nominal_fov_x = 2.0 * np.arctan(
+        frames[0]["resolution_wh"][0] / (2.0 * frames[0]["intrinsics"][0][0])
+    )
+    transforms = {
+        "schema": "synthetic_exact_intrinsics_nvdiffrec_adapter_v1",
+        "camera_angle_x": float(nominal_fov_x),
+        "frames": frames,
+    }
+    for name in ("transforms_train.json", "transforms_test.json"):
+        (output / name).write_text(json.dumps(transforms, indent=2) + "\n", encoding="utf-8")
+    return _write_metadata(
+        core,
+        output,
+        initial_obj,
+        initial_ply,
+        images,
+        "nvdiffrec",
+        {
+            "camera_format": "exact OpenCV K plus OpenCV-to-OpenGL world-to-camera",
+            "mask_source": "RGB non-background pixels; no GT geometry",
+            "material_adapter": (
+                "constant default OBJ material required by the official loader; "
+                "geometry and vertex/face ordering unchanged"
+            ),
+            "uv_adapter": (
+                "official xatlas parameterization is added by the runtime wrapper; "
+                "position indices, vertex positions, and face ordering unchanged"
+            ),
+            "geometry_path": "official DLMesh fixed-topology optimization via --base_mesh",
+            "transforms": str(output / "transforms_train.json"),
+        },
+    )
+
+
 def write_ascii_ply(mesh: Mesh, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,6 +432,8 @@ def _write_metadata(
         "initial_obj_sha256": _sha256(initial_obj),
         "view_count": len(images),
         "source_images": [str(path) for path in images],
+        "mesh_coordinate_transform_to_method_world": "identity",
+        "method_output_coordinate_transform_to_gt": "identity",
         **dict(extra),
     }
     metadata_path = output / "input_contract.json"

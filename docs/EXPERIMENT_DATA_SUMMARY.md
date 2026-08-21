@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-08-15 18:47 BST, Europe/London.
+Status date: 2026-08-21 BST, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -21,7 +21,7 @@ target, loss, split and evaluation path.
 | F2 | Encoder strides `1,1`; feature-map resolution equals input resolution. |
 | K0/K2/K4/K6 | Fourier position encoding with 0, 2, 4 or 6 frequencies. |
 
-The canonical absolute target is
+The historical canonical GT-query target is
 
 $$
 \delta_i=(LV)_i,
@@ -29,15 +29,17 @@ $$
 \widehat{\delta}_i=\frac{\delta_i}{h_i^2+10^{-12}}.
 $$
 
-For the synthetic-current experiment, the graph and target are both defined on
-the current graph:
+For the active synthetic-current experiment, the graph and raw target are both
+defined on the current graph:
 
 $$
-\delta_i^{\mathrm{current}}=(L_cP_{\mathrm{proxy}})_i,
-\qquad
-\widehat{\delta}_i^{\mathrm{current}}
-=\frac{\delta_i^{\mathrm{current}}}{(h_i^c)^2+10^{-12}}.
+\delta_i^{\mathrm{current}}=(L_cP_{\mathrm{proxy}})_i.
 $$
+
+The model directly predicts this raw field. `h_current` remains an input
+geometry feature and audit quantity; it does not divide, clip or denormalize
+the active target. The h-squared-normalized value is retained only for
+historical comparisons and diagnostics.
 
 ## Dataset inventory
 
@@ -49,8 +51,8 @@ $$
 | Query-resolution ablation v2 | 50 objects; 40/5/5 | 14 / 960 | Complete | `multiview_960/query_resolution_ablation_v2` |
 | Synthetic current-query, 14 views | 50 objects, 5 variants each; 200/25/25 variants | 14 / 960 | Complete and copied to HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query, 28 views | 50 objects, 5 variants each; 200/25/25 variants | 28 / 960 | Complete | HPC: `sofa50_synthetic_current_28view_v1` |
-| Synthetic current-query, native 1920 | Same 250 IDs and 200/25/25 split as 960 | 28 / 1920 | Complete; HF training running | HPC: `sofa50_synthetic_current_28view_native1920_v1` |
-| Future2000 GT-adaptive expanded current | 2,000 objects, 5 variants each; 8000/1000/1000 variants | 28 / 960 | Prepared; primary training stopped at step 64k | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Synthetic current-query, native 1920 | Same 250 IDs and 200/25/25 split as 960 | 28 / 1920 | Complete; HF training/evaluation complete | HPC: `sofa50_synthetic_current_28view_native1920_v1` |
+| Future2000 GT-adaptive expanded current | 2,000 objects, 5 variants each; 8000/1000/1000 variants | 28 / 960 | Prepared; 200k from-scratch training at 188k snapshot | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete | HPC: `openmvs_texture_test_v6_48view` |
 | Thingi10K50 development set | 50 objects; 40/5/5 | 960 and 1920 variants | Development and smoke runs only | Local `thingi10k50` run directories |
 
@@ -304,28 +306,54 @@ tail groups relative to original. Concatenating the original feature and
 `F-Gaussian(F)` gives the strongest raw prediction and tail metrics without a
 material Bottom-90% penalty.
 
-### Native-1920 plus HF, running snapshot
+### Native-1920 plus HF, completed
 
 The native renderer reproduces the 960 HF sample IDs, 28 camera extrinsics,
 split, graph, proxy, target and visibility contracts. Intrinsics are scaled for
 1920, and the minimum native-versus-resized pixel MAE is `0.0205764`, rejecting
-the resize-only path. Job 15854 is a from-scratch four-L40 run with 20,000
-global optimiser steps. Step 500 train/validation losses are `7.02343e-5` and
-`6.34615e-5`; the matched 960 values are `7.47579e-5` and `9.61499e-5`.
+the resize-only path. Job 15854 completed a from-scratch four-L40 run with
+20,000 global optimiser steps.
 
 The 1920 run has global batch 4 versus the 960 baseline's 2. View chunking and
 gradient checkpointing are tested as mathematically equivalent execution
 changes, but the batch difference makes the training comparison non-strict.
-No resolution conclusion is reported before the paired Top-10%/Top-1% and
-downstream evaluation from jobs 15864/15865.
+
+| Resolution + HF | Raw EPE ↓ | Raw RMS ↓ | Bottom 90% ↓ | Top 10% ↓ | Top 1% ↓ | Chamfer ↓ | P2S ↓ | Normal ↑ | Flips | Improved |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 960 | **0.00288618** | **0.00628203** | 0.00190107 | **0.0117522** | **0.0347895** | **0.00377857** | **0.00377999** | 0.942504 | 6303 | **20/25** |
+| Native 1920 | 0.00290615 | 0.00690893 | **0.00183806** | 0.0125190 | 0.0389263 | 0.00378509 | 0.00378489 | **0.944522** | **5777** | 18/25 |
+
+Native 1920 does not improve Top-10%, Top-1%, raw RMS, recovery-weighted RMS,
+Chamfer or P2S. It improves normal consistency and reduces flips. Runtime rises
+from 3.98 hours on two GPUs (`7.95` GPU-hours) to 22.35 hours on four GPUs
+(`89.39` GPU-hours).
+
+### GT-query direct-raw zero-shot transfer
+
+A separate two-Blackwell, 20,000-step control trains on exact GT queries with
+the raw target `L_gt @ V_gt`, then applies the frozen model to the current mesh.
+The contract audit passes and GT is introduced only after prediction for
+surface evaluation. Correct/zero/shuffled RGB controls confirm that image
+features affect the held-out prediction.
+
+| Arm | Current-mesh Chamfer ↓ | P2S ↓ | Normal ↑ | Flips | Improved |
+|---|---:|---:|---:|---:|---:|
+| Historical GT-query `h^2` normalized | 0.00581764 | 0.00606854 | 0.922509 | 11795 | 0/25 |
+| GT-query direct raw + HF | 0.00400486 | 0.00401379 | **0.948067** | **3087** | 4/25 |
+| Current-query direct raw + HF | **0.00377832** | **0.00377984** | 0.942475 | 6326 | **20/25** |
+
+Removing normalization materially improves the historical GT-query transfer,
+but does not close the query-distribution gap to supervised current-query
+training. The historical arm predates HF and therefore is not a strict
+single-variable normalization ablation.
 
 ## Future2000 GT-adaptive scale-up
 
-Snapshot: 2026-08-15 18:47 BST. The dataset contains 2,000 source objects and
+Snapshot: 2026-08-21 BST. The dataset contains 2,000 source objects and
 five deterministic expanded-current variants per object. Object-level splits
 contain 8,000 train, 1,000 validation and 1,000 test samples. The primary arm
-uses 28 views, GT-adaptive subdivision, C2F2 and the raw current-graph target
-`L_current @ P_proxy`; the paired control predicts direct vertex displacement.
+uses 28 views, GT-adaptive subdivision, C2F2, original-plus-HF features and the
+raw current-graph target `L_current @ P_proxy`.
 
 | Step | Train loss | Validation loss | Record |
 |---:|---:|---:|---|
@@ -335,6 +363,8 @@ uses 28 views, GT-adaptive subdivision, C2F2 and the raw current-graph target
 | 50,000 | 4.26000e-6 | 4.23000e-6 | resumed run |
 | 60,000 | 4.19000e-6 | 5.27000e-6 | resumed run |
 | 64,000 | **3.99000e-6** | — | latest intact checkpoint |
+| 132,000 | 2.10e-6 | — | current seven-Blackwell from-scratch run |
+| 188,000 | **1.72e-6** | 2.87e-6 near step 182,880 | 94% snapshot |
 
 Job 15794 used four L40 GPUs and reached about `3.076` optimiser steps/s, but
 failed at step 32,000 after a persistent DataLoader worker exhausted the
@@ -345,10 +375,39 @@ improved `16.03%` from 20k to 30k before the infrastructure failure.
 Replacement job 15795 resumed with `file_system` sharing and non-persistent
 workers, reached step 64,000, and then failed when a worker exhausted `/dev/shm`
 (`Bus error` and `No space left on device`). The step-64k checkpoint remains
-resumable. Paired displacement jobs 15759/15760 were cancelled, so no final
-prediction or geometry comparison exists. External array 15791 remains
-incomplete with a high sample-level failure fraction; new launches are local-
-only through `scripts/local/run_future2000_comparisons.sh`.
+resumable. Paired displacement jobs 15759/15760 were cancelled. These runs are
+infrastructure-history records, not the active run.
+
+Job 16607 starts from scratch on seven NVIDIA RTX PRO 6000 Blackwell Server
+Edition GPUs, uses global batch 7, stages all RGB files to node-local storage,
+sets DataLoader workers to zero and rejects any pre-existing checkpoint in its
+output directory. At the snapshot it is running at step 188,000/200,000. The
+rolling train loss is `1.72e-6`; the latest completed validation near step
+182,880 is `2.87e-6`. No final test or recovery result is available yet.
+
+## Sofa50 controlled same-initial external benchmark
+
+Ours, NDS, nvdiffrec and ExMesh use the exact same 25 current/coarse meshes,
+native-1920 28-view RGB observations and cameras. All four methods completed
+`25/25`; the input identity and unified metric audits pass.
+
+The first aggregation mixed method-native Chamfer values. The common initial
+mesh then appeared as both `0.00391323` and `0.01707047`, proving that the table
+was not metric-compatible. The corrected aggregation evaluates every archived
+initial/final mesh with `evaluate_mesh_geometry`, 3,000 surface samples and
+seed 7. Native metrics are provenance-only. See the bilingual
+[incident report](CHAMFER_EVALUATION_INCIDENT_2026-08-21.md) and the
+[corrected artifact](../reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md).
+
+| Method | Initial Chamfer | Final Chamfer ↓ | Improvement | Improved | Normal ↑ |
+|---|---:|---:|---:|---:|---:|
+| Ours | 0.017070468 | 0.011347800 | 33.52% | **25/25** | **0.944514** |
+| NDS | 0.017070468 | **0.011204992** | **34.36%** | 22/25 | 0.873805 |
+| nvdiffrec | 0.017070468 | 0.013654660 | 20.01% | 18/25 | 0.848122 |
+| ExMesh | 0.017070468 | 0.020170615 | -18.16% | 8/25 | 0.845337 |
+
+This is a supplied-initial Sofa50 synthetic comparison, not the official DTU
+ExMesh millimetre protocol.
 
 ## Other diagnostic experiments
 
@@ -402,8 +461,11 @@ directly with the canonical Sofa50 results.
 | 15844 | Gaussian feature, 20k | Completed | Two L40 GPUs; elapsed `03:31:05`. |
 | 15845 | Original + HF feature, 20k | Completed | Two L40 GPUs; elapsed `03:58:50`. |
 | 15846/15847 | Image-feature evaluation/report | Completed | Four shards completed in under two minutes; report merge took 11 seconds. |
-| 15854 | Native-1920 + HF, 20k | Running at snapshot | Four L40 GPUs; from scratch, global batch 4, latest complete checkpoint step 900. |
-| 15864/15865 | Native-1920 paired evaluation/report | Dependency pending | Starts only after job 15854 completes successfully. |
+| 15854 | Native-1920 + HF, 20k | Completed | Four L40 GPUs; from scratch, global batch 4; completed all 20,000 steps. |
+| 15864/15865 | Native-1920 paired evaluation/report | Completed | Contract audit passed; 1920 does not improve Top-10%/Top-1% or mean Chamfer/P2S. |
+| 16584 | GT-query direct-raw transfer, 20k | Completed | Two Blackwell GPUs; contract passed; current-mesh recovery `4/25`, below current-query HF `20/25`. |
+| 16607 | Future2000 direct-raw + HF, 200k | Running at snapshot | Seven Blackwell GPUs; from scratch; step 188,000/200,000 and rolling train loss `1.72e-6`. |
+| 16736 | Sofa50 same-initial unified report | Completed | Four methods at 25/25; deterministic unified evaluator; `contract_audit=true`. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model
@@ -431,8 +493,14 @@ or comparison result.
   learned gate adds a smaller placement-specific benefit beyond a validation-
   selected constant scale.
 - At 960, original-plus-HF gives the best raw/tail prediction; Gaussian-only
-  gives the best mean recovery. Native-1920+HF remains pending and its early
-  validation loss is not a final resolution result.
+  gives the best mean recovery. Native-1920+HF does not improve the tail or
+  mean downstream distance, despite higher compute and better normals/flips.
+- GT-query direct-raw training improves strongly over historical normalized
+  GT-query transfer, but still does not match current-query supervision on the
+  current-mesh recovery task.
+- Same-initial cross-method Chamfer must come from the unified evaluator.
+  Method-native geometry metrics are provenance-only and cannot define the
+  primary ranking.
 
 ## Source hierarchy
 

@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "benchmark": "exmesh_official_dtu",
+  "independent_external_benchmark": true,
+  "scene_ids": [24, 37, 40, 55, 63, 65, 69, 83, 97, 105, 106, 110, 114, 118, 122],
+  "sanity_scene_id": 24,
+  "paths": {
+    "hpc_project_root": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement",
+    "hpc_external_root": "/networkhome/WMGDS/zhou_c/external_baselines",
+    "exmesh_repository": "/networkhome/WMGDS/zhou_c/external_baselines/ExMesh",
+    "dtu_root": "/networkhome/WMGDS/zhou_c/external_baselines/ExMesh/workdir/DTU",
+    "output_root": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/exmesh_baselines"
+  },
+  "official_sources": {
+    "exmesh": {
+      "paper": "ExMesh: EXplicit Mesh Reconstruction with Topology Adaptation",
+      "venue": "CVPR",
+      "year": 2026,
+      "repository": "https://github.com/Fan-Treasure/ExMesh.git",
+      "commit": "09950d283fc5372a09079e30c88d998f1c40b2d0",
+      "license": "Apache-2.0"
+    },
+    "neural_deferred_shading": {
+      "paper": "Multi-View Mesh Reconstruction with Neural Deferred Shading",
+      "venue": "CVPR",
+      "year": 2022,
+      "repository": "https://github.com/fraunhoferhhi/neural-deferred-shading.git",
+      "commit": "760e4549f59adaed9adf1bd705599786a00ba6b8"
+    },
+    "nvdiffrec": {
+      "paper": "Extracting Triangular 3D Models, Materials, and Lighting From Images",
+      "venue": "CVPR",
+      "year": 2022,
+      "repository": "https://github.com/NVlabs/nvdiffrec.git",
+      "commit": "abf3a34b1eb6e782abffefc2462c7e9bcd89f9bb",
+      "license": "NVIDIA Source Code License-NC",
+      "external_dependencies": {
+        "tiny_cuda_nn": {
+          "repository": "https://github.com/NVlabs/tiny-cuda-nn.git",
+          "commit": "749dd70c5afc5a9dadb85e5652ed65d55e0ba187"
+        }
+      }
+    },
+    "neuralangelo": {
+      "paper": "Neuralangelo: High-Fidelity Neural Surface Reconstruction",
+      "venue": "CVPR",
+      "year": 2023,
+      "repository": "https://github.com/NVlabs/neuralangelo.git",
+      "commit": "94390b64683c067c620d9e075224ccfe582647d0"
+    },
+    "matcha": {
+      "paper": "MAtCha Gaussians: Atlas of Charts for High-Quality Geometry and Photorealism From Sparse Views",
+      "venue": "CVPR",
+      "year": 2025,
+      "repository": "https://github.com/Anttwo/MAtCha.git",
+      "commit": "b119fd96e484fc81eb40623c1ea92ad3dbd3c21e",
+      "license": "MIT for original code; bundled dependencies retain their own licenses"
+    }
+  },
+  "official_exmesh_protocol": {
+    "dataset": "DTU MVS 2014 using the 2DGS-preprocessed observations",
+    "input_image_resolution_reported_by_paper": [800, 600],
+    "linked_archive_native_resolution": [1554, 1162],
+    "released_exmesh_execution_resolution": [1554, 1162],
+    "paper_code_resolution_difference": "The linked 2DGS archive contains 1554x1162 RGBA images. Released ExMesh uses resolution=-1 and only auto-resizes widths above 1600, so it consumes 1554x1162; PGSR separately uses -r2. Reproduction follows released code and records this difference.",
+    "released_code_initialization": "bundled PGSR, 5000 optimizer iterations, TSDF extraction",
+    "paper_initialization": "2DGS, 7000 optimizer iterations, TSDF extraction at 256^3",
+    "paper_code_initialization_difference": "The released README and bundled PGSR runner differ from Section 4.1 of the paper; reproduction follows the released official repository and reports this difference.",
+    "depth_prior": "official ExMesh precomputed Depth Anything 3 DTU priors",
+    "exmesh_optimizer_iterations": 10000,
+    "scene_parameters": {
+      "24": {"lambda_smooth": 3000, "lambda_depth": 0.1},
+      "37": {"lambda_smooth": 3000, "lambda_depth": 0.1},
+      "40": {"lambda_smooth": 3000, "lambda_depth": 0.03},
+      "55": {"lambda_smooth": 3000, "lambda_depth": 0.01},
+      "63": {"lambda_smooth": 3000, "lambda_depth": 0.03},
+      "65": {"lambda_smooth": 3000, "lambda_depth": 0.01},
+      "69": {"lambda_smooth": 1000, "lambda_depth": 0.1},
+      "83": {"lambda_smooth": 3000, "lambda_depth": 0.01},
+      "97": {"lambda_smooth": 3000, "lambda_depth": 0.01},
+      "105": {"lambda_smooth": 3000, "lambda_depth": 0.03},
+      "106": {"lambda_smooth": 3000, "lambda_depth": 0.1},
+      "110": {"lambda_smooth": 1000, "lambda_depth": 0.01},
+      "114": {"lambda_smooth": 3000, "lambda_depth": 0.03},
+      "118": {"lambda_smooth": 1000, "lambda_depth": 0.01},
+      "122": {"lambda_smooth": 1000, "lambda_depth": 0.03}
+    },
+    "paper_overall_cd_mm": {
+      "24": 0.44,
+      "37": 0.70,
+      "40": 0.30,
+      "55": 0.34,
+      "63": 0.76,
+      "65": 0.63,
+      "69": 0.52,
+      "83": 1.06,
+      "97": 1.05,
+      "105": 0.58,
+      "106": 0.45,
+      "110": 0.88,
+      "114": 0.32,
+      "118": 0.36,
+      "122": 0.38
+    },
+    "paper_mean_overall_cd_mm": 0.58,
+    "reproduction_gate": {
+      "maximum_absolute_mean_difference_mm": 0.10,
+      "maximum_per_scene_mean_absolute_error_mm": 0.15,
+      "all_15_scenes_required": true
+    },
+    "official_evaluator": {
+      "implementation": "ExMesh/scripts/eval_dtu/evaluate_single_scene.py and eval.py",
+      "downsample_density_mm": 0.2,
+      "patch_size_mm": 60.0,
+      "max_distance_mm": 20.0,
+      "primary_outputs": ["mean_d2s", "mean_s2d", "overall"],
+      "normal_consistency_supported": false,
+      "fscore_supported": false,
+      "point_to_surface_supported": false,
+      "sampling_seed_control_supported": false
+    }
+  },
+  "official_data_sources": {
+    "observations": {
+      "description": "2DGS-preprocessed DTU archive linked by the ExMesh README",
+      "url": "https://drive.google.com/drive/folders/1SJFgt8qhQomHX55Q4xSvYE2C6-8tFll9",
+      "archive": "dtu.tar.gz",
+      "bytes": 3561809006
+    },
+    "depth_priors": {
+      "description": "Precomputed DTU Depth Anything 3 priors released by ExMesh",
+      "url": "https://drive.google.com/file/d/1KupSX6O1Ocq3N0n-V1_dNKCenA_eDRCm/view?usp=sharing",
+      "bytes": 727273792
+    },
+    "evaluation_masks": {
+      "description": "Official DTU MVS SampleSet",
+      "url": "https://roboimagedata2.compute.dtu.dk/data/MVS/SampleSet.zip",
+      "bytes": 6905656531
+    },
+    "evaluation_points": {
+      "description": "Official DTU STL reference point clouds",
+      "url": "https://roboimagedata2.compute.dtu.dk/data/MVS/Points.zip",
+      "bytes": 6966262016
+    }
+  },
+  "method_order": [
+    "exmesh_initial",
+    "ours",
+    "exmesh_official",
+    "neural_deferred_shading",
+    "nvdiffrec",
+    "neuralangelo",
+    "matcha"
+  ],
+  "method_protocols": {
+    "exmesh_initial": {
+      "observations": "ExMesh RGB, cameras, masks, and normalization",
+      "initialization": "official bundled PGSR 5000-step TSDF output",
+      "additional_priors": "none beyond the released PGSR pipeline"
+    },
+    "ours": {
+      "observations": "ExMesh RGB, cameras, masks, and normalization",
+      "initialization": "fixed graph from the official PGSR initial mesh",
+      "additional_priors": "none; non-evaluation training source remains unresolved"
+    },
+    "exmesh_official": {
+      "observations": "ExMesh RGB, cameras, masks, normalization, and released DA3 priors",
+      "initialization": "official bundled PGSR 5000-step TSDF output",
+      "additional_priors": "official precomputed Depth Anything 3 priors"
+    },
+    "neural_deferred_shading": {
+      "observations": "byte-identical ExMesh RGBA observations (official alpha mask) with deterministic OpenCV K/R/t sidecars from the ExMesh normalized cameras",
+      "initialization": "official vh32 visual hull in the official NDS normalized [-0.5,0.5]^3 bbox; same-PGSR-mesh variant is retained as an optional additional comparison",
+      "additional_priors": "none; bbox is the official NDS normalized-scene convention and is not GT-derived"
+    },
+    "nvdiffrec": {
+      "observations": "byte-identical ExMesh RGBA observations with exact per-view intrinsics and deterministic OpenCV-to-OpenGL extrinsics",
+      "initialization": "official DMTet reconstruction without GT geometry",
+      "additional_priors": "none; exact-camera DatasetNERF overlay only replaces the official loader's centered single-FOV limitation"
+    },
+    "neuralangelo": {
+      "observations": "byte-identical ExMesh RGBA files (official Neuralangelo consumes RGB) with native-resolution DTU transforms in the ExMesh normalized frame",
+      "initialization": "official neural-surface initialization without GT depth or normals",
+      "additional_priors": "none; no GT depth, normals, point cloud, or mesh"
+    },
+    "matcha": {
+      "observations": "same ExMesh RGB and known cameras when supported; adapter pending Phase-1 gate",
+      "initialization": "official non-GT initialization",
+      "additional_priors": "official pretrained monocular priors; exact weights pending adapter audit"
+    }
+  },
+  "gates": {
+    "require_official_exmesh_reproduction_before_adapters": true,
+    "require_six_method_sanity_scene_before_full_benchmark": true,
+    "no_test_gt_hyperparameter_selection": true,
+    "no_icp_for_primary_metrics": true
+  },
+  "ours_contract": {
+    "input": "ExMesh observations plus fixed ExMesh PGSR initial mesh graph",
+    "target": "direct raw current-graph Laplacian",
+    "loss": "Huber(delta=0.01)",
+    "network_redesign_allowed": false,
+    "training_source": null,
+    "training_source_status": "blocked_pending_non_evaluation_training_contract"
+  }
+}
