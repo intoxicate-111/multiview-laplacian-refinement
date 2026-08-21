@@ -106,7 +106,8 @@ current mesh vertices
 ```
 
 GT geometry 只用于构造监督与评估。Dynamic residual expert、gate、direct-
-displacement branch 和 raw-MSE loss 都是受控消融，不在当前 1920+HF 主线中启用。
+displacement branch 和 raw-MSE loss 都是受控消融，不在当前 direct-raw + HF
+主线中启用。
 
 ## 数学定义
 
@@ -124,6 +125,11 @@ $$
 L_{ii}=1,\quad L_{ij}=-\frac{1}{d_i}.
 $$
 
+变量说明：`i` 是目标 vertex，`j` 遍历其 one-ring 集合 `N(i)`，`d_i` 是该集合的
+neighbour 数量。`X in R^{N x C}` 表示定义在 `N` 个 vertices 上的 `C`-channel
+signal（这里通常是 3D positions），`L in R^{N x N}` 是 row-normalized uniform
+Laplacian，`(LX)_i` 是第 `i` 行输出。
+
 Isolated vertex 对应零 Laplacian row。令训练 query mesh 为
 `X_0 = P_current`，`P_proxy` 与其具有完全相同的 vertex ordering。局部边尺度和
 当前监督 target 为
@@ -135,12 +141,22 @@ h_i^{\mathrm{current}}=
 \delta_i^*=(L_{\mathrm{current}}P_{\mathrm{proxy}})_i.
 $$
 
+变量说明：`X_0,i in R^3` 是 current vertex `i`；`h_i^current` 是其 mean
+incident-edge length；`P_proxy in R^{N x 3}` 是具有相同 vertex ordering 的 paired
+proxy；`L_current` 只由 current faces 构建；`delta_i* in R^3` 是监督 raw
+Laplacian vector。`j`、`N(i)` 和 `d_i` 沿用上面的 one-ring 定义，`||.||_2` 是
+Euclidean length。
+
 网络直接预测与 `delta_target_raw = delta*` 单位相同的 `delta_pred_raw`：
 
 $$
 f_\theta(I_{1:M},K_{1:M},E_{1:M},X_0,F)_i
 =\delta_i^{\mathrm{pred,raw}}\approx\delta_i^*.
 $$
+
+变量说明：`f_theta` 是参数为 `theta` 的 learned predictor；`I_1:M`、`K_1:M` 和
+`E_1:M` 分别是 `M=28` 个 RGB images、intrinsics 与 world-to-camera extrinsics；
+`F` 是 current face array；`delta_i^(pred,raw)` 是 vertex `i` 的三分量输出。
 
 两侧都不乘除 `(h_i^current)^2`。当前配置中，
 `target_scaling.method = square_of_mean_incident_edge_length` 只定义可用的尺度
@@ -154,6 +170,10 @@ metadata；`target_mode = raw_laplacian` 会在 loss 前直接选择 raw tensor�
 $$
 q_i=X_{0,i}.
 $$
+
+变量说明：`q_i in R^3` 是 vertex `i` 用于 image projection 与 positional encoding
+的 query，`X_0,i` 是该 vertex 存储的 current position。两者相等表示不添加 query
+offset 或 jitter。
 
 `query_training.enabled` 与 `local_query_jitter.enabled` 都是 false。因此 current
 connectivity、`P_proxy`、target、local scale 与 Laplacian operator 不会被训练期
@@ -173,12 +193,21 @@ y_{vi}=E_v[q_i^\top,1]^\top,
       \frac{\widetilde p_{vi,y}}{\widetilde p_{vi,z}}\right).
 $$
 
+变量说明：`v in {1,...,M}` 是 camera index；`[q_i^T,1]^T in R^4` 是 homogeneous
+world point；`E_v in R^{3 x 4}` 生成 camera coordinates `y_vi`；
+`K_v in R^{3 x 3}` 生成 homogeneous pixel `p_tilde_vi`；`(u_vi,v_vi)` 是除以
+camera depth `p_tilde_vi,z` 后的非齐次 pixel coordinates。
+
 令 `f_vi` 表示正深度且投影位于图像范围内，`r_vi` 表示预计算的 renderer-native
 back-face 与 occlusion 结果。Feature-sampling mask 为
 
 $$
 z_{vi}=f_{vi}r_{vi}\in\{0,1\}.
 $$
+
+变量说明：`f_vi` 仅在 positive-depth 且 in-frame 时为 1；`r_vi` 仅在 renderer 的
+front-face 与 occlusion tests 接受 view `v` 中的 vertex `i` 时为 1；`z_vi` 是两者
+用于 feature sampling 的 binary conjunction。
 
 若 `F_v(u_vi,v_vi)` 是 bilinear sampled CNN feature，则 masked mean 与 valid-view
 ratio 为
@@ -190,6 +219,10 @@ $$
 \qquad
 \rho_i=\frac{1}{M}\sum_{v=1}^{M}z_{vi}.
 $$
+
+变量说明：`F_v(u_vi,v_vi) in R^C` 是 view `v` 的 bilinear sampled feature；
+`F_bar_i in R^C` 是 vertex `i` 的 masked mean；`rho_i in [0,1]` 是 valid-view
+fraction；`max(1,...)` denominator 在所有 view 不可见时避免除零。
 
 没有有效 view 时，`F_bar_i = 0` 且 `rho_i = 0`。
 
@@ -204,6 +237,11 @@ F_v=\mathrm{Conv}_{3\times3}^{64}\!\left(
 \right)\right)\right)\right).
 $$
 
+变量说明：`I_v in R^{H x W x 3}` 是 view `v`；每个
+`Conv_(k x k,s)^Cout` 表示 kernel size `k`、stride `s`、输出 channels `Cout` 的
+convolution；`ReLU` 逐元素执行；所有 active stride 为 1，因此
+`F_v in R^{H x W x 64}` 是保持输入分辨率的 C2F2 encoder output。
+
 三个 convolution 均通过 padding 保持 input spatial resolution。
 当前 high-frequency construction 为
 
@@ -214,6 +252,10 @@ F_v^{\mathrm{HF}}=F_v-F_v^{\mathrm{blur}},
 \qquad
 F_v^{\mathrm{out}}=[F_v,F_v^{\mathrm{HF}}].
 $$
+
+变量说明：`G_(5,1.0)` 是固定的 depthwise 5x5 Gaussian blur，sigma 为 1.0；
+`F_v^blur` 是 low-frequency result；`F_v^HF` 是 residual high-frequency map；
+`[.,.]` 表示 channel concatenation，因此 `F_v^out` 有 128 channels。
 
 `G` 是使用 reflect padding 的固定 depthwise Gaussian operation，不增加 learned
 parameters。`F_v` 有 64 channels，因此 `F_v^out` 和 aggregated image feature 均为
@@ -229,17 +271,27 @@ $$
 m_i=\mathbf 1\!\left[\sum_{v=1}^{M}z_{vi}>0\right].
 $$
 
+变量说明：`1[.]` 是 indicator function，`z_vi` 是前述 per-view binary visibility，
+`m_i in {0,1}` 表示 vertex `i` 是否至少在 `M` 个 views 中的一个可见。
+
 可选 confidence head 预测有界 reliability：
 
 $$
 c_i=\mathrm{sigmoid}(g_\theta(x_i))\in[0,1].
 $$
 
+变量说明：`x_i` 是下文定义的完整 vertex representation；`g_theta` 是 confidence
+side head；`c_i` 是 vertex `i` 的有界 predicted reliability。
+
 当前主线 recovery weight 为
 
 $$
 w_i=m_i c_i.
 $$
+
+变量说明：`w_i in [0,1]` 是 Laplacian row `i` 的 recovery weight，`m_i` 是 hard
+any-view visibility gate，`c_i` 是 learned confidence。关闭 confidence head 时，
+implementation 等价于令 `c_i=1`。
 
 关闭 confidence head 时使用 `w_i = m_i`。所有 view 均不可见的 vertex，其
 learned-Laplacian weight 严格为零。
@@ -252,6 +304,10 @@ g_i=\mathrm{clip}\!\left(
 \exp\!\left[-\left(\frac{d_i^{\mathrm{surface}}}{s}\right)^2\right],
 g_{\min},1\right).
 $$
+
+变量说明：`d_i^surface` 是 coarse query 到 GT surface 的距离，`s>0` 是 configured
+distance scale，`g_min` 是 lower clamp，`g_i` 是 legacy Gaussian confidence
+weight。这里的 `g_i` 与上面的 confidence-head function `g_theta` 无关。
 
 其中 `d_i^surface` 是 coarse query 到 GT surface 的距离，`s` 为
 `distance_confidence_scale`。该 Gaussian gate 不是 renderer visibility，也不用于
@@ -267,6 +323,10 @@ $$
 \widetilde q_i=\frac{q_i-c_{\mathrm{obj}}}{s_{\mathrm{obj}}}.
 $$
 
+变量说明：`q_i in R^3` 是 current query，`c_obj in R^3` 是 object normalization
+center，`s_obj>0` 是 scalar normalization scale，`q_tilde_i in R^3` 是得到的
+dimensionless coordinate。
+
 使用 `K = 6` 个 frequencies 时，dynamic Fourier encoding 为
 
 $$
@@ -278,6 +338,10 @@ $$
 \right].
 $$
 
+变量说明：`phi` 是 positional encoder，`k` 遍历 `K=6` 个 octave frequencies；
+幂、sine 与 cosine 都逐坐标执行；brackets 将原始 3 个 coordinates 与 `2K` 个
+三坐标 sinusoidal blocks 拼接，输出 39 channels。
+
 每个 vertex 的输入为
 
 $$
@@ -287,6 +351,11 @@ x_i=\left[
 \log(1+d_i),\ \rho_i,\ \overline F_i
 \right].
 $$
+
+变量说明：`x_i` 拼接 39D positional encoding、current unit normal
+`n_i in R^3`、relative edge scale `h_i/s_obj`、degree `d_i`、visible-view ratio
+`rho_i` 和 aggregated image feature `F_bar_i in R^128`。`max` 防止零值进入
+logarithm，每个 scalar term 占一个 channel。
 
 对于当前 HF construction 下的 C2F2，`phi` 为 39 channels，完整 vertex input 为
 `39 + 3 + 1 + 1 + 1 + 128 = 173` channels，分别对应 position encoding、normal、
@@ -302,12 +371,20 @@ $$
 \sum_{j\in N(i)}u_j^{(l)},
 $$
 
+变量说明：`l` 是 graph-layer index，`u_j^(l) in R^256` 是 neighbour `j` 的 hidden
+state，`mu_i^(l) in R^256` 是其 degree-normalized mean；denominator 同时定义了
+isolated vertex 的 zero-safe case。
+
 $$
 u_i^{(l+1)}=\mathrm{ReLU}\!\left(
 u_i^{(l)}+operatorname{MLP}_l
 \left([u_i^{(l)},\mu_i^{(l)}]\right)
 \right).
 $$
+
+变量说明：`u_i^(l)` 与 `u_i^(l+1)` 是 vertex `i` 的输入/输出 hidden states；
+`MLP_l` 是作用于 concatenation `[u_i^(l),mu_i^(l)]` 的 layer-specific learned
+update；outer residual addition 保留旧 state；`ReLU` 逐元素执行。
 
 Output MLP 将最终 graph state 直接映射为 `delta_pred_raw in R^3`。Python result
 field 名为 `predicted_laplacian`；历史 `delta_hat_prediction` accessor 在
@@ -321,6 +398,9 @@ $$
 r_{ik}=\delta^{\mathrm{pred,raw}}_{ik}-\delta^*_{ik}.
 $$
 
+变量说明：`i` 遍历 vertices，`k in {1,2,3}` 遍历 Cartesian components，`r_ik`
+是单个分量在 raw space 中的 signed prediction residual。
+
 逐分量 Huber function 为
 
 $$
@@ -332,6 +412,10 @@ H_\tau(r)=
 \qquad \tau=0.01.
 $$
 
+变量说明：`H_tau` 是 scalar Huber penalty，`r` 是一个 signed residual，`tau` 是
+quadratic 与 linear branches 之间的 transition magnitude；当前训练值为 raw-
+Laplacian 单位下的 `0.01`。
+
 Per-vertex error 与 primary loss 为
 
 $$
@@ -340,6 +424,10 @@ e_i=\frac{1}{3}\sum_{k=1}^{3}H_\tau(r_{ik}),
 \mathcal L_{\mathrm{lap}}=
 \frac{\sum_i a_i e_i}{\max(10^{-12},\sum_i a_i)},
 $$
+
+变量说明：`e_i` 是三个 component Huber penalties 的均值；`a_i>=0` 是 prepared
+validity/target-confidence weight；`L_lap` 是其跨 vertices 的 normalized weighted
+mean；`10^-12` 用于保护 empty valid set。
 
 其中 `a_i` 是 prepared target-confidence/valid-scale weight。当前 full-vertex
 contract 对有效的非 isolated vertices 使用单位权重，对无效 local scale 使用零
@@ -351,6 +439,9 @@ $$
 \widetilde c_i=\mathrm{clip}(c_i,c_{\min},1),
 $$
 
+变量说明：`c_i` 是 predicted confidence，`c_min=10^-4` 是 numerical lower bound，
+`clip` 将数值截断到给定区间，`c_tilde_i` 是 confidence loss 实际使用的值。
+
 $$
 \mathcal L_{\mathrm{conf}}=
 \frac{\sum_i a_i
@@ -359,6 +450,10 @@ $$
 {\max(10^{-12},\sum_i a_i)}.
 $$
 
+变量说明：`L_conf` 是 auxiliary confidence objective；`a_i` 与 `e_i` 定义同上；
+`stopgrad` 使 prediction error 对该 head 被视为常量；`beta=0.01` 加权防止
+confidence collapse 的 logarithmic barrier。
+
 完整训练目标为
 
 $$
@@ -366,6 +461,10 @@ $$
 =\mathcal L_{\mathrm{lap}}
 +\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}}.
 $$
+
+变量说明：`L_train` 是训练时被微分的 scalar objective；`L_lap` 是 primary
+prediction loss，`L_conf` 是 auxiliary confidence loss，`lambda_conf=1` 是其
+configured coefficient。
 
 当前主线 config 使用 `beta = 0.01`、`c_min = 10^-4` 和
 `lambda_conf = 1`。Predicted confidence 不会重新加权 `L_lap`，因此 confidence
@@ -386,6 +485,13 @@ $$
 +\mathcal L_{\mathrm{edge}}+\mathcal L_{\mathrm{unseen}}.
 $$
 
+变量说明：`X in R^{N x 3}` 是待求 refined mesh，`X_0` 是固定 initial positions；
+`L_current` 是固定 current-graph operator；`delta^(pred,raw)` 是 network field；
+`w_i` 加权完整 equation row；`lambda_lap` 与 `lambda_anchor` 分别控制 Laplacian
+fitting 和 anchoring；`||.||_F` 是 Frobenius norm；`L_edge`/`L_unseen` 是可选 edge
+与 invisible-vertex terms（主线均关闭）。Indices `i` 和 `k` 分别遍历 vertices 与
+三个 Cartesian components，`H_tau` 是上面定义的训练 Huber function。
+
 当前主线 values 为 `lambda_lap = 1`、`lambda_anchor = 0.01`、
 `lambda_edge = 0` 和 `lambda_unseen_anchor = 0`。Visibility/confidence weight
 通过 `sqrt(w_i)` 作用于完整 Laplacian equation row。
@@ -400,6 +506,11 @@ $$
 \qquad W=\mathrm{diag}(w).
 $$
 
+变量说明：`N` 是 vertex count，`W in R^{N x N}` 是以 `w_i` 为 diagonal entries
+的矩阵，`W^(1/2)` 施加 square-root row weights。其他 symbol 与 dense objective
+一致；该 sparse variant 使用 squared L2/Frobenius penalties，而不是 component-wise
+Huber penalties。
+
 ### 报告指标
 
 对于 raw prediction `P = delta_pred_raw` 和 raw target `T = delta*`，主要
@@ -409,6 +520,10 @@ $$
 \mathrm{EPE}=\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2,
 $$
 
+变量说明：`P,T in R^{N x 3}` 分别是 raw predicted/target Laplacian fields，
+`P_i-T_i` 是 vertex `i` 的 vector residual，`N` 是 evaluated vertex count，`EPE`
+是 residual Euclidean magnitude 的均值。
+
 $$
 \mathrm{Cos}_{\mathrm{global}}=
 \frac{\langle\mathrm{vec}(P),\mathrm{vec}(T)\rangle}
@@ -416,6 +531,10 @@ $$
 \qquad
 R_{\mathrm{norm}}=\frac{\lVert P\rVert_F}{\lVert T\rVert_F}.
 $$
+
+变量说明：`vec(.)` 将 field 的全部 components 展平，`<.,.>` 是 Euclidean inner
+product，`||.||_F` 是 Frobenius norm，`Cos_global` 是整个 field 的单一 cosine，
+`R_norm` 是 predicted-to-target field-magnitude ratio。
 
 Raw RMS 和 maximum residual 为
 
@@ -426,18 +545,30 @@ $$
 \mathrm{Max}_{\mathrm{raw}}=\max_i\lVert P_i-T_i\rVert_2.
 $$
 
+变量说明：`RMS_raw` 是 per-vertex vector residual magnitude 的 root mean square，
+`Max_raw` 是其最大值；`P`、`T`、`N` 与 `i` 的定义和 EPE 中相同。
+
 Bottom-90%、Top-10% 和 Top-1% group 按全局 `||delta_i*||_2` 定义，而不是按
 prediction 定义。Recovery-weighted raw RMS 使用固定 evaluation recovery weights
 和同一组 raw residual。
 
-报告中的 bidirectional vertex-to-surface Chamfer 为
+报告中的 bidirectional sampled-surface Chamfer 为
 
 $$
+Q_A=\mathrm{SampleSurface}(S_A,n,s),\qquad
+Q_B=\mathrm{SampleSurface}(S_B,n,s+1),
+\qquad
 D_{\mathrm{C}}(A,B)=\frac{1}{2}\left[
-\frac{1}{|V_A|}\sum_{x\in V_A}d(x,S_B)
-+\frac{1}{|V_B'|}\sum_{y\in V_B'}d(y,S_A)
+\frac{1}{|Q_A|}\sum_{x\in Q_A}d(x,S_B)
++\frac{1}{|Q_B|}\sum_{y\in Q_B}d(y,S_A)
 \right],
 $$
+
+变量说明：`A` 是 evaluated mesh，`B` 是 GT mesh；`S_A` 与 `S_B` 是各自 triangle
+surfaces；`Q_A` 与 `Q_B` 是分别使用 base seeds `s` 和 `s+1` 生成的 `n` 个
+deterministic area-weighted surface samples；`d(x,S)` 是 point 到 triangle surface
+的最短距离；`|.|` 表示 set cardinality。修正后的 same-initial benchmark 固定
+`n=3000`、`s=7`；其他报告会分别序列化自己的 sample count 与 base seed。
 
 其中 `S_A` 和 `S_B` 是 triangle surfaces，`V_B'` 是实际评估或 subsampled GT
 vertex set。
@@ -452,6 +583,10 @@ $$
 \widehat\delta_i^{\mathrm{GT}}=
 \frac{\delta_i^{\mathrm{GT}}}{h_i^2+\varepsilon},
 $$
+
+变量说明：`V_GT in R^{N x 3}` 与 `L_GT` 分别是历史 GT vertices 及其 graph
+Laplacian；`delta_i^GT` 是 raw GT Laplacian；`h_i` 是 mean incident-edge length；
+`epsilon=10^-12` 防止除零；`delta_hat_i^GT` 是历史 h-squared-normalized target。
 
 并通过 `delta_pred_raw = delta_hat_prediction * (h_current^2 + epsilon)` 将
 normalized prediction 转回 raw space。该路径仍保留用于复现，但它不描述当前

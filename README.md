@@ -113,7 +113,7 @@ current mesh vertices
 
 GT geometry is used only for constructing supervision and evaluation. The
 dynamic residual expert, gate, direct-displacement branch and raw-MSE loss are
-controlled ablations and are not enabled in the active 1920+HF mainline.
+controlled ablations and are not enabled in the active direct-raw + HF mainline.
 
 ## Mathematical specification
 
@@ -131,6 +131,11 @@ $$
 L_{ii}=1,\quad L_{ij}=-\frac{1}{d_i}.
 $$
 
+Variables: `i` is the destination vertex, `j` indexes its one-ring set
+`N(i)`, and `d_i` is the number of those neighbours. `X in R^{N x C}` stores
+a `C`-channel signal on `N` vertices (normally 3D positions), `L in R^{N x N}`
+is the row-normalised uniform Laplacian, and `(LX)_i` is its `i`-th output row.
+
 An isolated vertex has a zero Laplacian row. Let the training query mesh be
 `X_0 = P_current`, and let `P_proxy` be the paired proxy positions with the same
 vertex ordering. The local edge scale and active supervised target are
@@ -142,6 +147,12 @@ h_i^{\mathrm{current}}=
 \delta_i^*=(L_{\mathrm{current}}P_{\mathrm{proxy}})_i.
 $$
 
+Variables: `X_0,i in R^3` is current vertex `i`; `h_i^current` is its mean
+incident-edge length; `P_proxy in R^{N x 3}` is the paired proxy with the same
+vertex ordering; `L_current` is built only from the current faces; and
+`delta_i* in R^3` is the supervised raw Laplacian vector. `j`, `N(i)` and
+`d_i` retain the one-ring definitions above, and `||.||_2` is Euclidean length.
+
 The network directly predicts `delta_pred_raw` in the same units as
 `delta_target_raw = delta*`:
 
@@ -149,6 +160,11 @@ $$
 f_\theta(I_{1:M},K_{1:M},E_{1:M},X_0,F)_i
 =\delta_i^{\mathrm{pred,raw}}\approx\delta_i^*.
 $$
+
+Variables: `f_theta` is the learned predictor with parameters `theta`;
+`I_1:M`, `K_1:M` and `E_1:M` are the `M=28` RGB images, intrinsics and
+world-to-camera extrinsics; `F` is the current face array; and
+`delta_i^(pred,raw)` is the three-component output at vertex `i`.
 
 No factor of `(h_i^current)^2` is applied to either side. In the active config,
 `target_scaling.method = square_of_mean_incident_edge_length` defines available
@@ -162,6 +178,10 @@ The mainline query is the current vertex itself:
 $$
 q_i=X_{0,i}.
 $$
+
+Variables: `q_i in R^3` is the image-projection and positional-encoding query
+for vertex `i`, and `X_0,i` is that vertex's stored current position. Equality
+means no query offset or jitter is applied.
 
 Both `query_training.enabled` and `local_query_jitter.enabled` are false. The
 current connectivity, `P_proxy`, target, local scales and Laplacian operator are
@@ -181,6 +201,12 @@ y_{vi}=E_v[q_i^\top,1]^\top,
       \frac{\widetilde p_{vi,y}}{\widetilde p_{vi,z}}\right).
 $$
 
+Variables: `v in {1,...,M}` indexes a camera; `[q_i^T,1]^T in R^4` is the
+homogeneous world point; `E_v in R^{3 x 4}` produces camera coordinates
+`y_vi`; `K_v in R^{3 x 3}` produces homogeneous pixels `p_tilde_vi`; and
+`(u_vi,v_vi)` are the inhomogeneous pixel coordinates obtained by dividing by
+camera depth `p_tilde_vi,z`.
+
 Let `f_vi` indicate positive depth and in-frame projection. Let `r_vi` be the
 precomputed renderer-native back-face and occlusion result. The feature-sampling
 mask is
@@ -188,6 +214,10 @@ mask is
 $$
 z_{vi}=f_{vi}r_{vi}\in\{0,1\}.
 $$
+
+Variables: `f_vi` is 1 only for positive-depth, in-frame projections; `r_vi`
+is 1 only when the renderer's front-face and occlusion tests accept vertex `i`
+in view `v`; and `z_vi` is their binary conjunction used for feature sampling.
 
 If `F_v(u_vi,v_vi)` is the bilinearly sampled CNN feature, the implemented
 masked mean and valid-view ratio are
@@ -199,6 +229,11 @@ $$
 \qquad
 \rho_i=\frac{1}{M}\sum_{v=1}^{M}z_{vi}.
 $$
+
+Variables: `F_v(u_vi,v_vi) in R^C` is the bilinearly sampled feature in view
+`v`; `F_bar_i in R^C` is the masked mean for vertex `i`; `rho_i in [0,1]` is
+its valid-view fraction; and the `max(1,...)` denominator defines the all-
+invisible case without division by zero.
 
 When no view is valid, `F_bar_i = 0` and `rho_i = 0`.
 
@@ -213,6 +248,11 @@ F_v=\mathrm{Conv}_{3\times3}^{64}\!\left(
 \right)\right)\right)\right).
 $$
 
+Variables: `I_v in R^{H x W x 3}` is view `v`; each `Conv_(k x k,s)^Cout`
+denotes a convolution with kernel size `k`, stride `s` and `Cout` output
+channels; `ReLU` is applied elementwise; and `F_v in R^{H x W x 64}` is the
+C2F2 encoder output because every active stride is one.
+
 Padding preserves the input spatial resolution in all three convolutions.
 The active high-frequency construction is
 
@@ -223,6 +263,10 @@ F_v^{\mathrm{HF}}=F_v-F_v^{\mathrm{blur}},
 \qquad
 F_v^{\mathrm{out}}=[F_v,F_v^{\mathrm{HF}}].
 $$
+
+Variables: `G_(5,1.0)` is a fixed depthwise 5x5 Gaussian blur with sigma 1.0;
+`F_v^blur` is its low-frequency result; `F_v^HF` is the residual high-frequency
+map; and `[.,.]` concatenates channels, so `F_v^out` has 128 channels.
 
 `G` is a fixed depthwise Gaussian operation with reflect padding and adds no
 learned parameters. Since `F_v` has 64 channels, `F_v^out` and the aggregated
@@ -239,17 +283,29 @@ $$
 m_i=\mathbf 1\!\left[\sum_{v=1}^{M}z_{vi}>0\right].
 $$
 
+Variables: `1[.]` is the indicator function, `z_vi` is the binary per-view
+visibility above, and `m_i in {0,1}` states whether vertex `i` is visible in at
+least one of the `M` views.
+
 The optional confidence head predicts a bounded reliability value
 
 $$
 c_i=\mathrm{sigmoid}(g_\theta(x_i))\in[0,1].
 $$
 
+Variables: `x_i` is the complete vertex representation defined below;
+`g_theta` is the confidence side head sharing the training parameter set; and
+`c_i` is its bounded predicted reliability for vertex `i`.
+
 The mainline recovery weight is
 
 $$
-w_i=m_i c_i,
+w_i=m_i c_i.
 $$
+
+Variables: `w_i in [0,1]` is the recovery weight for Laplacian row `i`; `m_i`
+is the hard any-view visibility gate and `c_i` is learned confidence. With no
+confidence head, the implementation substitutes `c_i=1`.
 
 or `w_i = m_i` when the confidence head is disabled. Consequently, a vertex
 that is invisible in every view has exactly zero learned-Laplacian weight.
@@ -262,6 +318,11 @@ g_i=\mathrm{clip}\!\left(
 \exp\!\left[-\left(\frac{d_i^{\mathrm{surface}}}{s}\right)^2\right],
 g_{\min},1\right).
 $$
+
+Variables: `d_i^surface` is the coarse-query-to-GT-surface distance, `s>0` is
+the configured distance scale, `g_min` is the lower clamp, and `g_i` is the
+legacy Gaussian confidence weight. This `g_i` is unrelated to the confidence
+head function `g_theta` above.
 
 Here `d_i^surface` is the distance from a coarse query to the GT surface and
 `s` is `distance_confidence_scale`. This Gaussian gate is not renderer
@@ -278,6 +339,10 @@ $$
 \widetilde q_i=\frac{q_i-c_{\mathrm{obj}}}{s_{\mathrm{obj}}}.
 $$
 
+Variables: `q_i in R^3` is the current query, `c_obj in R^3` is the object's
+normalisation centre, `s_obj>0` is its scalar normalisation scale, and
+`q_tilde_i in R^3` is the resulting dimensionless coordinate.
+
 With `K = 6` frequencies, the dynamic Fourier encoding is
 
 $$
@@ -289,6 +354,11 @@ $$
 \right].
 $$
 
+Variables: `phi` is the positional encoder; `k` indexes the `K=6` octave
+frequencies; powers, sine and cosine act componentwise on `q_tilde_i`; and
+brackets concatenate the original 3 coordinates with `2K` three-coordinate
+sinusoidal blocks, producing 39 channels.
+
 The per-vertex input is
 
 $$
@@ -298,6 +368,11 @@ x_i=\left[
 \log(1+d_i),\ \rho_i,\ \overline F_i
 \right].
 $$
+
+Variables: `x_i` concatenates the 39D positional encoding, current unit normal
+`n_i in R^3`, relative edge scale `h_i/s_obj`, degree `d_i`, visible-view ratio
+`rho_i`, and aggregated image feature `F_bar_i in R^128`. `max` protects the
+logarithm at zero and all scalar terms contribute one channel each.
 
 For C2F2 with the active HF construction, `phi` has 39 channels and the complete
 vertex input has `39 + 3 + 1 + 1 + 1 + 128 = 173` channels. These terms are
@@ -314,12 +389,21 @@ $$
 \sum_{j\in N(i)}u_j^{(l)},
 $$
 
+Variables: `l` is the graph-layer index, `u_j^(l) in R^256` is neighbour `j`'s
+hidden state, and `mu_i^(l) in R^256` is their degree-normalised mean; the
+denominator also defines a zero-safe isolated-vertex case.
+
 $$
-u_i^{(l+1)}=operatorname{ReLU}\!\left(
+u_i^{(l+1)}=\mathrm{ReLU}\!\left(
 u_i^{(l)}+operatorname{MLP}_l
 \left([u_i^{(l)},\mu_i^{(l)}]\right)
 \right).
 $$
+
+Variables: `u_i^(l)` and `u_i^(l+1)` are vertex `i`'s input and output hidden
+states; `MLP_l` is the learned layer-specific update applied to the
+concatenation `[u_i^(l),mu_i^(l)]`; the outer residual addition preserves the
+previous state; and `ReLU` is elementwise.
 
 The output MLP maps the final graph state directly to
 `delta_pred_raw in R^3`. The Python result field is named
@@ -331,8 +415,11 @@ normalisation when `target_mode = raw_laplacian`.
 For component residual
 
 $$
-r_{ik}=\delta^{\mathrm{pred,raw}}_{ik}-\delta^*_{ik},
+r_{ik}=\delta^{\mathrm{pred,raw}}_{ik}-\delta^*_{ik}.
 $$
+
+Variables: `i` indexes vertices, `k in {1,2,3}` indexes Cartesian components,
+and `r_ik` is the signed raw-space prediction residual for one component.
 
 the component-wise Huber function is
 
@@ -345,6 +432,10 @@ H_\tau(r)=
 \qquad \tau=0.01.
 $$
 
+Variables: `H_tau` is the scalar Huber penalty, `r` is one signed residual,
+and `tau` is the transition magnitude between its quadratic and linear
+branches; the active training value is `0.01` in raw-Laplacian units.
+
 The per-vertex error and primary loss are
 
 $$
@@ -353,6 +444,10 @@ e_i=\frac{1}{3}\sum_{k=1}^{3}H_\tau(r_{ik}),
 \mathcal L_{\mathrm{lap}}=
 \frac{\sum_i a_i e_i}{\max(10^{-12},\sum_i a_i)},
 $$
+
+Variables: `e_i` is the mean of the three component Huber penalties; `a_i>=0`
+is the prepared validity/target-confidence weight; `L_lap` is their normalised
+weighted mean over vertices; and `10^-12` protects an empty valid set.
 
 where `a_i` is the prepared target-confidence/valid-scale weight. The current
 full-vertex contract assigns unit weight to valid non-isolated vertices and
@@ -365,6 +460,10 @@ $$
 \widetilde c_i=\mathrm{clip}(c_i,c_{\min},1),
 $$
 
+Variables: `c_i` is predicted confidence, `c_min=10^-4` is its numerical lower
+bound, `clip` truncates to the stated interval, and `c_tilde_i` is the value
+used by the confidence loss.
+
 $$
 \mathcal L_{\mathrm{conf}}=
 \frac{\sum_i a_i
@@ -373,13 +472,22 @@ $$
 {\max(10^{-12},\sum_i a_i)}.
 $$
 
+Variables: `L_conf` is the auxiliary confidence objective; `a_i` and `e_i` are
+defined above; `stopgrad` treats prediction error as a constant for this head;
+and `beta=0.01` weights the logarithmic barrier that discourages confidence
+collapse.
+
 The complete optimisation objective is
 
 $$
 \mathcal L_{\mathrm{train}}
 =\mathcal L_{\mathrm{lap}}
-+\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}},
++\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}}.
 $$
+
+Variables: `L_train` is the scalar objective differentiated during training;
+`L_lap` is the primary prediction loss, `L_conf` is the auxiliary confidence
+loss, and `lambda_conf=1` is its configured coefficient.
 
 with `beta = 0.01`, `c_min = 10^-4`, and `lambda_conf = 1` in the mainline
 configuration. Predicted confidence does not reweight
@@ -402,6 +510,15 @@ $$
 +\mathcal L_{\mathrm{edge}}+\mathcal L_{\mathrm{unseen}}.
 $$
 
+Variables: `X in R^{N x 3}` is the unknown refined mesh and `X_0` its fixed
+initial positions; `L_current` is the fixed current-graph operator;
+`delta^(pred,raw)` is the network field; `w_i` weights the complete row;
+`lambda_lap` and `lambda_anchor` weight Laplacian fitting and anchoring;
+`||.||_F` is the Frobenius norm; and `L_edge`/`L_unseen` are optional edge and
+invisible-vertex terms (both disabled in the mainline). Indices `i` and `k`
+range over vertices and the three Cartesian components, and `H_tau` is the
+training Huber function defined above.
+
 The current mainline values are `lambda_lap = 1`,
 `lambda_anchor = 0.01`, `lambda_edge = 0`, and
 `lambda_unseen_anchor = 0`. The visibility/confidence weight applies to the
@@ -418,6 +535,11 @@ $$
 \qquad W=\mathrm{diag}(w).
 $$
 
+Variables: `N` is the number of vertices, `W in R^{N x N}` is diagonal with
+entries `w_i`, and `W^(1/2)` applies square-root row weights. All remaining
+symbols match the dense objective; this sparse variant uses squared L2/Frobenius
+penalties rather than component-wise Huber penalties.
+
 ### Reported metrics
 
 For the raw prediction `P = delta_pred_raw` and raw target `T = delta*`, the
@@ -427,6 +549,10 @@ $$
 \mathrm{EPE}=\frac{1}{N}\sum_i\lVert P_i-T_i\rVert_2,
 $$
 
+Variables: `P,T in R^{N x 3}` are the raw predicted and target Laplacian
+fields, `P_i-T_i` is vertex `i`'s vector residual, `N` is the evaluated vertex
+count, and `EPE` is its mean Euclidean magnitude.
+
 $$
 \mathrm{Cos}_{\mathrm{global}}=
 \frac{\langle\mathrm{vec}(P),\mathrm{vec}(T)\rangle}
@@ -434,6 +560,10 @@ $$
 \qquad
 R_{\mathrm{norm}}=\frac{\lVert P\rVert_F}{\lVert T\rVert_F}.
 $$
+
+Variables: `vec(.)` stacks all field components, `<.,.>` is the Euclidean inner
+product, `||.||_F` is the Frobenius norm, `Cos_global` is one cosine for the
+whole field, and `R_norm` is the predicted-to-target field-magnitude ratio.
 
 Raw RMS and maximum residual are
 
@@ -444,18 +574,32 @@ $$
 \mathrm{Max}_{\mathrm{raw}}=\max_i\lVert P_i-T_i\rVert_2.
 $$
 
+Variables: `RMS_raw` is the root mean square of per-vertex vector residual
+magnitudes and `Max_raw` is their maximum; `P`, `T`, `N` and `i` have the same
+definitions as in EPE.
+
 Bottom-90%, Top-10% and Top-1% groups are defined globally by
 `||delta_i*||_2`, not by the prediction. Recovery-weighted raw RMS uses the
 fixed evaluation recovery weights and the same raw residual.
 
-The reported bidirectional vertex-to-surface Chamfer value is
+The reported bidirectional sampled-surface Chamfer value is
 
 $$
+Q_A=\mathrm{SampleSurface}(S_A,n,s),\qquad
+Q_B=\mathrm{SampleSurface}(S_B,n,s+1),
+\qquad
 D_{\mathrm{C}}(A,B)=\frac{1}{2}\left[
-\frac{1}{|V_A|}\sum_{x\in V_A}d(x,S_B)
-+\frac{1}{|V_B'|}\sum_{y\in V_B'}d(y,S_A)
+\frac{1}{|Q_A|}\sum_{x\in Q_A}d(x,S_B)
++\frac{1}{|Q_B|}\sum_{y\in Q_B}d(y,S_A)
 \right],
 $$
+
+Variables: `A` is the evaluated mesh and `B` the GT mesh; `S_A` and `S_B` are
+their triangle surfaces; `Q_A` and `Q_B` are `n` deterministic area-weighted
+surface samples generated with base seeds `s` and `s+1`; `d(x,S)` is the
+shortest point-to-triangle-surface distance; and `|.|` denotes set cardinality.
+The corrected same-initial benchmark fixes `n=3000` and `s=7`; other reports
+serialize their own sample count and base seed.
 
 where `S_A` and `S_B` are triangle surfaces and `V_B'` is the evaluated or
 subsampled GT vertex set.
@@ -470,6 +614,11 @@ $$
 \widehat\delta_i^{\mathrm{GT}}=
 \frac{\delta_i^{\mathrm{GT}}}{h_i^2+\varepsilon},
 $$
+
+Variables: `V_GT in R^{N x 3}` and `L_GT` are the historical GT vertices and
+their graph Laplacian; `delta_i^GT` is the raw GT Laplacian; `h_i` is mean
+incident-edge length; `epsilon=10^-12` prevents division by zero; and
+`delta_hat_i^GT` is the historical h-squared-normalised target.
 
 and converted a normalised prediction back with
 `delta_pred_raw = delta_hat_prediction * (h_current^2 + epsilon)`. That path is
