@@ -12,9 +12,9 @@ Experiment metrics and run status: [Experiment data summary](docs/EXPERIMENT_DAT
 
 Chamfer evaluator incident: [English report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md) | [中文报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md)
 
-Sofa50 same-initial external comparison: [Corrected final report](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)
-
 Current Sofa50 controlled ablations: [Direct-raw/loss/expert/image-feature report](docs/SOFA50_CONTROLLED_ABLATIONS_REPORT.zh-CN.md)
+
+Sofa50 stronger coarse-mesh smoothing: [v2 contract](docs/SOFA50_STRONG_SMOOTHING_V2.md) | [中文](docs/SOFA50_STRONG_SMOOTHING_V2.zh-CN.md)
 
 Future2000 local comparisons: [Local task guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 
@@ -26,7 +26,12 @@ View-count and query-resolution results: [Ablation report](runs/learned_laplacia
 
 ## Project status
 
-Status date: 2026-08-21 BST.
+Status date: 2026-08-23 BST.
+
+OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
+reconstructions and are retained only as out-of-distribution stress tests.
+They are not training targets, pseudo-GT, model-selection endpoints or a
+desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLICY.md).
 
 | Component | State | Conclusion |
 |---|---|---|
@@ -37,7 +42,8 @@ Status date: 2026-08-21 BST.
 | Sofa50 960 C2F2 training | Complete | Three seeds completed at 50,000 optimiser steps. C2F2 is the current lowest-error exact-query configuration. |
 | Sofa50 1920 C2F2 training | Complete | Three seeds completed at 20,000 optimiser steps. Mean endpoint error and recovery Chamfer are higher than the 960 result; mean cosine is higher. |
 | Expanded-query recovery | Complete | Refinement increases Chamfer distance on all five validation meshes for the evaluated 960 and 1920 C2F2 checkpoints. |
-| OpenMVS coarse-mesh recovery | Complete for 48 of 50 meshes | Mean Chamfer distance increases after refinement. Two objects have no OpenMVS coarse mesh. |
+| OpenMVS coarse-mesh recovery | Complete for 48 of 50 meshes; diagnostic only | The low-quality reconstructions are retained as OOD stress inputs, not targets or decision endpoints. Historical refinement metrics remain recorded; two objects have no OpenMVS coarse mesh. |
+| OpenMVS projected-GT oracle decomposition | Complete; diagnostic only | Position projection improves unified Chamfer by 6.12%; frozen recovery retains 44.53% of that gain and learned prediction realizes 4.36%. This diagnoses failure on poor OOD inputs and has zero model-selection/scale-up weight. |
 | Oracle residual expert | Closed | The 2,000-step diagnostic does not support this branch. |
 | 14/28/56-view ablation | Complete | Best validation losses are 0.0139316, 0.0130296 and 0.0138104 for 14, 28 and 56 views. |
 | Query-graph resolution ablation | Complete | Best validation losses are 0.0139316 for the GT alias, 0.0614830 for GT-sub1 and 0.0145840 for GT-adaptive. GT-sub2 was excluded from training. |
@@ -50,10 +56,11 @@ Status date: 2026-08-21 BST.
 | Learned dynamic residual expert and gate | Complete | The learned final improves the jointly trained base on every test sample for raw EPE, Chamfer and P2S. Validation-selected constant-gate and five within-mesh shuffle interventions show that the residual expert is the main contribution and vertex-level gate placement adds a smaller, measurable gain. |
 | 960 image-feature ablation | Complete | `F + (F-Gaussian(F))` has the lowest test raw EPE, RMS, Top-10% and Top-1% errors. Gaussian-only features have the best mean Chamfer, normal consistency and improved count (`21/25`). |
 | Native-1920 plus high-frequency residual | Complete; non-strict resolution ablation | The 20,000-step four-L40 run lowers Bottom-90% error but worsens test raw EPE/RMS, Top-10%/Top-1%, Chamfer and P2S versus 960+HF. Normal consistency improves and flips decrease. Global batch is 4 versus 2. |
+| Sofa50 multi-topology coarse smoothing v2 | 20k training and controlled test/recovery complete | Job `17082` completed from scratch on 2×L40 with final/best validation `2.26915e-6`. On the same 50 strong-smoothing test inputs, v2 lowers raw EPE from v1's `0.00840367` to `0.00276820`, but unified refined Chamfer is worse (`0.00451747` vs `0.00426879`), normal consistency is lower, flips are higher and only 26/50 improve versus 38/50. Stronger smoothing improves target prediction but does not transfer through the frozen recovery contract. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
-| Future2000 GT-adaptive scale-up | Running from scratch | Seven-Blackwell job 16607 reached step 188,000/200,000 at the 21 August snapshot. Rolling train loss is `1.72e-6`; the latest completed validation near step 182,880 is `2.87e-6`. No final test/recovery conclusion exists yet. |
+| Future2000 GT-adaptive scale-up | 200k training and learned-method test complete | The fixed 200,000-step checkpoint was evaluated on 200 held-out objects × 5 variants. Unified Chamfer changes from `0.00776417` to `0.00522955`, with 959/1000 improved samples; mean normal consistency decreases from `0.924252` to `0.895907`, so the distance/normal trade-off remains explicit. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
-| Future2000 external baselines | Incomplete, not final | Earlier sharded diagnostics are retained as failure evidence and are not promoted to a final comparison. |
+| Future2000 external baselines | Full-1000 comparison running | nvdiffrec completed 999/1000 cases, with one explicit zero/invalid-area failure. NDS-28V-full is running in eight Blackwell shards; remaining external arms and the final merge remain dependency/availability gated. No final ranking is claimed. |
 | Automated tests | Passing for the documented changes | Targeted external-adapter, same-initial aggregation, raw-loss, dynamic-expert/gate, image-feature, native-1920 and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
 
 The active method is the synthetic-current, current-query/current-graph,
@@ -61,12 +68,16 @@ direct-raw formulation established on Sofa50 and currently being scaled to the
 Future2000 2,000-object dataset. The query mesh and its connectivity define the
 graph used by both prediction and recovery. The supervised field is
 `L_current @ P_proxy`; it is a target only and is never passed to the model as
-an inference feature. The active Future2000 run uses the 960 high-frequency
-feature construction, 28 views, C2F2 and 200,000 optimiser steps.
+an inference feature. The completed Future2000 scale-up uses the 960
+high-frequency feature construction, 28 views, C2F2 and a fixed 200,000-step
+checkpoint; its full-1000 external comparison remains in progress.
 
 The earlier GT-query, `h^2`-normalised formulation remains useful historical
 context. Its transfer to expanded and OpenMVS query graphs did not improve
 geometry, and it is no longer the mathematical mainline described below.
+OpenMVS is additionally excluded from the target definition and from future
+model-selection or scaling decisions because its initial mesh quality is too
+poor for that role.
 
 ## Current training method
 
@@ -697,6 +708,11 @@ mesh.
 
 ### OpenMVS coarse-mesh recovery
 
+**Diagnostic-only warning.** These OpenMVS meshes are low-quality external
+inputs, not the desired output, target topology, pseudo-GT or a primary method
+endpoint. The table below is preserved as an OOD failure/robustness record and
+must not drive checkpoint selection or architecture conclusions.
+
 The test uses 48-view COLMAP/OpenMVS coarse meshes, the original 14 Sofa50 RGB
 views for prediction, the three 960 C2F2 checkpoints, OpenGL visibility at 480,
 and no GT differential transfer. Forty-eight meshes are evaluated; two coarse
@@ -709,6 +725,14 @@ meshes are absent.
 
 Increasing recovery from 200 to 1,000 iterations does not change the aggregate
 conclusion.
+
+A later 48-case projected-GT diagnostic gives unified Chamfer `0.0469163` for
+the initial OpenMVS meshes, `0.0440446` for projected positions, `0.0456376`
+after the projected-position raw Laplacian is passed through frozen recovery,
+and `0.0467913` for the archived learned prediction. Recovery retains 44.53%
+of the projected-position gain and learned prediction realizes 4.36%. These
+numbers decompose failure on poor OOD inputs; they do not make OpenMVS a target
+or a model-quality endpoint.
 
 ### 28-view current-graph target and loss-space ablation
 
@@ -855,7 +879,8 @@ shared initial mesh consequently appeared as both `0.00391323` and
 common initial and every final mesh using one deterministic 3,000-surface-point
 evaluator (seed 7). Native numbers are provenance-only and
 `contract_audit=true`. See the bilingual [incident report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md)
-and the [corrected final report](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md).
+for the corrected protocol. The generated final report remains a local artifact
+under the ignored `reports/` tree and is not distributed with the source repository.
 
 | Method | Unified final Chamfer ↓ | Improvement | Improved | Normal ↑ |
 |---|---:|---:|---:|---:|
@@ -961,9 +986,9 @@ per fixed optimizer-step budget.
 Worker-backed lazy-image training accepts
 `data_loading.multiprocessing_sharing_strategy`. Historical Future2000 recovery
 runs used `file_system` and non-persistent workers after descriptor exhaustion.
-The active seven-Blackwell run instead uses zero DataLoader workers and stages
-RGB observations to node-local storage, avoiding both descriptor and shared-
-memory failure modes. External-method comparison jobs are
+The completed seven-Blackwell run instead used zero DataLoader workers and
+staged RGB observations to node-local storage, avoiding both descriptor and
+shared-memory failure modes. External-method comparison jobs are
 documented in the [local runner guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 and should not be resubmitted through Slurm.
 
@@ -1019,10 +1044,14 @@ HPC report: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablati
 
 The report contains deterministic validation/test prediction metrics, the
 original-RGB/zero-RGB comparison and OpenMVS48 current-mesh recovery metrics.
+The OpenMVS portion is secondary, diagnostic-only evidence under the policy
+above; the synthetic-current endpoints determine the ablation conclusion.
 Arm B records higher best validation loss, test raw endpoint, test raw Top-10%
-endpoint, test raw Top-1% endpoint, OpenMVS refined Chamfer and OpenMVS P2S than
-Arm A. Arm B records lower test raw global cosine and OpenMVS refined normal
-consistency. Neither arm improves OpenMVS Chamfer over the initial meshes.
+endpoint and test raw Top-1% endpoint, and lower test raw global cosine; these
+controlled synthetic-current values determine the conclusion. In the separate
+non-decisional OpenMVS stress record, Arm B also has higher refined Chamfer/P2S
+and lower normal consistency, and neither arm improves over its poor initial
+OpenMVS mesh.
 
 ## Result locations on the HPC
 
@@ -1055,7 +1084,7 @@ execution is distinct from the Sofa50 same-initial comparison above. The
 released ExMesh 15-scene reproduction gate has passed (0.60484 mm reproduced
 mean CD versus 0.58 mm in the paper); the complete official six-method DTU
 benchmark remains gated by the scan-24 shared-coordinate-frame audit. The
-intended learned-method DTU scan-24 current-mesh lineage is documented in the
-[provenance report](reports/DTU_SCAN24_PREPARED_CURRENT_PROVENANCE.md); it was
-never generated, and the ExMesh PGSR mesh is explicitly rejected as a silent
-substitute.
+local provenance audit established that the intended learned-method DTU
+scan-24 current mesh was never generated; the ExMesh PGSR mesh is explicitly
+rejected as a silent substitute. Generated provenance reports remain under the
+ignored `reports/` tree.

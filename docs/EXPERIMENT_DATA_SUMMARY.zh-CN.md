@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-08-21 BST，Europe/London。
+状态日期：2026-08-22 BST，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -47,8 +47,10 @@ quantity；它不会对当前 target 做除法、clip 或 denormalization。`h^2
 | Synthetic current-query，14 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 14 / 960 | 完成并已复制到 HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query，28 views | 50 个对象，每个 5 个变体；变体划分 200/25/25 | 28 / 960 | 完成 | HPC：`sofa50_synthetic_current_28view_v1` |
 | Synthetic current-query，native 1920 | 与 960 相同的 250 IDs 和 200/25/25 split | 28 / 1920 | 数据、HF 训练与评估均完成 | HPC：`sofa50_synthetic_current_28view_native1920_v1` |
-| Future2000 GT-adaptive expanded current | 2,000 个对象，每个 5 个变体；变体划分 8000/1000/1000 | 28 / 960 | 数据完成；200k 从零训练快照到 188k | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
-| OpenMVS coarse-query | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成 | HPC：`openmvs_texture_test_v6_48view` |
+| Sofa50 多拓扑 raw-Laplacian v1 | 50 个对象、每个 10 个 variants；400/50/50 | 28 / 960 | 历史弱 smoothing 数据集已完成 | HPC：`Sofa50MultiTopologyRawLap500_v1` |
+| Sofa50 多拓扑 raw-Laplacian v2 | 与 v1 相同对象、variants 和 split | 28 / 960 | 500/500 审计通过；2×L40 20k 训练和统一 v1-v2 test/recovery 已完成 | HPC：`Sofa50MultiTopologyRawLap500_v2` |
+| Future2000 GT-adaptive expanded current | 2,000 个对象，每个 5 个变体；变体划分 8000/1000/1000 | 28 / 960 | 数据、固定 200k checkpoint 与 learned-method full-1000 test 已完成 | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
+| OpenMVS coarse-query 压力测试集 | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成；仅诊断，不作为目标 | HPC：`openmvs_texture_test_v6_48view` |
 | Thingi10K50 开发集 | 50 个对象；40/5/5 | 960 和 1920 变体 | 仅开发与 smoke run | 本地 `thingi10k50` 运行目录 |
 
 Synthetic-current 数据集包含 250 个静态样本。全部样本通过目标代数、current-graph `h^2` 回算、14 视图数量、对象级划分和图像路径检查。
@@ -108,12 +110,23 @@ runs/learned_laplacian/sofa50_c2_f2_1920_20000step_3seed
 
 ### OpenMVS coarse mesh
 
+这些 mesh 的 initial reconstruction quality 过差，不再作为 target 或决策端点；
+只保留为明确标注的 OOD 压力输入。详见
+[OpenMVS 输入使用政策](OPENMVS_INPUT_POLICY.zh-CN.md)。下列历史数值仅描述已执行
+诊断，不能用于排列目标质量或选择模型。
+
 | Recovery iterations | Mesh 数量 | Initial Chamfer | Ensemble refined Chamfer | 改善 mesh | Ensemble 新增翻转面 |
 |---:|---:|---:|---:|---:|---:|
 | 200 | 48 | 0.0212023 | 0.0213199 | 2/48 | 4,692 |
 | 1,000 | 48 | 0.0212023 | 0.0213198 | 2/48 | 4,734 |
 
 对象 `8ecad62d-fd41-4d86-87f0-5f640c46f238` 和 `d7e2c96f-76cd-4699-bbe7-c65f7cb8b8cd` 没有 OpenMVS coarse mesh。将 recovery iterations 从 200 增加到 1,000 不改变汇总结论。
+
+后续 projected-GT failure decomposition 的统一 Chamfer 为：initial
+`0.0469163`、projected-GT position oracle `0.0440446`、projected-GT oracle
+Laplacian on the OpenMVS graph 经冻结 recovery 后 `0.0456376`、归档 learned
+prediction `0.0467913`。Recovery 保留 position-oracle 增益的 44.53%，learned
+arm 实现 4.36%。这些只是低质量 OOD 输入上的诊断归因，模型选择权重为零。
 
 ## 已完成的消融实验
 
@@ -316,7 +329,7 @@ current-query training 的 query-distribution gap。历史 arm 早于 HF，因�
 
 ## Future2000 GT-adaptive 扩展实验
 
-快照时间：2026-08-21 BST。数据集包含 2,000 个源物体，每个物体 5 个
+状态更新：2026-08-23 BST。数据集包含 2,000 个源物体，每个物体 5 个
 确定性 expanded-current variants；object-level split 为 8,000 train、1,000
 validation、1,000 test。主分支使用 28 views、GT-adaptive subdivision、C2F2 和
 original-plus-HF features，raw current-graph target 为 `L_current @ P_proxy`。
@@ -344,9 +357,10 @@ device`）。配对 displacement jobs 15759/15760 已取消。这些 run 只保�
 
 Job 16607 使用 7 张 NVIDIA RTX PRO 6000 Blackwell Server Edition 从零启动，global
 batch 为 7；全部 RGB stage 到 node-local storage，DataLoader workers 为 0，output
-directory 中存在旧 checkpoint 时会直接拒绝启动。当前快照为
-188,000/200,000 steps，rolling train loss `1.72e-6`，最近完成的 step 182,880 附近
-validation 为 `2.87e-6`。尚无最终 test 或 recovery 结果。
+directory 中存在旧 checkpoint 时会直接拒绝启动。该 run 已产出固定 200,000-step
+checkpoint，并用于完整 held-out test。1,000 meshes 上统一 Chamfer 从 `0.00776417`
+降至 `0.00522955`，959/1000 samples 改善；mean normal consistency 从 `0.924252`
+降至 `0.895907`。External full-1000 arms 仍在运行，因此尚不报告最终跨方法排名。
 
 ## Sofa50 同初始网格外部 benchmark
 
@@ -358,8 +372,8 @@ identity 与 unified metric audits 通过。
 `0.00391323` 与 `0.01707047`，证明该表不具备 metric compatibility。修正聚合使用
 `evaluate_mesh_geometry`、3,000 surface samples 和 seed 7，对全部归档 initial/final
 mesh 统一重算。Native metrics 只作 provenance。详见双语
-[事故报告](CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md) 和
-[修正产物](../reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)。
+[事故报告](CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md)。修正产物保留在被忽略的
+本地 `reports/` 目录中，不随源码仓库分发。
 
 | 方法 | Initial Chamfer | Final Chamfer ↓ | Improvement | 改善数 | Normal ↑ |
 |---|---:|---:|---:|---:|---:|
@@ -423,8 +437,10 @@ mesh 统一重算。Native metrics 只作 provenance。详见双语
 | 15854 | Native-1920 + HF，20k | 已完成 | 4×L40；从零训练，global batch 4；完成全部 20,000 steps。 |
 | 15864/15865 | Native-1920 paired evaluation/report | 已完成 | Contract audit 通过；1920 未改善 Top-10%/Top-1% 或 mean Chamfer/P2S。 |
 | 16584 | GT-query direct-raw transfer，20k | 已完成 | 2×Blackwell；contract 通过；current-mesh recovery `4/25`，低于 current-query HF 的 `20/25`。 |
-| 16607 | Future2000 direct-raw + HF，200k | 快照时运行中 | 7×Blackwell；从零训练；188,000/200,000 steps，rolling train loss `1.72e-6`。 |
+| 16607 | Future2000 direct-raw + HF，200k | 固定 checkpoint 已完成 | 7×Blackwell；从零训练；200,000-step checkpoint 是 full-1000 评估使用的冻结 checkpoint。 |
 | 16736 | Sofa50 same-initial unified report | 已完成 | 四种方法均 25/25；使用 deterministic unified evaluator；`contract_audit=true`。 |
+| 17082 | Sofa50 多拓扑 strong-smoothing v2，20k | 已完成 | 2×L40；effective global batch 8；final/best validation `2.26915e-6`。 |
+| 17110–17113 | Sofa50 v1-v2 test/recovery 与 unified merge | 已完成 | Contract true；v2 raw EPE `0.00276820` 对 v1 `0.00840367`，但 refined Chamfer `0.00451747` 对 `0.00426879`。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 
@@ -438,6 +454,9 @@ Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于�
   runtime 为其 2.085 倍。
 - GT-sub1 的 validation loss 高于 GT 和 adaptive query-graph arms。
 - 已有 expanded-query 和 OpenMVS recovery 实验未降低 mean Chamfer。
+- OpenMVS 观察仅用于诊断：其低质量输入明确排除在 training target、checkpoint/
+  model selection 和 scale-up 决策之外。决策端点仍是 synthetic-current 与受控
+  same-initial evaluation。
 - Current-graph training 相对 frozen GT-query baseline 缩小了 synthetic-current
   recovery gap。在受控 28-view H2 消融中，direct raw-Laplacian training 最优，
   mean Chamfer 低于 initial mesh，并改善 19/25 test samples。

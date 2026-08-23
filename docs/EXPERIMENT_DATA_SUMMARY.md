@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-08-21 BST, Europe/London.
+Status date: 2026-08-22 BST, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -52,8 +52,10 @@ historical comparisons and diagnostics.
 | Synthetic current-query, 14 views | 50 objects, 5 variants each; 200/25/25 variants | 14 / 960 | Complete and copied to HPC | `~/sofa_mesh/sofa50_synthetic_current` |
 | Synthetic current-query, 28 views | 50 objects, 5 variants each; 200/25/25 variants | 28 / 960 | Complete | HPC: `sofa50_synthetic_current_28view_v1` |
 | Synthetic current-query, native 1920 | Same 250 IDs and 200/25/25 split as 960 | 28 / 1920 | Complete; HF training/evaluation complete | HPC: `sofa50_synthetic_current_28view_native1920_v1` |
-| Future2000 GT-adaptive expanded current | 2,000 objects, 5 variants each; 8000/1000/1000 variants | 28 / 960 | Prepared; 200k from-scratch training at 188k snapshot | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
-| OpenMVS coarse-query set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete | HPC: `openmvs_texture_test_v6_48view` |
+| Sofa50 multi-topology raw-Laplacian v1 | 50 objects, 10 variants each; 400/50/50 | 28 / 960 | Complete historical mild-smoothing dataset | HPC: `Sofa50MultiTopologyRawLap500_v1` |
+| Sofa50 multi-topology raw-Laplacian v2 | Same objects, variants and split as v1 | 28 / 960 | 500/500 audited; 2×L40 20k training and unified v1-v2 test/recovery complete | HPC: `Sofa50MultiTopologyRawLap500_v2` |
+| Future2000 GT-adaptive expanded current | 2,000 objects, 5 variants each; 8000/1000/1000 variants | 28 / 960 | Prepared; fixed 200k checkpoint and learned-method full-1000 test complete | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
+| OpenMVS coarse-query stress set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete; diagnostic only, not a target | HPC: `openmvs_texture_test_v6_48view` |
 | Thingi10K50 development set | 50 objects; 40/5/5 | 960 and 1920 variants | Development and smoke runs only | Local `thingi10k50` run directories |
 
 The synthetic-current dataset contains 250 static samples. All samples pass the
@@ -120,6 +122,11 @@ increase Chamfer relative to the initial expanded mesh.
 
 ### OpenMVS coarse meshes
 
+These meshes have poor initial reconstruction quality and are no longer a
+target or decision endpoint. They are retained only as labelled OOD stress
+inputs; see [the OpenMVS input policy](OPENMVS_INPUT_POLICY.md). The historical
+numbers below describe the executed diagnostic and do not rank target quality.
+
 | Recovery iterations | Meshes | Initial Chamfer | Ensemble refined Chamfer | Better meshes | Ensemble introduced flips |
 |---:|---:|---:|---:|---:|---:|
 | 200 | 48 | 0.0212023 | 0.0213199 | 2/48 | 4,692 |
@@ -128,6 +135,13 @@ increase Chamfer relative to the initial expanded mesh.
 Objects `8ecad62d-fd41-4d86-87f0-5f640c46f238` and
 `d7e2c96f-76cd-4699-bbe7-c65f7cb8b8cd` have no OpenMVS coarse mesh. Increasing
 the recovery iterations from 200 to 1,000 does not change the aggregate result.
+
+The later projected-GT failure decomposition reports unified Chamfer
+`0.0469163` (initial), `0.0440446` (projected-GT position oracle), `0.0456376`
+(projected-GT oracle Laplacian on the OpenMVS graph after frozen recovery) and
+`0.0467913` (archived learned prediction). Recovery retains 44.53% of the
+position-oracle gain; the learned arm realizes 4.36%. These are diagnostic
+attributions on a poor OOD input and carry zero model-selection weight.
 
 ## Completed ablations
 
@@ -349,7 +363,7 @@ single-variable normalization ablation.
 
 ## Future2000 GT-adaptive scale-up
 
-Snapshot: 2026-08-21 BST. The dataset contains 2,000 source objects and
+Status updated 2026-08-23 BST. The dataset contains 2,000 source objects and
 five deterministic expanded-current variants per object. Object-level splits
 contain 8,000 train, 1,000 validation and 1,000 test samples. The primary arm
 uses 28 views, GT-adaptive subdivision, C2F2, original-plus-HF features and the
@@ -378,12 +392,14 @@ workers, reached step 64,000, and then failed when a worker exhausted `/dev/shm`
 resumable. Paired displacement jobs 15759/15760 were cancelled. These runs are
 infrastructure-history records, not the active run.
 
-Job 16607 starts from scratch on seven NVIDIA RTX PRO 6000 Blackwell Server
+Job 16607 started from scratch on seven NVIDIA RTX PRO 6000 Blackwell Server
 Edition GPUs, uses global batch 7, stages all RGB files to node-local storage,
 sets DataLoader workers to zero and rejects any pre-existing checkpoint in its
-output directory. At the snapshot it is running at step 188,000/200,000. The
-rolling train loss is `1.72e-6`; the latest completed validation near step
-182,880 is `2.87e-6`. No final test or recovery result is available yet.
+output directory. It produced the fixed 200,000-step checkpoint subsequently
+used for the full held-out test. Across 1,000 meshes, unified Chamfer changes
+from `0.00776417` to `0.00522955` and 959/1000 samples improve; mean normal
+consistency changes from `0.924252` to `0.895907`. External full-1000 arms are
+still running, so no final cross-method ranking is claimed.
 
 ## Sofa50 controlled same-initial external benchmark
 
@@ -396,8 +412,8 @@ mesh then appeared as both `0.00391323` and `0.01707047`, proving that the table
 was not metric-compatible. The corrected aggregation evaluates every archived
 initial/final mesh with `evaluate_mesh_geometry`, 3,000 surface samples and
 seed 7. Native metrics are provenance-only. See the bilingual
-[incident report](CHAMFER_EVALUATION_INCIDENT_2026-08-21.md) and the
-[corrected artifact](../reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md).
+[incident report](CHAMFER_EVALUATION_INCIDENT_2026-08-21.md). The corrected
+artifact remains local under the ignored `reports/` tree.
 
 | Method | Initial Chamfer | Final Chamfer ↓ | Improvement | Improved | Normal ↑ |
 |---|---:|---:|---:|---:|---:|
@@ -464,8 +480,10 @@ directly with the canonical Sofa50 results.
 | 15854 | Native-1920 + HF, 20k | Completed | Four L40 GPUs; from scratch, global batch 4; completed all 20,000 steps. |
 | 15864/15865 | Native-1920 paired evaluation/report | Completed | Contract audit passed; 1920 does not improve Top-10%/Top-1% or mean Chamfer/P2S. |
 | 16584 | GT-query direct-raw transfer, 20k | Completed | Two Blackwell GPUs; contract passed; current-mesh recovery `4/25`, below current-query HF `20/25`. |
-| 16607 | Future2000 direct-raw + HF, 200k | Running at snapshot | Seven Blackwell GPUs; from scratch; step 188,000/200,000 and rolling train loss `1.72e-6`. |
+| 16607 | Future2000 direct-raw + HF, 200k | Fixed checkpoint complete | Seven Blackwell GPUs; from scratch; the 200,000-step checkpoint is the frozen full-1000 evaluation checkpoint. |
 | 16736 | Sofa50 same-initial unified report | Completed | Four methods at 25/25; deterministic unified evaluator; `contract_audit=true`. |
+| 17082 | Sofa50 multi-topology strong-smoothing v2, 20k | Completed | Two L40 GPUs; effective global batch 8; final/best validation `2.26915e-6`. |
+| 17110-17113 | Sofa50 v1-v2 test/recovery and unified merge | Completed | Contract true; v2 raw EPE `0.00276820` versus v1 `0.00840367`, but refined Chamfer `0.00451747` versus `0.00426879`. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model
@@ -484,6 +502,10 @@ or comparison result.
   query-graph arms.
 - Existing expanded-query and OpenMVS recovery experiments do not reduce mean
   Chamfer.
+- The OpenMVS observation is diagnostic only: its low-quality input meshes are
+  excluded from training targets, checkpoint/model selection and scale-up
+  decisions. Synthetic-current and controlled same-initial evaluations remain
+  the decision endpoints.
 - Current-graph training narrows the synthetic-current recovery gap relative to
   the frozen GT-query baseline. In the controlled 28-view H2 ablation, direct
   raw-Laplacian training is the best arm and lowers mean Chamfer below the

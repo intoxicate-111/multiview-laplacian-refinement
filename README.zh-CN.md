@@ -12,9 +12,9 @@
 
 Chamfer evaluator 事故：[中文报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md) | [English report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md)
 
-Sofa50 同初始网格外部对比：[修正后的最终报告](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)
-
 当前 Sofa50 受控消融：[Direct-raw/loss/expert/image-feature 报告](docs/SOFA50_CONTROLLED_ABLATIONS_REPORT.zh-CN.md)
+
+Sofa50 更强 coarse-mesh smoothing：[v2 中文说明](docs/SOFA50_STRONG_SMOOTHING_V2.zh-CN.md) | [English](docs/SOFA50_STRONG_SMOOTHING_V2.md)
 
 Future2000 本地对比任务：[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 
@@ -26,7 +26,11 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 
 ## 项目状态
 
-状态日期：2026-08-21 BST。
+状态日期：2026-08-23 BST。
+
+OpenMVS 使用政策：现有 Sofa50 OpenMVS mesh 是低质量外部重建，只保留为
+分布外压力测试；它不是 training target、pseudo-GT、模型选择端点或期望质量
+ceiling。详见 [OpenMVS 输入使用政策](docs/OPENMVS_INPUT_POLICY.zh-CN.md)。
 
 | 组件 | 状态 | 结论 |
 |---|---|---|
@@ -37,7 +41,8 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 | Sofa50 960 C2F2 训练 | 已完成 | 三个 seed 均完成 50,000 个 optimizer steps。C2F2 是当前 exact-query error 最低的配置。 |
 | Sofa50 1920 C2F2 训练 | 已完成 | 三个 seed 均完成 20,000 个 optimizer steps。平均 endpoint error 和 recovery Chamfer 高于 960 结果；平均 cosine 更高。 |
 | Expanded-query recovery | 已完成 | 对已评估的 960 和 1920 C2F2 checkpoint，五个 validation mesh 的 Chamfer 均增加。 |
-| OpenMVS coarse-mesh recovery | 50 个物体中完成 48 个 | 细化后的平均 Chamfer 增加。两个物体缺少 OpenMVS coarse mesh。 |
+| OpenMVS coarse-mesh recovery | 50 个物体中完成 48 个；仅诊断 | 低质量重建只作为 OOD 压力输入，不作为目标或决策端点。历史 refinement metrics 保留；两个物体缺少 OpenMVS coarse mesh。 |
+| OpenMVS projected-GT oracle 分解 | 已完成；仅诊断 | Position projection 令统一 Chamfer 改善 6.12%；冻结 recovery 保留其中 44.53%，learned prediction 最终实现 4.36%。该结果仅诊断低质量 OOD 输入上的失败，模型选择/scale-up 权重为零。 |
 | Oracle residual expert | 已关闭 | 2,000-step diagnostic 不支持该分支。 |
 | 14/28/56-view 消融 | 已完成 | 14、28、56 views 的 best validation loss 分别为 0.0139316、0.0130296、0.0138104。 |
 | Query-graph resolution 消融 | 已完成 | GT alias、GT-sub1、GT-adaptive 的 best validation loss 分别为 0.0139316、0.0614830、0.0145840；GT-sub2 未训练。 |
@@ -50,21 +55,25 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 | Learned dynamic residual expert 与 gate | 已完成 | Learned final 在 25/25 test samples 上的 raw EPE、Chamfer 和 P2S 均优于联合训练的 base。Validation-selected constant gate 与 5 个 mesh 内 shuffle 干预表明：expert 是主要贡献，vertex-level placement 还提供较小但可测的额外增益。 |
 | 960 image-feature 消融 | 已完成 | `F + (F-Gaussian(F))` 的 test raw EPE、RMS、Top-10% 和 Top-1% 最低；Gaussian-only 的 mean Chamfer、normal consistency 和改善数（`21/25`）最好。 |
 | Native-1920 + high-frequency residual | 已完成；非严格 resolution ablation | 4×L40、20,000-step 实验降低 Bottom-90% error，但相对 960+HF 恶化 test raw EPE/RMS、Top-10%/Top-1%、Chamfer 和 P2S；normal consistency 改善，flips 减少。Global batch 为 4 对 2。 |
+| Sofa50 多拓扑 coarse smoothing v2 | 20k 训练与受控 test/recovery 已完成 | Job `17082` 已在 2×L40 上从零完成，final/best validation 为 `2.26915e-6`。在相同 50 个 strong-smoothing test inputs 上，v2 将 raw EPE 从 v1 的 `0.00840367` 降到 `0.00276820`，但统一 refined Chamfer 更差（`0.00451747` vs `0.00426879`），normal 更低、flips 更多，改善数仅 26/50 对 38/50。更强 smoothing 改善 target prediction，但收益没有通过冻结 recovery contract 传递到 geometry。 |
 | GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
-| Future2000 GT-adaptive 扩展 | 从零训练中 | 7×Blackwell job 16607 在 8 月 21 日快照达到 188,000/200,000 steps。Rolling train loss 为 `1.72e-6`，最近完成的 step 182,880 附近 validation 为 `2.87e-6`；尚无最终 test/recovery 结论。 |
+| Future2000 GT-adaptive 扩展 | 200k 训练与 learned-method test 已完成 | 固定 200,000-step checkpoint 已在 200 个 held-out objects × 5 variants 上评估。统一 Chamfer 从 `0.00776417` 降至 `0.00522955`，959/1000 samples 改善；mean normal consistency 从 `0.924252` 降至 `0.895907`，因此明确保留 distance/normal trade-off。 |
 | Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |
-| Future2000 外部基线 | 未完成，不报告结论 | 早期分片诊断只保留为失败证据，不提升为正式对比。 |
+| Future2000 外部基线 | Full-1000 对比运行中 | nvdiffrec 完成 999/1000，另有一个 zero/invalid-area 显式失败；NDS-28V-full 正以 8 个 Blackwell shards 运行。其余 external arms 与最终 merge 仍受依赖和资源约束；当前不报告最终排名。 |
 | 自动化测试 | 当前文档改动对应检查通过 | External adapters、same-initial aggregation、raw loss、dynamic expert/gate、image feature、native-1920 和分布式训练相关 targeted tests 通过；下文命令仍是新 checkout 的最终依据。 |
 
 当前方法主线是在 Sofa50 上确定、并扩展到 Future2000 2,000-object 数据集的
 synthetic-current、current-query/current-graph、direct-raw formulation。Query mesh
 及其 connectivity 同时定义 prediction 与 recovery 使用的
 graph。监督场为 `L_current @ P_proxy`；它只作为 target，绝不会作为 inference
-feature 输入模型。当前 Future2000 run 使用 960 high-frequency feature construction、
-28 views、C2F2 与 200,000 optimizer steps。
+feature 输入模型。已完成的 Future2000 scale-up 使用 960 high-frequency feature
+construction、28 views、C2F2 与固定 200,000-step checkpoint；其 full-1000 external
+comparison 仍在运行。
 
 早期 GT-query、`h^2`-normalized formulation 仍作为历史背景保留。该路径迁移到
 expanded/OpenMVS query graph 后未改善 geometry，因此不再作为下文数学定义的主线。
+此外，由于 initial mesh 质量过差，OpenMVS 明确排除在 target 定义、模型选择与后续
+scale-up 决策之外。
 
 ## 当前训练方法
 
@@ -658,6 +667,10 @@ C2F2 的平均 refined Chamfer 为 `0.00116202`；1920 C2F2 为 `0.00125704`。�
 
 ### OpenMVS coarse-mesh recovery
 
+**仅诊断警告。** 这些 OpenMVS mesh 是低质量外部输入，不是期望输出、target
+topology、pseudo-GT 或主要方法端点。下表仅保留为 OOD failure/robustness 记录，
+不得用于 checkpoint 选择或 architecture 结论。
+
 该测试使用由 48 views 经 COLMAP/OpenMVS 生成的 coarse meshes、原始 14 个
 Sofa50 RGB views、三个 960 C2F2 checkpoints、480 分辨率 OpenGL visibility，且
 不传递 GT differential。共评估 48 个 meshes；两个 coarse meshes 不存在。
@@ -668,6 +681,12 @@ Sofa50 RGB views、三个 960 C2F2 checkpoints、480 分辨率 OpenGL visibility
 | 1,000 iterations | 0.0212023 | 0.0213198 | 2/48 | 4,734 |
 
 Recovery 从 200 增加到 1,000 iterations 未改变聚合结论。
+
+后续 48-case projected-GT 诊断的统一 Chamfer 为：OpenMVS initial `0.0469163`、
+projected positions `0.0440446`、projected-position raw Laplacian 经冻结 recovery
+后 `0.0456376`、归档 learned prediction `0.0467913`。Recovery 保留 position
+projection 潜在增益的 44.53%，learned prediction 最终实现 4.36%。这些数值只
+分解低质量 OOD 输入上的 failure，不会把 OpenMVS 变成 target 或模型质量端点。
 
 ### 28-view current-graph target 与 loss-space 消融
 
@@ -790,8 +809,8 @@ common evaluator 使用。四种方法均完成 `25/25`，input identity audit �
 同时出现 `0.00391323` 和 `0.01707047` 两个分数，该表因此失效。修正报告对 common
 initial 与全部 final mesh 使用同一个 deterministic 3,000-surface-point evaluator
 （seed 7）重算；native 数值仅保留为 provenance，`contract_audit=true`。详见双语
-[事故报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md) 与
-[修正后的最终报告](reports/synthetic_same_initial_benchmark_20260820/full_report/FINAL_REPORT.md)。
+[事故报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md)。生成的最终报告
+保留在被忽略的本地 `reports/` 目录中，不随源码仓库分发。
 
 | 方法 | Unified final Chamfer ↓ | Improvement | 改善数 | Normal ↑ |
 |---|---:|---:|---:|---:|
@@ -892,7 +911,7 @@ Global mesh batch 为 `world_size * gradient_accumulation_meshes`。
 
 使用 worker 的 lazy-image 训练支持
 `data_loading.multiprocessing_sharing_strategy`。历史 Future2000 recovery run 在
-descriptor exhaustion 后使用 `file_system` 和 non-persistent workers；当前
+descriptor exhaustion 后使用 `file_system` 和 non-persistent workers；已完成的
 7×Blackwell run 改用 0 个 DataLoader workers，并把 RGB observations stage 到
 node-local storage，从而同时规避 descriptor 与 shared-memory failure。外部方法对比
 由[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
@@ -949,6 +968,8 @@ Report: runs/learned_laplacian/sofa50_synthetic_current_28view_jitter_ablation_s
 
 Report 包含 deterministic validation/test prediction metrics、
 original-RGB/zero-RGB comparison 和 OpenMVS48 current-mesh recovery metrics。
+其中 OpenMVS 部分只作为次要诊断证据；该消融结论由 synthetic-current endpoints
+决定。
 
 ## HPC 结果目录
 
@@ -979,5 +1000,6 @@ common contract 抽取、失败记录规则以及六方法单场景 sanity gate 
 15-scene 复现 gate 已通过（复现 mean CD 0.60484 mm，论文 0.58 mm）。官方
 six-method DTU benchmark 与上面的 Sofa50 same-initial comparison 相互独立；其完整
 执行仍由 scan-24 shared-coordinate-frame audit 控制。Learned-method 预期使用的
-DTU scan-24 current mesh lineage 见[溯源报告](reports/DTU_SCAN24_PREPARED_CURRENT_PROVENANCE.md)：
-该 mesh 从未生成，且明确禁止把 ExMesh PGSR mesh 静默替代为 primary input。
+DTU scan-24 current mesh 经本地 lineage audit 确认从未生成，且明确禁止把 ExMesh
+PGSR mesh 静默替代为 primary input。生成的 provenance report 保留在被忽略的本地
+`reports/` 目录中。
