@@ -132,6 +132,41 @@ encoder/feature-construction/sampling 路径执行 gradient checkpointing。这�
 activation memory，不改变数学输出或梯度；full/chunked 路径已通过等价测试。
 它们不允许改变 optimizer-step budget，也不能隐藏 global-batch 差异。
 
+## Recovery-aware 与 direct-vertex 训练模式
+
+当前 `Sofa50MultiTopologyRawLap500_v2` 研究关闭 confidence head 与历史 recovery
+gates。Laplacian Arms A-D 统一用以下公式评估：
+
+```text
+min_V ||L @ V - delta_pred||_F^2 + lambda ||V - V_input||_F^2
+```
+
+Arm A 只训练既有 raw-Laplacian Huber loss。Arms B-D 在训练中执行同一系统的
+differentiable PCG，并加入：
+
+```text
+L_vertex = mean_i ||V_refine[i] - V_clean[i]||_2^2
+L_total = L_lap + beta * L_vertex
+```
+
+`V_clean` 只保存在 loss-side prepared object，并从传给 model 的 mapping 中删除。
+Solve 只能看到 `L`、`delta_pred` 与 `V_input`。Arm B 使用
+`lambda=beta=1e-2`；C/D 保持 `beta=1e-2`，只把 lambda 改为 `1e-3/1e-4`。
+Runtime diagnostics 记录 PCG iterations/residual/failures、gradient norms、NaN/Inf
+和 peak GPU memory。
+
+Arm E 复用相同 `N x 3` predictor head，但修改 target semantics：
+
+```text
+delta_v_target = V_clean - V_input
+V_refined = V_input + delta_v_pred
+L_E = mean_i ||delta_v_pred[i] - delta_v_target[i]||_2^2
+```
+
+E 不允许使用 Laplacian target/operator、sparse solver、lambda、visibility、
+confidence、recovery Huber、Adam 或 post-processing。完整合同见
+[A-E 研究说明](SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md)。
+
 ## 启动完整训练
 
 正式启动脚本为：
@@ -299,5 +334,5 @@ PYTHONPATH=src conda run --no-capture-output -n test pytest -q
 ```
 
 Learned-Laplacian 相关测试覆盖 lazy loading、GT-query leakage guard、query
-perturbation bounds、Fourier encoding、image ablation、mesh-count scaling、AMP 和
-Sofa50 preparation。
+perturbation bounds、Fourier encoding、image ablation、mesh-count scaling、AMP、
+differentiable sparse recovery、direct-displacement semantics 和 Sofa50 preparation。

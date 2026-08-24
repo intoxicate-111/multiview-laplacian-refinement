@@ -2,6 +2,24 @@
 
 Date: 2026-08-06
 
+## 2026-08-24 scope correction
+
+The decision below is a historical expanded-query/GT-query result. It showed
+that a hard mask was less catastrophic than fitting every unreliable equation
+from that out-of-distribution frozen checkpoint; it does **not** establish hard
+visibility as the current matched-domain recovery design.
+
+The later `Sofa50MultiTopologyRawLap500_v2` exact-target ablation holds the
+current graph, exact raw target, L2 solve and `0.01` anchor fixed. Adding hard
+any-view visibility lowers mean recovery efficiency from `0.34258` to
+`0.16875` and worsens 44/50 samples. Confidence is nearly constant and adds no
+material recovery. The current A-D study consequently uses every Laplacian row
+with regularised sparse integration and no visibility/confidence/recovery
+Huber/Adam. See [the current recovery-aware study](SOFA50_RECOVERY_AWARE_STUDY.md).
+
+The original experiment, numbers and conclusion remain below for provenance;
+they must be read within their 2026-08-06 expanded-query scope.
+
 ## Decision
 
 Hard any-view visibility gating is necessary but not sufficient. On the five real

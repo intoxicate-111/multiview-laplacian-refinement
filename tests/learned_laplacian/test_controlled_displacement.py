@@ -14,6 +14,7 @@ from mlr.learned_laplacian.controlled_displacement import (
     recover_direct_displacement,
 )
 from mlr.learned_laplacian.multi_trainer import (
+    _direct_vertex_residual_mse,
     _prepare_object_static,
     train_multi_object,
 )
@@ -38,10 +39,12 @@ def _config() -> dict:
         "training": {
             "learning_rate": 0.01,
             "weight_decay": 0.0,
-            "loss": "huber",
+            "loss": "mse",
             "huber_delta": 0.1,
             "prediction_loss_space": "output_representation",
             "gradient_clip_norm": 1.0,
+            "vertex_sampling": {"mode": "full"},
+            "direct_vertex_runtime_diagnostics": True,
         },
         "multi_object_training": {
             "epochs": 1,
@@ -50,6 +53,7 @@ def _config() -> dict:
             "shuffle": False,
             "validation_every_epochs": 1,
             "checkpoint_every_epochs": 0,
+            "report_every_optimizer_steps": 1,
         },
     }
 
@@ -87,6 +91,15 @@ def test_displacement_target_and_direct_recovery_are_exact() -> None:
     )
 
 
+def test_direct_vertex_loss_matches_sum_of_xyz_squared_error() -> None:
+    prediction = torch.tensor([[1.0, 2.0, 3.0], [0.0, -1.0, 2.0]])
+    target = torch.zeros_like(prediction)
+    assert torch.equal(
+        _direct_vertex_residual_mse(prediction, target),
+        torch.tensor((14.0 + 5.0) / 2.0),
+    )
+
+
 def test_preparation_uses_displacement_label_without_gt_model_input() -> None:
     sample = _sample("prepared")
     prepared = _prepare_object_static(sample, _config())
@@ -114,3 +127,12 @@ def test_displacement_mode_trains_and_validates_with_same_backbone(tmp_path) -> 
     assert result.final_validation_loss is not None
     assert math.isfinite(result.final_validation_loss)
     assert (tmp_path / "checkpoint_latest.pt").is_file()
+    step = __import__("json").loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert float(step["prediction_displacement_rms"]) >= 0
+    assert float(step["prediction_displacement_mean"]) >= 0
+    assert float(step["delta_v_gradient_norm"]) > 0
+    assert float(step["graph_block_gradient_norm"]) > 0
+    assert float(step["prediction_head_gradient_norm"]) > 0
+    assert int(step["nan_inf_count"]) == 0

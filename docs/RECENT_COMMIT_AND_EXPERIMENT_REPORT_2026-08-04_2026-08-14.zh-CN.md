@@ -229,6 +229,9 @@ Top-10% EPE 比 GT-adaptive 高 `1.57%`，未通过预设的全部四项 retenti
 
 #### Expanded-query / OpenMVS
 
+> 2026-08-22 解释更新：OpenMVS initial reconstruction 质量过差，只作为历史
+> OOD 压力测试保留；不是 target、pseudo-GT、checkpoint 选择或 scale-up 端点。
+
 | 场景 | Initial Chamfer | Refined Chamfer | 改善数 | 结论 |
 |---|---:|---:|---:|---|
 | Expanded C2F2 960 | 0.000652884 | 0.00116244 | 每 seed 0/5 | 退化 |
@@ -282,7 +285,8 @@ Top-k replacement 的核心结果：
 | OpenMVS refined Chamfer | 0.025067426 | 0.025249771 | +0.000182345 |
 | OpenMVS refined P2S | 0.024900180 | 0.025077573 | +0.000177393 |
 
-Jitter arm 在 5/5 paired OpenMVS meshes 上 Chamfer 更高；当前合同不支持启用
+Jitter arm 在 5/5 paired OpenMVS 压力输入上 Chamfer 更高；该记录不参与决策，
+而受控 synthetic-current endpoint 已足以表明当前合同不支持启用
 `std=0.003h`、cap=`0.009h` 的 training-only local query jitter。
 
 ### 3.7 H2 / raw-Laplacian 三组主对照
@@ -333,11 +337,11 @@ R1/R3 Chamfer 已分别比 B baseline 高 `4.87%`/`19.61%`。固定 prepared vis
 | 28 views 相对 14 views 降低 val loss | 支持 | `-6.47%` |
 | 56 views 在所有指标上优于 28 views | 不支持 | raw error 更低，但 val loss `+5.99%`、runtime `2.085×` |
 | 1920 自动优于 960 | 不支持 | 不等预算下 mean EPE/Chamfer 更高 |
-| 增加 recovery iterations 解决 OpenMVS gap | 不支持 | 200→1,000 iterations 几乎不变 |
+| 增加 recovery iterations 改善 OpenMVS 压力输入 | 不支持；仅诊断 | 200→1,000 iterations 几乎不变；不参与后续方法决策 |
 | 额外训练 steps 必然改善 geometry | 不支持 | 20k→50k loss 降而 Chamfer/P2S 升 |
 | Exact current-graph target 可改善 geometry | 支持 | oracle `25/25`，Chamfer 相对 initial `-18.87%` |
 | Top 1% residual 单独解释全部 gap | 不支持 | 仅关闭 33.20%–36.85% Chamfer gap |
-| 当前 local jitter 配置有效 | 不支持 | prediction 与 OpenMVS geometry 均退化 |
+| 当前 local jitter 配置有效 | 不支持 | 主要 synthetic prediction endpoint 退化；OpenMVS 仅作非决策性压力记录 |
 | Direct raw-Laplacian 优于 A/C | 支持 | 最低 raw error/Chamfer，`19/25` |
 | 冻结 B 递归三轮继续提升 | 不支持 | `19→12→7→2/25` |
 | 当前 X1 stage-2 适配超过冻结 B | 不支持 | `16/25`、Chamfer `0.00384032`，且丢失 5 个原成功样本 |

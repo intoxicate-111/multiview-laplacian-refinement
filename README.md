@@ -8,6 +8,8 @@ Training guide: [Multi-mesh training](docs/MULTI_MESH_TRAINING.md)
 
 Visibility and recovery: [Visibility-aware recovery report](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
 
+Current recovery-aware study: [English](docs/SOFA50_RECOVERY_AWARE_STUDY.md) | [中文](docs/SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md)
+
 Experiment metrics and run status: [Experiment data summary](docs/EXPERIMENT_DATA_SUMMARY.md)
 
 Chamfer evaluator incident: [English report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md) | [中文报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md)
@@ -26,7 +28,7 @@ View-count and query-resolution results: [Ablation report](runs/learned_laplacia
 
 ## Project status
 
-Status date: 2026-08-23 BST.
+Status date: 2026-08-24 BST.
 
 OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
 reconstructions and are retained only as out-of-distribution stress tests.
@@ -57,20 +59,25 @@ desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLIC
 | 960 image-feature ablation | Complete | `F + (F-Gaussian(F))` has the lowest test raw EPE, RMS, Top-10% and Top-1% errors. Gaussian-only features have the best mean Chamfer, normal consistency and improved count (`21/25`). |
 | Native-1920 plus high-frequency residual | Complete; non-strict resolution ablation | The 20,000-step four-L40 run lowers Bottom-90% error but worsens test raw EPE/RMS, Top-10%/Top-1%, Chamfer and P2S versus 960+HF. Normal consistency improves and flips decrease. Global batch is 4 versus 2. |
 | Sofa50 multi-topology coarse smoothing v2 | 20k training and controlled test/recovery complete | Job `17082` completed from scratch on 2×L40 with final/best validation `2.26915e-6`. On the same 50 strong-smoothing test inputs, v2 lowers raw EPE from v1's `0.00840367` to `0.00276820`, but unified refined Chamfer is worse (`0.00451747` vs `0.00426879`), normal consistency is lower, flips are higher and only 26/50 improve versus 38/50. Stronger smoothing improves target prediction but does not transfer through the frozen recovery contract. |
+| Exact-target sparse-recovery diagnosis | Complete | A centroid-gauged all-equation sparse solve reaches mean oracle efficiency `0.92366` on v2. Adding hard visibility after the `0.01` anchor lowers mean efficiency from `0.34258` to `0.16875` and worsens 44/50 samples; confidence is negligible and 2,000 Adam steps do not remove the collapse. |
+| Recovery-aware Arm A/B | Complete | With the same `lambda=beta=10^-2` sparse recovery, Arm B lowers test Chamfer from Arm A's `0.00395529` to `0.00358497` and recovered vertex RMS from `0.0135181` to `0.0115532`, despite worse raw EPE. This supports geometric-utility supervision rather than raw-regression improvement. |
+| Recovery-aware Arms C/D | Running/queued | Arm C (`lambda=10^-3`) job `17274` is running on 8×Blackwell; Arm D (`10^-4`) job `17275` follows it. The objective and `10^-4` PCG tolerance are fixed; float64/2,048-iteration PCG is a documented stability execution change. No result is claimed yet. |
+| Direct-vertex Arm E | Audited and queued | The 826,115-parameter C2F2+HF model predicts `Delta V` and uses only same-index vertex MSE; it contains no Laplacian target, sparse solver or recovery gate. Job `17278` follows D, so the H1-versus-H2 representation conclusion remains open. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
 | Future2000 GT-adaptive scale-up | 200k training and learned-method test complete | The fixed 200,000-step checkpoint was evaluated on 200 held-out objects × 5 variants. Unified Chamfer changes from `0.00776417` to `0.00522955`, with 959/1000 improved samples; mean normal consistency decreases from `0.924252` to `0.895907`, so the distance/normal trade-off remains explicit. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
-| Future2000 external baselines | Full-1000 comparison running | nvdiffrec completed 999/1000 cases, with one explicit zero/invalid-area failure. NDS-28V-full is running in eight Blackwell shards; remaining external arms and the final merge remain dependency/availability gated. No final ranking is claimed. |
+| Future2000 external baselines | Full-1000 comparison complete with explicit invalid metrics | Ours has the lowest aggregate valid-sample Chamfer (`0.00522955`) and improves 959/1000 inputs. Paired Chamfer wins are 742/998 vs NDS, 632/999 vs NDS-28V-full, 799/999 vs nvdiffrec and 955/996 vs ExMesh. Input-contract audit passes; strict/full metric completeness remains false because invalid outputs and ExMesh topology changes are preserved rather than repaired. |
 | Automated tests | Passing for the documented changes | Targeted external-adapter, same-initial aggregation, raw-loss, dynamic-expert/gate, image-feature, native-1920 and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
 
-The active method is the synthetic-current, current-query/current-graph,
-direct-raw formulation established on Sofa50 and currently being scaled to the
-Future2000 2,000-object dataset. The query mesh and its connectivity define the
-graph used by both prediction and recovery. The supervised field is
-`L_current @ P_proxy`; it is a target only and is never passed to the model as
-an inference feature. The completed Future2000 scale-up uses the 960
-high-frequency feature construction, 28 views, C2F2 and a fixed 200,000-step
-checkpoint; its full-1000 external comparison remains in progress.
+The active representation is the synthetic-current, current-query/current-
+graph, direct-raw formulation established on Sofa50. The current recovery
+study integrates every predicted Laplacian row with a regularised sparse solve;
+hard visibility, confidence, recovery Huber and Adam mesh optimisation are
+disabled. The supervised field `L_current @ P_proxy` is a target only and is
+never passed to the model as an inference feature. The completed Future2000
+scale-up uses the 960 high-frequency construction, 28 views, C2F2 and a fixed
+200,000-step checkpoint; its full-1000 same-initial external comparison is now
+complete, with invalid method outputs retained explicitly.
 
 The earlier GT-query, `h^2`-normalised formulation remains useful historical
 context. Its transfer to expanded and OpenMVS query graphs did not improve
@@ -119,12 +126,14 @@ current mesh vertices
   -> project into 28 calibrated views
   -> aggregate original + high-frequency image features
   -> predict delta_pred_raw directly
-  -> confidence/visibility-weighted Laplacian recovery
+  -> all-equation regularised sparse Laplacian integration
 ```
 
 GT geometry is used only for constructing supervision and evaluation. The
-dynamic residual expert, gate, direct-displacement branch and raw-MSE loss are
-controlled ablations and are not enabled in the active direct-raw + HF mainline.
+recovery-aware arms use clean vertices only in the training-side vertex loss;
+they never enter the model or sparse solve. The dynamic residual expert, gate
+and raw-MSE loss remain completed controlled ablations. Direct displacement is
+now the separately audited Arm E control, not part of Arms A-D.
 
 ## Mathematical specification
 
@@ -286,9 +295,9 @@ of four with gradient checkpointing; these are execution choices, not a change
 to the feature definition. In the masked aggregation above, the active branch
 therefore samples `F_v^out` rather than the untransformed `F_v`.
 
-### Visibility, confidence and Gaussian gates
+### Feature visibility and historical recovery gates
 
-The mainline renderer gate is a strict any-view gate:
+The any-view mask retained by the historical recovery path is
 
 $$
 m_i=\mathbf 1\!\left[\sum_{v=1}^{M}z_{vi}>0\right].
@@ -308,7 +317,7 @@ Variables: `x_i` is the complete vertex representation defined below;
 `g_theta` is the confidence side head sharing the training parameter set; and
 `c_i` is its bounded predicted reliability for vertex `i`.
 
-The mainline recovery weight is
+Its historical recovery weight is
 
 $$
 w_i=m_i c_i.
@@ -338,8 +347,10 @@ head function `g_theta` above.
 Here `d_i^surface` is the distance from a coarse query to the GT surface and
 `s` is `distance_confidence_scale`. This Gaussian gate is not renderer
 visibility and is not used by the current synthetic-current training path.
-Mainline training uses `z_vi` for image-feature sampling; mainline recovery
-uses `m_i c_i`.
+The active recovery-aware study uses `z_vi` only for image-feature sampling.
+Every row of `L_current` enters its sparse solve with unit weight. The formulas
+`m_i`, `c_i` and `w_i=m_i c_i` document the frozen historical baseline, not
+the A-D solver.
 
 ### Vertex representation and graph network
 
@@ -390,8 +401,9 @@ vertex input has `39 + 3 + 1 + 1 + 1 + 128 = 173` channels. These terms are
 position encoding, normal, log relative edge scale, log degree, valid-view
 ratio and aggregated image feature. The graph backbone is
 `173 -> 256 -> 256`, followed by three 256-channel message-passing blocks and
-an output MLP `256 -> 256 -> 3`. The confidence side head is
-`173 -> 256 -> 1` with a final sigmoid.
+an output MLP `256 -> 256 -> 3`. Historical confidence-enabled configurations
+add a `173 -> 256 -> 1` sigmoid side head; Arms A-E disable it and retain
+826,115 parameters.
 
 After an input MLP, graph layer `l` computes
 
@@ -465,91 +477,89 @@ full-vertex contract assigns unit weight to valid non-isolated vertices and
 zero weight to invalid local scales. There is no curvature weighting, and the
 predicted confidence does not enter this primary loss.
 
-The confidence side head uses detached prediction error:
+Arm A uses only this raw-field objective:
 
 $$
-\widetilde c_i=\mathrm{clip}(c_i,c_{\min},1),
+\mathcal L_A=\mathcal L_{\mathrm{lap}}.
 $$
 
-Variables: `c_i` is predicted confidence, `c_min=10^-4` is its numerical lower
-bound, `clip` truncates to the stated interval, and `c_tilde_i` is the value
-used by the confidence loss.
+Variables: `L_A` is the full Arm-A training objective and `L_lap` is the raw-
+Laplacian Huber loss above. Arms B-D add the recovery-aware vertex term defined
+in the next subsection. Their confidence head and confidence loss are disabled.
+
+Historical confidence-enabled runs used a detached error-calibration side loss
+`L_conf`; that formula remains implemented for reproduction but is not part of
+the current A-E study.
+
+### Regularised sparse integration and recovery-aware supervision
+
+For Arms A-D, recover positions from every predicted Laplacian equation:
 
 $$
-\mathcal L_{\mathrm{conf}}=
-\frac{\sum_i a_i
-\left[\widetilde c_i\,\mathrm{stopgrad}(e_i)
--\beta\log\widetilde c_i\right]}
-{\max(10^{-12},\sum_i a_i)}.
+\widehat X_\lambda=
+\arg\min_X
+\left\lVert L_{\mathrm{current}}X-\delta^{\mathrm{pred,raw}}\right\rVert_F^2
++\lambda\left\lVert X-X_0\right\rVert_F^2.
 $$
 
-Variables: `L_conf` is the auxiliary confidence objective; `a_i` and `e_i` are
-defined above; `stopgrad` treats prediction error as a constant for this head;
-and `beta=0.01` weights the logarithmic barrier that discourages confidence
-collapse.
+Variables: `X in R^(N x 3)` is the unknown mesh, `X_0 in R^(N x 3)` is the
+input mesh, `L_current in R^(N x N)` is its fixed row-normalised uniform
+Laplacian, `delta^(pred,raw) in R^(N x 3)` is the network output,
+`X_hat_lambda` is the unique regularised solution, and `lambda>0` controls
+fidelity to the input positions. There is no row mask or learned row weight.
 
-The complete optimisation objective is
-
-$$
-\mathcal L_{\mathrm{train}}
-=\mathcal L_{\mathrm{lap}}
-+\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}}.
-$$
-
-Variables: `L_train` is the scalar objective differentiated during training;
-`L_lap` is the primary prediction loss, `L_conf` is the auxiliary confidence
-loss, and `lambda_conf=1` is its configured coefficient.
-
-with `beta = 0.01`, `c_min = 10^-4`, and `lambda_conf = 1` in the mainline
-configuration. Predicted confidence does not reweight
-`L_lap`; this prevents the confidence head from suppressing the primary
-supervision.
-
-### Laplacian recovery objective
-
-For the fixed current graph `(X_0, F)`, construct `L_current` and
-`h_current`, then recover vertex positions `X` from `delta_pred_raw`. The mainline
-dense objective is
+The solve is equivalently
 
 $$
-\mathcal L_{\mathrm{rec}}(X)=
-\lambda_{\mathrm{lap}}
-\sum_{i,k}H_\tau\!\left(
-\sqrt{w_i}\left[(L_{\mathrm{current}}X)_{ik}
--\delta_{ik}^{\mathrm{pred,raw}}\right]\right)
-+\frac{\lambda_{\mathrm{anchor}}}{2}\lVert X-X_0\rVert_F^2
-+\mathcal L_{\mathrm{edge}}+\mathcal L_{\mathrm{unseen}}.
+(L_{\mathrm{current}}^\top L_{\mathrm{current}}+\lambda I)
+\widehat X_\lambda
+=L_{\mathrm{current}}^\top\delta^{\mathrm{pred,raw}}+\lambda X_0.
 $$
 
-Variables: `X in R^{N x 3}` is the unknown refined mesh and `X_0` its fixed
-initial positions; `L_current` is the fixed current-graph operator;
-`delta^(pred,raw)` is the network field; `w_i` weights the complete row;
-`lambda_lap` and `lambda_anchor` weight Laplacian fitting and anchoring;
-`||.||_F` is the Frobenius norm; and `L_edge`/`L_unseen` are optional edge and
-invisible-vertex terms (both disabled in the mainline). Indices `i` and `k`
-range over vertices and the three Cartesian components, and `H_tau` is the
-training Huber function defined above.
+Variables: `L_current^T` is the transpose operator and `I` is the `N x N`
+identity. Evaluation uses sparse LSMR; recovery-aware training uses a
+differentiable sparse PCG solve of the same system.
 
-The current mainline values are `lambda_lap = 1`,
-`lambda_anchor = 0.01`, `lambda_edge = 0`, and
-`lambda_unseen_anchor = 0`. The visibility/confidence weight applies to the
-complete Laplacian equation row through `sqrt(w_i)`.
-
-For large uniform-Laplacian meshes, the sparse solver uses the corresponding L2
-form:
+With same-index clean vertices, Arms B-D add
 
 $$
-\mathcal L_{\mathrm{sparse}}(X)=
-\frac{\lambda_{\mathrm{lap}}}{N}
-\left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred,raw}})\right\rVert_F^2
-+\frac{\lambda_{\mathrm{anchor}}}{N}\lVert X-X_0\rVert_F^2,
-\qquad W=\mathrm{diag}(w).
+\mathcal L_{\mathrm{vertex}}=
+\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert\widehat X_{\lambda,i}-X_i^*\right\rVert_2^2,
+\qquad
+\mathcal L_{B,C,D}=\mathcal L_{\mathrm{lap}}
++\beta\mathcal L_{\mathrm{vertex}},
+\quad \beta=10^{-2}.
 $$
 
-Variables: `N` is the number of vertices, `W in R^{N x N}` is diagonal with
-entries `w_i`, and `W^(1/2)` applies square-root row weights. All remaining
-symbols match the dense objective; this sparse variant uses squared L2/Frobenius
-penalties rather than component-wise Huber penalties.
+Variables: `X_i*` is the clean position corresponding exactly to current
+vertex `i`, `L_vertex` is the mean squared 3D position error, and `beta` is its
+training coefficient. Clean vertices are loss-only and never enter the model
+or solve. Arm B uses `lambda=10^-2`; C and D test `10^-3` and `10^-4`.
+
+Arm E instead predicts a direct residual with no Laplacian path:
+
+$$
+\Delta X^{\mathrm{pred}}=f_\theta(I,K,E,X_0,F),
+\qquad
+X^{\mathrm{refined}}=X_0+\Delta X^{\mathrm{pred}},
+$$
+
+$$
+\Delta X^*=X^*-X_0,
+\qquad
+\mathcal L_E=\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert\Delta X_i^{\mathrm{pred}}-\Delta X_i^*\right\rVert_2^2.
+$$
+
+Variables: `Delta X_pred` is Arm E's `N x 3` output, `Delta X*` is the exact
+clean displacement and `L_E` is direct vertex-space MSE. Arm E uses the same
+encoder/backbone/head width but no `L`, sparse solver, lambda or post-process.
+
+The old visibility/confidence-weighted Huber/Adam recovery remains a frozen
+historical baseline. Exact-target matched-domain diagnostics show that its hard
+visibility intervention is the largest tested recovery-efficiency loss, so it
+must not be described as the active recovery design.
 
 ### Reported metrics
 
@@ -612,8 +622,17 @@ shortest point-to-triangle-surface distance; and `|.|` denotes set cardinality.
 The corrected same-initial benchmark fixes `n=3000` and `s=7`; other reports
 serialize their own sample count and base seed.
 
-where `S_A` and `S_B` are triangle surfaces and `V_B'` is the evaluated or
-subsampled GT vertex set.
+For same-topology recovered geometry, the reported vertex RMS is
+
+$$
+\mathrm{RMS}_{\mathrm{vertex}}=
+\sqrt{\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert X_i^{\mathrm{refined}}-X_i^*\right\rVert_2^2}.
+$$
+
+Variables: `X_i^refined` and `X_i*` are the recovered and clean positions with
+the same vertex index, and `N` is the mesh vertex count. This correspondence
+metric complements, rather than replaces, the surface Chamfer metric.
 
 ### Historical `h^2`-normalised formulation
 
@@ -810,6 +829,27 @@ improving mean downstream geometry. Adding `F-Gaussian(F)` to the original
 feature gives the best prediction and tail metrics and still improves mean
 Chamfer/P2S over original Arm B.
 
+### Strong-smoothing sparse recovery and recovery-aware training
+
+The v2 exact-target sparse oracle reaches mean efficiency `0.92366` when every
+Laplacian row is used and component centroids fix only translation. Under the
+old frozen recovery, hard visibility is the largest tested efficiency loss;
+confidence is effectively constant and additional Adam steps do not close the
+gap. The active study therefore uses regularised all-equation sparse recovery.
+
+Completed A/B test results are:
+
+| Arm | Raw EPE ↓ | Raw RMS ↓ | Chamfer ↓ | Eta ↑ | P2S p95 ↓ | Normal ↑ | Vertex RMS ↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A: Lap only | **0.00252641** | 0.00737725 | 0.00395529 | 0.07206 | 0.0122582 | 0.954902 | 0.0135181 |
+| B: Lap + recovery-aware vertex | 0.00263986 | **0.00683290** | **0.00358497** | **0.13036** | **0.0105581** | **0.959366** | **0.0115532** |
+
+Arm B wins paired Chamfer on 32/50 and vertex RMS on 43/50, while winning raw
+EPE on only 10/50. Arms C/D (`lambda=10^-3/10^-4`) and the direct-vertex Arm E
+are still dependency-gated; see the [current study contract and live-status
+snapshot](docs/SOFA50_RECOVERY_AWARE_STUDY.md). No H1/H2 conclusion is drawn
+before the matched A-E evaluation.
+
 ### Native 1920 plus high-frequency residual, complete
 
 The native-1920 dataset contains the same 250 sample IDs, object-level
@@ -863,8 +903,16 @@ then failed when a DataLoader worker exhausted `/dev/shm` (`Bus error` and `No
 space left on device`). These runs are retained as infrastructure history only.
 Job 16607 does not reuse either checkpoint: RGB files are staged to node-local
 storage, workers are disabled, and overwrite/resume guards enforce the
-from-scratch contract. At the 21 August snapshot it is at 94%; final test and
-geometry evaluation must wait for step 200,000.
+from-scratch contract. It completed the fixed 200,000-step checkpoint. The
+full 1,000-sample learned-method evaluation changes unified Chamfer from
+`0.00776417` to `0.00522955`, with 959/1000 samples improved.
+
+The same-initial external comparison is also complete. Ours has the lowest
+aggregate valid-sample Chamfer; paired wins are 742/998 against NDS, 632/999
+against NDS-28V-full, 799/999 against nvdiffrec and 955/996 against ExMesh.
+The input contract passes, while strict/full metric completeness stays false:
+invalid method outputs and ExMesh connectivity changes remain explicit and are
+not repaired or silently imputed.
 
 ### Sofa50 same-initial external comparison
 

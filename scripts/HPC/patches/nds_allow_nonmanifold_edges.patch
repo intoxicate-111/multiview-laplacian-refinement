@@ -14,3 +14,15 @@ index 01539ce..50a18b2 100644
  
      if use_legacy_impl:
          # Legacy implementation that uses a Python loop
+diff --git a/reconstruct.py b/reconstruct.py
+--- a/reconstruct.py
++++ b/reconstruct.py
+@@ -225 +225,4 @@
+-                    plt.imsave(shaded_path / f'neuralshading_{iteration}.png', shaded_image.cpu().numpy())
++                    # Matplotlib rejects floating RGB values outside [0, 1].
++                    # Clamp diagnostic images only; optimization tensors and
++                    # gradients are unchanged.
++                    plt.imsave(shaded_path / f'neuralshading_{iteration}.png', shaded_image.clamp(0, 1).cpu().numpy())
+@@ -232 +235 @@
+-                    plt.imsave(normal_path / f'neuralshading_{iteration}.png', normal_image.cpu().numpy())
++                    plt.imsave(normal_path / f'neuralshading_{iteration}.png', normal_image.clamp(0, 1).cpu().numpy())

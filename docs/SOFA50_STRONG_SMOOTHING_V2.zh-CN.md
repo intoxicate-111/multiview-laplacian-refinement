@@ -1,6 +1,6 @@
 # Sofa50 更强 coarse-mesh smoothing v2
 
-状态日期：2026-08-23 BST。
+状态日期：2026-08-24 BST。
 
 历史 `legacy_v1` 多拓扑 Sofa50 coarse meshes 继续保留且可以复现，不会被覆盖。
 新的准备流程默认使用版本化的 `strong_smooth_v2`，输出到
@@ -79,3 +79,24 @@ Common initial Chamfer 为 `0.00438635`。V1 model 虽然 raw prediction error
 tail，平均 geometry 却略微恶化。这直接表明在更强 smoothing 下，prediction
 improvement 没有通过冻结 recovery configuration 传递；本实验不引入其他 recovery
 方法。
+
+## Recovery 诊断与当前 A-E 研究
+
+后续只读诊断在不修改上表的前提下分解了冻结 recovery failure：
+
+- exact target 加全方程、centroid-gauged sparse solve 的 v2 mean recovery
+  efficiency 为 `0.92366`；
+- exact target 与 `0.01` positional anchor 固定时，hard visibility 把 mean
+  efficiency 从 `0.34258` 降至 `0.16875`，令 44/50 samples 变差；
+- confidence 影响可忽略，冻结 Adam 从 200 增加到 2,000 steps 也只达到 `0.18635`；
+- 对 archived prediction 使用 `lambda=0.01` regularized sparse integration 可改善
+  frozen Adam+visibility 的 mean Chamfer，但只保留 same-lambda oracle efficiency 的
+  15.46%。
+
+因此 follow-up training 使用全部 Laplacian rows，不使用 visibility/confidence、
+recovery Huber 或 Adam。已完成 Arm B 在 Arm A 上加入 differentiable sparse solve 与
+same-index vertex loss；其 test Chamfer 为 `0.00358497` 对 A 的 `0.00395529`，vertex
+RMS 为 `0.0115532` 对 `0.0135181`，尽管 B 的 raw EPE 更高。Arms C/D 测试
+`lambda=10^-3/10^-4`，Arm E 是 matched direct-vertex-residual baseline。公式和
+运行/排队状态见 [recovery-aware 研究](SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md)。这些
+中间结果不授权 2,000-mesh strong-smoothing scale-up。

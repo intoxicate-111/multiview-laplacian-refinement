@@ -111,3 +111,26 @@ and gradient checkpointing for activation memory. Its global batch is four,
 whereas the completed 960 HF arm uses two; reports must retain this non-strict
 ablation caveat. All long chains use `afterok` dependencies and refuse to
 overwrite a completed report or shard.
+
+## Sofa50 v2 recovery-aware A-E extension
+
+The strong-smoothing v2 follow-up uses all-equation regularised sparse
+integration and disables visibility, confidence, recovery Huber and Adam.
+
+- `train_sofa50_recovery_aware_arm_a_2l40.slurm` and
+  `train_sofa50_recovery_aware_arm_b_2l40.slurm` created A/B; both later resumed
+  at epoch boundaries on eight Blackwell GPUs while preserving global batch 8.
+- `train_sofa50_recovery_aware_lambda_extension_8blackwell.slurm` launches C/D
+  with `lambda=1e-3/1e-4`, `beta=1e-2`, float64 PCG, tolerance `1e-4` and at
+  most 2,048 iterations. The dtype/iteration change is the documented response
+  to float32 PCG stagnation; the objective and lambda are unchanged.
+- `train_sofa50_direct_vertex_arm_e_8blackwell.slurm` launches the direct
+  residual baseline with exactly 826,115 parameters and no Laplacian/recovery
+  path.
+- Evaluation, merge and matched visualisation remain dependency-gated by the
+  corresponding `evaluate_*`, `merge_*` and `render_*` Slurm entry points.
+
+At the 2026-08-24 snapshot, Arm C job `17274` is at step 3,200/20,000 on eight
+RTX PRO 6000 Blackwell GPUs with zero PCG failures and zero NaN/Inf. D `17275`,
+E `17278` and downstream jobs remain dependency-queued. Do not report C/D/E as
+completed or select a representation winner from this snapshot.

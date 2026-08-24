@@ -1,11 +1,12 @@
 # Canonical Sofa50 learned-Laplacian pipeline
 
-This document distinguishes two explicit, non-interchangeable contracts. The
+This document distinguishes three explicit, non-interchangeable contracts. The
 historical canonical GT-query model predicts an absolute `h^2`-normalised
-Laplacian. The current synthetic-current Arm B and its loss/image-feature
-ablations predict the direct raw current-graph Laplacian. A configuration must
-declare `target_mode`; native loss values from the two representations are not
-numerically comparable.
+Laplacian. The current synthetic-current Arms A-D predict the direct raw
+current-graph Laplacian and use all-equation regularised sparse integration.
+Arm E predicts direct vertex residuals and does not use a Laplacian decoder. A
+configuration must declare both target/output semantics and recovery semantics;
+native losses from different representations are not numerically comparable.
 
 ## Training
 
@@ -47,6 +48,44 @@ clip the raw target.
 
 ## Inference and recovery
 
+### Current matched-domain sparse-recovery contract
+
+For direct-raw Arms A-D, the network output is already in current-graph solver
+units. Every Laplacian row is retained and recovery solves
+
+```text
+min_V ||L_current @ V - delta_pred_raw||_F^2
+    + lambda ||V - V_input||_F^2
+```
+
+or the normal equations
+
+```text
+(L_current.T @ L_current + lambda I) @ V
+    = L_current.T @ delta_pred_raw + lambda V_input
+```
+
+There is no visibility gate, confidence weighting, recovery Huber or Adam
+vertex optimisation. Standalone evaluation uses sparse LSMR. Recovery-aware
+training uses the differentiable PCG implementation of the same system and
+adds `beta * mean_i ||V_refine[i] - V_clean[i]||_2^2`; clean vertices remain
+loss-only. Arm B uses `lambda=beta=1e-2`; C/D keep `beta=1e-2` and test
+`lambda=1e-3/1e-4`.
+
+Arm E is deliberately outside this recovery contract:
+
+```text
+delta_v_pred = predictor(...)
+V_refined = V_input + delta_v_pred
+loss = mean_i ||delta_v_pred[i] - (V_clean[i] - V_input[i])||_2^2
+```
+
+It uses no `L`, sparse solver, lambda or post-processing. This makes E the
+controlled test of direct vertex supervision versus a learned differential
+representation plus topology-aware analytic integration.
+
+### Historical canonical recovery
+
 For the canonical normalised-output path, given the current expanded mesh
 `X0, F_e`, recompute the uniform `L_e` and
 per-vertex `h_current` from that mesh. Convert once:
@@ -64,10 +103,12 @@ canonical baseline uses `unseen_anchor_weight=0.0`; the historical value `1.0`
 is retained only in legacy/ablation configurations. No GT scale, GT
 differential vector, or expanded placeholder target enters inference.
 
-For direct-raw Arm B and its HF variants, `delta_pred_raw` is already in solver
-units and is passed to the same confidence/visibility-weighted recovery without
-an `h^2` conversion. Evaluation saves raw predictions and checks the current-
-graph target formula and raw round trip explicitly.
+Earlier direct-raw Arm-B/HF results also passed `delta_pred_raw` to this
+confidence/visibility-weighted recovery without an `h^2` conversion. They are
+frozen historical benchmark outputs. Matched-domain exact-target diagnostics
+later found that hard visibility is the largest tested recovery-efficiency
+loss on strong-smoothing v2, so this historical path is no longer the active
+recovery design.
 
 The explicit reference implementation is
 `mlr.learned_laplacian.canonical_pipeline.canonical_current_graph_recovery_inputs`.
@@ -104,10 +145,11 @@ The current controlled baseline uses C2F2, 28 native 960 observations,
 current-query/current-graph inputs, seed 7, Huber with `delta=0.01`, no local
 jitter and 20,000 optimiser steps. Its output is `delta_pred_raw`. Completed
 controlled extensions include raw MSE, a learned dynamic residual expert with
-inference-time gate interventions, Gaussian/HF feature construction, and the
-running native-1920 HF resolution experiment. All scientific comparisons use
-the same 25 test samples and unified raw prediction/recovery metrics; early
-training loss alone is not a decision metric.
+inference-time gate interventions, Gaussian/HF feature construction and native-
+1920 HF. The newer 500-sample strong-smoothing study disables confidence and
+the historical recovery gates, then compares Lap-only A, recovery-aware B/C/D
+and direct-vertex E. A/B are complete; C/D/E remain running or dependency-
+queued as of 2026-08-24. Early training loss alone is never a decision metric.
 
 ## Smooth-region diagnostic convention
 

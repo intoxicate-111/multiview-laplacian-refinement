@@ -132,6 +132,41 @@ activation memory without changing the mathematical output or gradient; the
 full and chunked paths are covered by equivalence tests. They do not authorize
 changing the optimiser-step budget or hiding a global-batch difference.
 
+## Recovery-aware and direct-vertex training modes
+
+The current `Sofa50MultiTopologyRawLap500_v2` study disables the confidence
+head and historical recovery gates. Laplacian Arms A-D evaluate with
+
+```text
+min_V ||L @ V - delta_pred||_F^2 + lambda ||V - V_input||_F^2
+```
+
+Arm A trains only the existing raw-Laplacian Huber loss. Arms B-D run the
+differentiable PCG form of the same system during training and add
+
+```text
+L_vertex = mean_i ||V_refine[i] - V_clean[i]||_2^2
+L_total = L_lap + beta * L_vertex
+```
+
+`V_clean` is held on the loss-side prepared object and removed from the
+mapping passed to the model. The solve sees only `L`, `delta_pred` and
+`V_input`. Arm B uses `lambda=beta=1e-2`; C/D retain `beta=1e-2` and change
+only lambda to `1e-3/1e-4`. Runtime diagnostics record PCG iteration/residual/
+failure counts, gradient norms, NaN/Inf counts and peak GPU memory.
+
+Arm E reuses the same `N x 3` predictor head but changes target semantics:
+
+```text
+delta_v_target = V_clean - V_input
+V_refined = V_input + delta_v_pred
+L_E = mean_i ||delta_v_pred[i] - delta_v_target[i]||_2^2
+```
+
+No Laplacian target or operator, sparse solver, lambda, visibility, confidence,
+recovery Huber, Adam or post-processing is permitted in E. See
+[the full A-E study contract](SOFA50_RECOVERY_AWARE_STUDY.md).
+
 ## Canonical Sofa50 launch
 
 The production launcher is:
@@ -312,4 +347,5 @@ PYTHONPATH=src conda run --no-capture-output -n test pytest -q
 
 Focused learned-Laplacian tests cover lazy loading, GT-query leakage guards,
 query perturbation bounds, Fourier encoding, image ablation, mesh-count
-scaling, AMP and Sofa50 preparation.
+scaling, AMP, differentiable sparse recovery, direct-displacement semantics
+and Sofa50 preparation.

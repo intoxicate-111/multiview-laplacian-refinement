@@ -10,6 +10,31 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.utils.cpp_extension
+
+
+def _restore_cpp_extension_import_contract() -> None:
+    """Keep extensions importable by name after Torch 2.13 JIT loading.
+
+    The pinned nvdiffrec checkout intentionally discards the object returned by
+    ``cpp_extension.load`` and immediately imports it again by ``name``.  Newer
+    Torch loads the module but does not guarantee that second import contract.
+    Registering the exact returned module restores the historical behavior
+    without modifying the extension or the official nvdiffrec checkout.
+    """
+
+    original_load = torch.utils.cpp_extension.load
+    if getattr(original_load, "_mlr_import_contract", False):
+        return
+
+    def load_and_register(*args, **kwargs):
+        module = original_load(*args, **kwargs)
+        name = kwargs.get("name", args[0] if args else module.__name__)
+        sys.modules[str(name)] = module
+        return module
+
+    load_and_register._mlr_import_contract = True
+    torch.utils.cpp_extension.load = load_and_register
 
 
 def _add_xatlas_uvs(config_path: Path) -> None:
@@ -70,6 +95,7 @@ def main() -> int:
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
+    _restore_cpp_extension_import_contract()
     sys.path.insert(0, str(args.nvdiffrec_root))
     try:
         config_index = remainder.index("--config")

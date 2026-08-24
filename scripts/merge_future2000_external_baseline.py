@@ -26,7 +26,11 @@ METRICS = (
 
 
 def merge(
-    manifest: Path, output_dir: Path, method: str, shard_count: int
+    manifest: Path,
+    output_dir: Path,
+    method: str,
+    shard_count: int,
+    selection: Path | None = None,
 ) -> dict[str, Any]:
     method_dir = output_dir / method
     shard_dir = method_dir / "shards"
@@ -45,14 +49,20 @@ def merge(
             )
         )
     rows.sort(key=lambda row: row["sample_id"])
-    expected = sorted(
-        str(item["sample_id"])
-        for item in json.loads(manifest.read_text(encoding="utf-8"))["samples"]
-        if item["split"] == "test"
-    )
+    if selection is None:
+        expected = sorted(
+            str(item["sample_id"])
+            for item in json.loads(manifest.read_text(encoding="utf-8"))["samples"]
+            if item["split"] == "test"
+        )
+    else:
+        expected = sorted(
+            str(value)
+            for value in json.loads(selection.read_text(encoding="utf-8"))["sample_ids"]
+        )
     ids = [row["sample_id"] for row in rows]
-    if len(rows) != 1000 or len(set(ids)) != 1000 or ids != expected:
-        raise ValueError(f"{method} shards do not exactly match the test split.")
+    if len(rows) != len(expected) or len(set(ids)) != len(expected) or ids != expected:
+        raise ValueError(f"{method} shards do not exactly match the selected test set.")
     per_sample = method_dir / "per_sample.csv"
     with per_sample.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -96,6 +106,8 @@ def _optional_statistics(
         [float(row[field]) for row in rows if row.get(field) not in (None, "", "None")],
         dtype=np.float64,
     )
+    invalid_count = int(np.count_nonzero(~np.isfinite(values)))
+    values = values[np.isfinite(values)]
     if not len(values):
         return None
     rng = np.random.default_rng(7)
@@ -103,6 +115,8 @@ def _optional_statistics(
         [rng.choice(values, size=len(values), replace=True).mean() for _ in range(2000)]
     )
     return {
+        "count": int(len(values)),
+        "invalid_count": invalid_count,
         "mean": float(values.mean()),
         "median": float(np.median(values)),
         "std": float(values.std()),
@@ -135,10 +149,17 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--method", required=True)
     parser.add_argument("--shard-count", type=int, required=True)
+    parser.add_argument("--selection", type=Path)
     args = parser.parse_args()
     print(
         json.dumps(
-            merge(args.manifest, args.output_dir, args.method, args.shard_count),
+            merge(
+                args.manifest,
+                args.output_dir,
+                args.method,
+                args.shard_count,
+                args.selection,
+            ),
             indent=2,
         )
     )

@@ -20,7 +20,7 @@
 8. Direct-raw Huber 与 MSE loss 消融；
 9. Learned dynamic residual expert 与 inference-time gate causal ablation；
 10. Gaussian/HF image-feature 消融；
-11. Native 1920 + HF 分辨率消融（运行中）。
+11. Native 1920 + HF 分辨率消融（已完成）。
 
 已完成实验使用最终 `metrics.json` 或分析产物。
 
@@ -411,6 +411,9 @@ Jobs 15662_0、15662_1 和 15663 均以 exit code `0:0` 完成。两个训练 ar
 
 OpenMVS48 current-mesh recovery 使用 5 个 paired meshes：
 
+> 2026-08-22 解释更新：OpenMVS mesh 质量过差，本节仅是低质量 OOD 输入压力
+> 测试，不作为 training target、模型选择端点或目标质量证据。历史数值保持不变。
+
 | Metric | A: no jitter | B: local jitter | B − A |
 |---|---:|---:|---:|
 | Mean initial Chamfer | 0.024729284 | 0.024729284 | 0 |
@@ -423,7 +426,7 @@ OpenMVS48 current-mesh recovery 使用 5 个 paired meshes：
 结论：
 
 - Arm B 的 best validation loss、test raw endpoint、raw Top-10% endpoint 和 raw Top-1% endpoint 均高于 Arm A，test raw global cosine 低于 Arm A。
-- Arm B 的 OpenMVS refined Chamfer 在 5/5 paired meshes 上高于 Arm A；两个 arm 均为 0/5 meshes 低于各自 initial Chamfer。
+- 在仅诊断的 OpenMVS 压力测试中，Arm B 的 refined Chamfer 在 5/5 paired meshes 上高于 Arm A；两个 arm 均为 0/5 meshes 低于各自 initial Chamfer。该行不参与模型选择。
 - 当前记录不支持在该 contract 下启用 training-only local query jitter。
 - 独立报告位于 `docs/SOFA50_LOCAL_QUERY_JITTER_ABLATION_REPORT.zh-CN.md`。
 
@@ -502,16 +505,17 @@ placement 重要。Correlation 数据未被单独当作因果证据。
 Gaussian blur 不利于 Top-10%/Top-1%，但有利于 mean geometry；保留 original 并追加
 high-frequency residual 取得最好的 prediction/tail metrics，而没有明显恶化 Bottom-90%。
 
-## 13. Native 1920 + HF（运行中）
+## 13. Native 1920 + HF（已完成）
 
 1920 observations 为 renderer native output，不是 960 resize。Camera extrinsics、sample IDs、
 split、current graph、proxy、target 和 visibility 与 960 HF 严格对齐。Job 15854 使用
 4×L40、20,000 optimizer steps、view chunk=4 和 gradient checkpointing。Global batch 4 与
 960 baseline 的 2 不同，因此不是严格单变量训练。
 
-Step-500 的 1920/960 train loss 为 `7.02343e-5/7.47579e-5`，validation loss 为
-`6.34615e-5/9.61499e-5`。这是 early loss 快照；必须等 jobs 15864/15865 的 unified
-tail/recovery 评估后才能判断分辨率收益。
+最终 1920/960 raw EPE 为 `0.00290615/0.00288618`，Top-10% 为
+`0.0125190/0.0117522`，Top-1% 为 `0.0389263/0.0347895`，Chamfer 为
+`0.00378509/0.00377857`。1920 改善 Bottom-90%、normal 和 flips，但不改善 raw/tail
+prediction 或 mean Chamfer/P2S；计算成本从 `7.95` 增至 `89.39` GPU-hours。
 
 ## 14. 假设状态
 
@@ -534,14 +538,15 @@ tail/recovery 评估后才能判断分辨率收益。
 | Top 10% raw-residual replacement 使每个 sample 低于 initial | Supported | 20k/50k 均为 25/25 |
 | Top-k replacement 关闭至少 90% mean Chamfer oracle gap | Supported at 50% replacement | 20k/50k 为 93.95%/94.94% |
 | High raw-residual vertices 对应 high recovered geometry error | Supported for recorded percentile analysis | Top 1%/bottom 50% surface-distance ratio 28.64/31.78 |
-| Local query jitter 降低最终 synthetic 与 OpenMVS recovery error | Not supported | Test raw EPE +0.000123442；OpenMVS Chamfer +0.000182345；5/5 paired meshes |
+| Local query jitter 降低最终 synthetic error | Not supported | Test raw EPE +0.000123442；正式结论由 synthetic-current endpoint 决定 |
+| Local query jitter 改善 OpenMVS 压力输入 | Not supported；仅诊断 | OpenMVS Chamfer +0.000182345；5/5 paired meshes；不参与模型选择 |
 | Direct raw-Laplacian training 优于 canonical H2 与 normalized-output/raw-loss | Supported under unified 28-view protocol | Raw EPE 0.00300525；Chamfer 0.00380671；19/25 improved |
 | B/C 极小 native loss 可与 A normalized loss 直接比较 | Not supported | Loss space 与数值单位不同；使用 unified raw-space endpoints 判定 |
 | Raw MSE 改善 Top-10%/Top-1% 与 mean recovery | Not supported | Tail 和 Chamfer/P2S 均差于 Huber；改善数 16/25 |
 | Residual expert 在无 spatial gate 时有效 | Supported | Base-to-constant 的 raw EPE/Chamfer/P2S/normal 均 25/25 |
 | Learned gate placement 在 global scaling 上额外有效 | Supported | Learned 优于 constant 和 5 组 within-mesh shuffles |
 | Original + HF 改善 raw tail 预测 | Supported at 960 | Top-10% `0.0117524`；Top-1% `0.0347902` |
-| Native 1920 + HF 优于 960 + HF | Pending | 训练运行中；early loss 不作最终结论 |
+| Native 1920 + HF 优于 960 + HF | Not supported | Tail、raw RMS、Chamfer/P2S 均未改善；normal/flips 改善 |
 
 ## 15. 尚需完成的判定
 
@@ -574,6 +579,21 @@ tail/recovery 评估后才能判断分辨率收益。
   `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/`
 - H2 Arm B 的 25 组 mesh 与对比图：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/mesh_comparisons/B_direct_raw_laplacian/`
+
+## 17. Strong-smoothing recovery 诊断与 A-E extension
+
+`Sofa50MultiTopologyRawLap500_v2` 的 exact-target sparse solve 达到 mean oracle
+efficiency `0.92366`。冻结 recovery 中 hard visibility 将 mean eta 从 `0.34258`
+降至 `0.16875`，是主要已测坍塌点；confidence 和额外 Adam steps 不能解释该差距。
+
+当前 follow-up 使用全部 Laplacian rows 和 regularized sparse solve。已完成 Arm B
+相对 Lap-only Arm A 将 test Chamfer 从 `0.00395529` 降至 `0.00358497`，vertex RMS
+从 `0.0135181` 降至 `0.0115532`；但 B 的 raw EPE 更高。这支持 recovery-aware
+supervision 改善 geometric utility。C/D 测试更小 `lambda=10^-3/10^-4`，E 使用相同
+826,115 参数 predictor 直接回归 `V_clean-V_input`，完全不经过 Laplacian/sparse
+integration。C job `17274` 在 2026-08-24 快照到 step 3,200，D/E 依赖排队；完整
+结果前不判定 H1/H2。详细合同见
+`docs/SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md`。
   `runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/`
 - Huber/MSE loss ablation：
   `runs/learned_laplacian/sofa50_synthetic_current_28view_loss_ablation_20k_seed7/analysis/`

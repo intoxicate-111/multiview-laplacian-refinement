@@ -1,6 +1,6 @@
 # Sofa50 stronger coarse-mesh smoothing v2
 
-Status date: 2026-08-23 BST.
+Status date: 2026-08-24 BST.
 
 The `legacy_v1` multi-topology Sofa50 coarse meshes remain reproducible and are
 not overwritten. New preparation defaults to the versioned
@@ -89,3 +89,28 @@ slightly worsens mean geometry despite strongly improving raw EPE and the
 high-curvature tail. This is direct evidence that prediction improvement does
 not transfer through the frozen recovery configuration under stronger
 smoothing; no alternative recovery method is introduced in this experiment.
+
+## Recovery diagnosis and current A-E study
+
+Later read-only diagnostics isolate that frozen recovery failure without
+changing the table above:
+
+- exact target plus an all-equation centroid-gauged sparse solve reaches mean
+  v2 recovery efficiency `0.92366`;
+- with exact targets and the `0.01` positional anchor, hard visibility lowers
+  mean efficiency from `0.34258` to `0.16875` and worsens 44/50 samples;
+- confidence has negligible effect, and increasing the frozen Adam budget from
+  200 to 2,000 steps reaches only `0.18635` mean efficiency;
+- regularised sparse integration of the archived prediction at `lambda=0.01`
+  improves mean Chamfer over frozen Adam+visibility, but retains only 15.46% of
+  the same-lambda oracle efficiency.
+
+The follow-up training study therefore uses every Laplacian row, no visibility
+or confidence weight, no recovery Huber and no Adam. Completed Arm B adds a
+differentiable sparse solve and same-index vertex loss to Arm A. Its test
+Chamfer is `0.00358497` versus A's `0.00395529`, and vertex RMS is `0.0115532`
+versus `0.0135181`, despite B's higher raw EPE. Arms C/D test
+`lambda=10^-3/10^-4`; Arm E is the matched direct-vertex-residual baseline.
+Their running/queued status and equations are maintained in
+[the recovery-aware study](SOFA50_RECOVERY_AWARE_STUDY.md). No 2,000-mesh
+strong-smoothing scale-up is authorised by these intermediate results.

@@ -4,7 +4,7 @@
 
 ## 1. 实验问题
 
-本实验比较训练时使用 stored current vertex position 与在其邻域内加入 local query-position jitter。判定端点为 best validation loss、synthetic-current test raw endpoint、raw Top-10% endpoint、raw Top-1% endpoint、raw cosine、OpenMVS48 current-mesh recovery 和 runtime。
+本实验比较训练时使用 stored current vertex position 与在其邻域内加入 local query-position jitter。主要判定端点为 best validation loss、synthetic-current test raw endpoint、raw Top-10% endpoint、raw Top-1% endpoint、raw cosine 和 runtime。OpenMVS48 current-mesh recovery 仅保留为低质量 OOD 输入压力测试，不参与模型选择或目标质量判断。
 
 ## 2. 实验契约
 
@@ -97,6 +97,10 @@ Correct RGB 到 zero RGB 的 raw endpoint 变化为 Arm A `+0.000269557`，Arm B
 
 该阶段使用 5 个 OpenMVS meshes、相同 inputs 和 `sparse_uniform_oracle_core` recovery solver。
 
+**2026-08-22 解释更新：仅诊断。** OpenMVS initial mesh 质量过差，不能作为
+target、pseudo-GT 或本消融的判定端点。下表是历史压力测试记录；Arm A/B 的正式
+选择只依据受控 synthetic-current 指标。
+
 | Metric | A: no jitter | B: local jitter | B − A |
 |---|---:|---:|---:|
 | Mean initial Chamfer | 0.024729284 | 0.024729284 | 0 |
@@ -127,8 +131,8 @@ Arm B 的 refined Chamfer 在 5/5 paired meshes 上高于 Arm A。两个 arm 的
 
 - 在 seed 7、28 views、20,000 steps 和本报告契约下，Arm B 的 best validation loss 比 Arm A 高 2.0587%。
 - Arm B 的 test raw endpoint、raw Top-10% endpoint 和 raw Top-1% endpoint 分别比 Arm A 高 `0.000123442`、`0.000720084` 和 `0.023330238`；raw global cosine 低 `0.029211986`。
-- Arm B 的 OpenMVS mean refined Chamfer 和 P2S 分别比 Arm A 高 `0.000182345` 和 `0.000177393`；refined normal consistency 低 `0.000675653`；introduced flipped faces 多 41。
-- 两个 arm 均为 0/5 OpenMVS meshes 低于各自 initial Chamfer。
+- OpenMVS 压力测试中，Arm B 的 mean refined Chamfer 和 P2S 分别比 Arm A 高 `0.000182345` 和 `0.000177393`；该结果仅作 OOD 失败记录，不参与 arm 选择。
+- 两个 arm 均为 0/5 OpenMVS meshes 低于各自 initial Chamfer；这不把 OpenMVS 提升为期望目标。
 - Arm B 的 runtime 是 Arm A 的 1.0230 倍。
 - 当前记录不支持在该 contract 下启用 `std = 0.003 h`、L2 cap `0.009 h` 的 training-only local query jitter。
 

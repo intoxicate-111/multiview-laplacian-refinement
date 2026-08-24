@@ -11,6 +11,10 @@ runs/**
 !runs/**/
 !runs/**/*.obj
 
+# Generated reports and benchmark exports stay local. Some reports contain
+# large tables and visualizations that should not be committed or pushed.
+reports/
+
 # Local high-volume training trials are generated artifacts, including OBJ
 # visualizations that are otherwise allowed by the generic runs rule above.
 runs/thingi10k50_gpu_trial/

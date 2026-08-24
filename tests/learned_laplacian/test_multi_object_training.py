@@ -170,6 +170,77 @@ def test_normalized_output_raw_loss_trains_through_prepared_loader() -> None:
     assert math.isfinite(result.final_validation_loss)
 
 
+def _recovery_aware_sample(sample_id: str) -> dict:
+    sample = _triangle_sample(sample_id)
+    sample["clean_reference_vertices"] = sample["target_positions"].clone()
+    sample["clean_reference_faces"] = sample["faces"].clone()
+    return sample
+
+
+def _recovery_aware_config() -> dict:
+    config = _multi_config()
+    config["target_mode"] = "raw_laplacian"
+    config["confidence"] = {"enabled": False}
+    config["training"]["vertex_sampling"] = {"mode": "full"}
+    config["training"]["recovery_aware_geometry_loss"] = {
+        "enabled": True,
+        "lambda": 1e-2,
+        "beta": 0.1,
+        "maximum_iterations": 128,
+        "tolerance": 1e-4,
+        "runtime_diagnostics": True,
+    }
+    config["multi_object_training"].update(
+        {
+            "epochs": 1,
+            "gradient_accumulation_meshes": 1,
+            "validation_every_epochs": 1,
+        }
+    )
+    return config
+
+
+def test_recovery_aware_clean_vertices_are_loss_side_only() -> None:
+    prepared = _prepare_object_static(
+        _recovery_aware_sample("loss_side_clean"), _recovery_aware_config()
+    )
+    assert prepared.clean_vertices is not None
+    assert "clean_reference_vertices" not in prepared.sample
+    assert "clean_reference_faces" not in prepared.sample
+    assert not any("clean" in key or key.startswith("gt_") for key in prepared.sample)
+
+
+def test_recovery_aware_training_reports_geometry_loss(tmp_path) -> None:
+    config = _recovery_aware_config()
+    config["multi_object_training"]["report_every_optimizer_steps"] = 1
+    result = train_multi_object(
+        [_recovery_aware_sample("recovery_train")],
+        [_recovery_aware_sample("recovery_validation")],
+        config,
+        output_dir=tmp_path,
+        progress=False,
+    )
+    record = result.history[-1]
+    assert record["train_recovery_refine_loss"] is not None
+    assert record["validation_recovery_refine_loss"] is not None
+    assert record["validation_recovered_vertex_rms"] is not None
+    assert math.isfinite(float(record["train_recovery_refine_loss"]))
+    assert math.isfinite(float(record["validation_recovery_refine_loss"]))
+    assert math.isfinite(float(record["validation_recovered_vertex_rms"]))
+    step_record = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert float(step_record["pcg_iterations_mean"]) > 0
+    assert float(step_record["pcg_iterations_max"]) >= float(
+        step_record["pcg_iterations_mean"]
+    )
+    assert float(step_record["pcg_relative_residual_max"]) <= 1.05e-4
+    assert int(step_record["pcg_failed_solves"]) == 0
+    assert float(step_record["delta_pred_gradient_norm"]) > 0
+    assert float(step_record["prediction_head_gradient_norm"]) > 0
+    assert int(step_record["nan_inf_count"]) == 0
+
+
 def _multi_view_sample(num_views: int = 14) -> dict:
     sample = tiny_sample()
     sample["sample_id"] = "multi_view"

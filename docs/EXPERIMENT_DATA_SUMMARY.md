@@ -361,6 +361,33 @@ but does not close the query-distribution gap to supervised current-query
 training. The historical arm predates HF and therefore is not a strict
 single-variable normalization ablation.
 
+### Strong-smoothing recovery diagnosis and recovery-aware A-E study
+
+Exact target plus all-equation sparse integration establishes that the v2 raw
+Laplacian is recoverable: mean oracle efficiency is `0.92366` with a component-
+centroid translation gauge. In the frozen solver, hard visibility is the
+largest incremental loss (`0.34258 -> 0.16875` mean eta; 44/50 worse).
+Confidence is negligible, and 2,000 Adam steps reach only `0.18635`.
+
+The completed A/B study uses all rows, `lambda=10^-2`, no confidence and no
+recovery Huber/Adam. Arm B adds `beta=10^-2` same-index recovered-vertex MSE.
+
+| Test metric | A Lap only | B Lap + vertex |
+|---|---:|---:|
+| Raw EPE | **0.00252641** | 0.00263986 |
+| Raw RMS | 0.00737725 | **0.00683290** |
+| Chamfer | 0.00395529 | **0.00358497** |
+| Eta | 0.07206 | **0.13036** |
+| P2S p95 | 0.0122582 | **0.0105581** |
+| Normal | 0.954902 | **0.959366** |
+| Vertex RMS | 0.0135181 | **0.0115532** |
+
+B wins Chamfer on 32/50 and vertex RMS on 43/50, but raw EPE on only 10/50.
+C (`lambda=10^-3`) is running as job `17274`; D (`10^-4`) and the direct-
+vertex Arm E are dependency-queued. E retains 826,115 parameters but uses only
+`V_input + Delta V_pred` and direct residual MSE. No A-E representation
+conclusion is valid until the matched merge completes.
+
 ## Future2000 GT-adaptive scale-up
 
 Status updated 2026-08-23 BST. The dataset contains 2,000 source objects and
@@ -398,8 +425,11 @@ sets DataLoader workers to zero and rejects any pre-existing checkpoint in its
 output directory. It produced the fixed 200,000-step checkpoint subsequently
 used for the full held-out test. Across 1,000 meshes, unified Chamfer changes
 from `0.00776417` to `0.00522955` and 959/1000 samples improve; mean normal
-consistency changes from `0.924252` to `0.895907`. External full-1000 arms are
-still running, so no final cross-method ranking is claimed.
+consistency changes from `0.924252` to `0.895907`. The full-1000 external
+comparison is complete. Ours has valid-sample Chamfer `0.00522955` and paired
+Chamfer wins of 742/998 vs NDS, 632/999 vs NDS-28V-full, 799/999 vs nvdiffrec
+and 955/996 vs ExMesh. The input contract passes; metric completeness remains
+false because invalid outputs and ExMesh connectivity changes stay explicit.
 
 ## Sofa50 controlled same-initial external benchmark
 
@@ -484,6 +514,8 @@ directly with the canonical Sofa50 results.
 | 16736 | Sofa50 same-initial unified report | Completed | Four methods at 25/25; deterministic unified evaluator; `contract_audit=true`. |
 | 17082 | Sofa50 multi-topology strong-smoothing v2, 20k | Completed | Two L40 GPUs; effective global batch 8; final/best validation `2.26915e-6`. |
 | 17110-17113 | Sofa50 v1-v2 test/recovery and unified merge | Completed | Contract true; v2 raw EPE `0.00276820` versus v1 `0.00840367`, but refined Chamfer `0.00451747` versus `0.00426879`. |
+| 17274 | Sofa50 recovery-aware Arm C, `lambda=10^-3` | Running at 2026-08-24 snapshot | Eight Blackwell GPUs; step 3,200/20,000; zero PCG failures and zero NaN/Inf. |
+| 17275/17278 | Arm D / direct-vertex Arm E | Dependency queued | D follows C; E follows D. No result is recorded before frozen evaluation. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model

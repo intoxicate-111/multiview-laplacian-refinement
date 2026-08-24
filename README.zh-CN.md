@@ -8,6 +8,8 @@
 
 可见性与恢复：[可见性感知恢复报告](docs/VISIBILITY_AWARE_RECOVERY_REPORT.md)
 
+当前 recovery-aware 研究：[中文](docs/SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md) | [English](docs/SOFA50_RECOVERY_AWARE_STUDY.md)
+
 实验指标与运行状态：[实验数据汇总](docs/EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
 Chamfer evaluator 事故：[中文报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md) | [English report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md)
@@ -26,7 +28,7 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 
 ## 项目状态
 
-状态日期：2026-08-23 BST。
+状态日期：2026-08-24 BST。
 
 OpenMVS 使用政策：现有 Sofa50 OpenMVS mesh 是低质量外部重建，只保留为
 分布外压力测试；它不是 training target、pseudo-GT、模型选择端点或期望质量
@@ -56,19 +58,23 @@ ceiling。详见 [OpenMVS 输入使用政策](docs/OPENMVS_INPUT_POLICY.zh-CN.md
 | 960 image-feature 消融 | 已完成 | `F + (F-Gaussian(F))` 的 test raw EPE、RMS、Top-10% 和 Top-1% 最低；Gaussian-only 的 mean Chamfer、normal consistency 和改善数（`21/25`）最好。 |
 | Native-1920 + high-frequency residual | 已完成；非严格 resolution ablation | 4×L40、20,000-step 实验降低 Bottom-90% error，但相对 960+HF 恶化 test raw EPE/RMS、Top-10%/Top-1%、Chamfer 和 P2S；normal consistency 改善，flips 减少。Global batch 为 4 对 2。 |
 | Sofa50 多拓扑 coarse smoothing v2 | 20k 训练与受控 test/recovery 已完成 | Job `17082` 已在 2×L40 上从零完成，final/best validation 为 `2.26915e-6`。在相同 50 个 strong-smoothing test inputs 上，v2 将 raw EPE 从 v1 的 `0.00840367` 降到 `0.00276820`，但统一 refined Chamfer 更差（`0.00451747` vs `0.00426879`），normal 更低、flips 更多，改善数仅 26/50 对 38/50。更强 smoothing 改善 target prediction，但收益没有通过冻结 recovery contract 传递到 geometry。 |
+| Exact-target sparse-recovery 诊断 | 已完成 | 只用 component-centroid gauge 的全方程 sparse solve 在 v2 达到 mean oracle efficiency `0.92366`。在 `0.01` anchor 后加入 hard visibility，会把 mean efficiency 从 `0.34258` 降到 `0.16875`，并令 44/50 samples 变差；confidence 可忽略，2,000 Adam steps 也未消除坍塌。 |
+| Recovery-aware Arm A/B | 已完成 | 使用相同 `lambda=beta=10^-2` sparse recovery 时，Arm B 将 test Chamfer 从 A 的 `0.00395529` 降至 `0.00358497`，recovered vertex RMS 从 `0.0135181` 降至 `0.0115532`，尽管 raw EPE 更差。这支持 geometric-utility supervision，而不是 raw regression 改善。 |
+| Recovery-aware Arm C/D | 运行中/排队 | Arm C（`lambda=10^-3`）job `17274` 正在 8×Blackwell 上运行；Arm D（`10^-4`）job `17275` 随后执行。Objective 与 `10^-4` PCG tolerance 固定；float64/2,048-iteration PCG 是已记录的稳定性执行改动。当前不报告结果。 |
+| Direct-vertex Arm E | Audit 通过并排队 | 826,115 参数 C2F2+HF 直接预测 `Delta V`，只使用 same-index vertex MSE；不含 Laplacian target、sparse solver 或 recovery gate。Job `17278` 在 D 后执行，因此 H1/H2 representation 结论仍未判定。 |
 | GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
 | Future2000 GT-adaptive 扩展 | 200k 训练与 learned-method test 已完成 | 固定 200,000-step checkpoint 已在 200 个 held-out objects × 5 variants 上评估。统一 Chamfer 从 `0.00776417` 降至 `0.00522955`，959/1000 samples 改善；mean normal consistency 从 `0.924252` 降至 `0.895907`，因此明确保留 distance/normal trade-off。 |
 | Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |
-| Future2000 外部基线 | Full-1000 对比运行中 | nvdiffrec 完成 999/1000，另有一个 zero/invalid-area 显式失败；NDS-28V-full 正以 8 个 Blackwell shards 运行。其余 external arms 与最终 merge 仍受依赖和资源约束；当前不报告最终排名。 |
+| Future2000 外部基线 | Full-1000 对比已完成，invalid metrics 显式保留 | Ours 的 aggregate valid-sample Chamfer 最低（`0.00522955`），改善 959/1000 inputs。Paired Chamfer 胜数为：对 NDS 742/998、对 NDS-28V-full 632/999、对 nvdiffrec 799/999、对 ExMesh 955/996。Input-contract audit 通过；由于 invalid outputs 与 ExMesh topology change 未被修复，strict/full metric completeness 仍为 false。 |
 | 自动化测试 | 当前文档改动对应检查通过 | External adapters、same-initial aggregation、raw loss、dynamic expert/gate、image feature、native-1920 和分布式训练相关 targeted tests 通过；下文命令仍是新 checkout 的最终依据。 |
 
-当前方法主线是在 Sofa50 上确定、并扩展到 Future2000 2,000-object 数据集的
-synthetic-current、current-query/current-graph、direct-raw formulation。Query mesh
-及其 connectivity 同时定义 prediction 与 recovery 使用的
-graph。监督场为 `L_current @ P_proxy`；它只作为 target，绝不会作为 inference
-feature 输入模型。已完成的 Future2000 scale-up 使用 960 high-frequency feature
-construction、28 views、C2F2 与固定 200,000-step checkpoint；其 full-1000 external
-comparison 仍在运行。
+当前 representation 主线是在 Sofa50 上确定的 synthetic-current、current-query/
+current-graph、direct-raw formulation。当前 recovery 研究用 regularized sparse
+solve 集成全部 predicted Laplacian rows；hard visibility、confidence、recovery
+Huber 和 Adam mesh optimization 均关闭。监督场 `L_current @ P_proxy` 只作为
+target，绝不会作为 inference feature 输入模型。已完成的 Future2000 scale-up 使用
+960 high-frequency construction、28 views、C2F2 与固定 200,000-step checkpoint；
+full-1000 same-initial external comparison 现已完成，invalid outputs 显式保留。
 
 早期 GT-query、`h^2`-normalized formulation 仍作为历史背景保留。该路径迁移到
 expanded/OpenMVS query graph 后未改善 geometry，因此不再作为下文数学定义的主线。
@@ -111,12 +117,13 @@ current mesh vertices
   -> 投影到 28 个标定视图
   -> 聚合 original + high-frequency image features
   -> 直接预测 delta_pred_raw
-  -> confidence/visibility 加权 Laplacian recovery
+  -> 全方程 regularized sparse Laplacian integration
 ```
 
-GT geometry 只用于构造监督与评估。Dynamic residual expert、gate、direct-
-displacement branch 和 raw-MSE loss 都是受控消融，不在当前 direct-raw + HF
-主线中启用。
+GT geometry 只用于构造监督与评估。Recovery-aware arms 只在 training-side vertex
+loss 使用 clean vertices，clean geometry 不进入 model 或 sparse solve。Dynamic
+residual expert、gate 和 raw-MSE loss 是已完成受控消融；direct displacement 现在是
+独立 audit 的 Arm E 对照，不属于 A-D。
 
 ## 数学定义
 
@@ -272,9 +279,9 @@ parameters。`F_v` 有 64 channels，因此 `F_v^out` 和 aggregated image featu
 视图；这些是执行/显存策略，不改变上述 feature 数学定义。因此在前面的 masked
 aggregation 中，当前分支实际采样 `F_v^out`，而不是未变换的 `F_v`。
 
-### Visibility、confidence 与 Gaussian gates
+### Feature visibility 与历史 recovery gates
 
-当前主线 renderer gate 是严格的 any-view gate：
+历史 recovery 路径保留的 any-view mask 为：
 
 $$
 m_i=\mathbf 1\!\left[\sum_{v=1}^{M}z_{vi}>0\right].
@@ -292,7 +299,7 @@ $$
 变量说明：`x_i` 是下文定义的完整 vertex representation；`g_theta` 是 confidence
 side head；`c_i` 是 vertex `i` 的有界 predicted reliability。
 
-当前主线 recovery weight 为
+其历史 recovery weight 为
 
 $$
 w_i=m_i c_i.
@@ -320,8 +327,9 @@ weight。这里的 `g_i` 与上面的 confidence-head function `g_theta` 无关�
 
 其中 `d_i^surface` 是 coarse query 到 GT surface 的距离，`s` 为
 `distance_confidence_scale`。该 Gaussian gate 不是 renderer visibility，也不用于
-当前 synthetic-current training。主线训练使用 `z_vi` 进行 image-feature
-sampling，主线 recovery 使用 `m_i c_i`。
+当前 synthetic-current training。当前 recovery-aware 研究只用 `z_vi` 做
+image-feature sampling；`L_current` 的每一行都以单位权重进入 sparse solve。
+`m_i`、`c_i` 与 `w_i=m_i c_i` 记录冻结历史 baseline，不描述 A-D solver。
 
 ### Vertex representation 与 graph network
 
@@ -370,8 +378,8 @@ logarithm，每个 scalar term 占一个 channel。
 `39 + 3 + 1 + 1 + 1 + 128 = 173` channels，分别对应 position encoding、normal、
 log relative edge scale、log degree、valid-view ratio 和 aggregated image feature。
 Graph backbone 为 `173 -> 256 -> 256`，后接 3 个 256-channel message-passing
-blocks 和 output MLP `256 -> 256 -> 3`。Confidence side head 为
-`173 -> 256 -> 1`，末端使用 sigmoid。
+blocks 和 output MLP `256 -> 256 -> 3`。历史 confidence-enabled 配置额外使用
+`173 -> 256 -> 1` sigmoid side head；Arms A-E 关闭该 head，参数量为 826,115。
 
 经过 input MLP 后，第 `l` 个 graph layer 计算
 
@@ -442,83 +450,85 @@ mean；`10^-12` 用于保护 empty valid set。
 contract 对有效的非 isolated vertices 使用单位权重，对无效 local scale 使用零
 权重。这里没有 curvature weighting，predicted confidence 也不进入 primary loss。
 
-Confidence side head 使用 detached prediction error：
+Arm A 只使用该 raw-field objective：
 
 $$
-\widetilde c_i=\mathrm{clip}(c_i,c_{\min},1),
+\mathcal L_A=\mathcal L_{\mathrm{lap}}.
 $$
 
-变量说明：`c_i` 是 predicted confidence，`c_min=10^-4` 是 numerical lower bound，
-`clip` 将数值截断到给定区间，`c_tilde_i` 是 confidence loss 实际使用的值。
+变量说明：`L_A` 是完整 Arm-A training objective，`L_lap` 是上面的 raw-Laplacian
+Huber loss。Arms B-D 加入下一节定义的 recovery-aware vertex term；它们关闭
+confidence head 与 confidence loss。历史 confidence-enabled runs 使用 detached
+error-calibration side loss `L_conf`，该实现只保留用于复现，不属于当前 A-E 研究。
+
+### Regularized sparse integration 与 recovery-aware supervision
+
+Arms A-D 从全部 predicted Laplacian equations 恢复 positions：
 
 $$
-\mathcal L_{\mathrm{conf}}=
-\frac{\sum_i a_i
-\left[\widetilde c_i\,\mathrm{stopgrad}(e_i)
--\beta\log\widetilde c_i\right]}
-{\max(10^{-12},\sum_i a_i)}.
+\widehat X_\lambda=
+\arg\min_X
+\left\lVert L_{\mathrm{current}}X-\delta^{\mathrm{pred,raw}}\right\rVert_F^2
++\lambda\left\lVert X-X_0\right\rVert_F^2.
 $$
 
-变量说明：`L_conf` 是 auxiliary confidence objective；`a_i` 与 `e_i` 定义同上；
-`stopgrad` 使 prediction error 对该 head 被视为常量；`beta=0.01` 加权防止
-confidence collapse 的 logarithmic barrier。
+变量说明：`X in R^(N x 3)` 是待求 mesh，`X_0 in R^(N x 3)` 是 input mesh，
+`L_current in R^(N x N)` 是其固定 row-normalized uniform Laplacian，
+`delta^(pred,raw) in R^(N x 3)` 是 network output，`X_hat_lambda` 是唯一 regularized
+solution，`lambda>0` 控制对 input positions 的 fidelity。这里没有 row mask 或
+learned row weight。
 
-完整训练目标为
-
-$$
-\mathcal L_{\mathrm{train}}
-=\mathcal L_{\mathrm{lap}}
-+\lambda_{\mathrm{conf}}\mathcal L_{\mathrm{conf}}.
-$$
-
-变量说明：`L_train` 是训练时被微分的 scalar objective；`L_lap` 是 primary
-prediction loss，`L_conf` 是 auxiliary confidence loss，`lambda_conf=1` 是其
-configured coefficient。
-
-当前主线 config 使用 `beta = 0.01`、`c_min = 10^-4` 和
-`lambda_conf = 1`。Predicted confidence 不会重新加权 `L_lap`，因此 confidence
-head 不能通过降低 confidence 来抑制 primary supervision。
-
-### Laplacian recovery 目标
-
-对固定 current graph `(X_0, F)` 构建 `L_current` 与 `h_current`，然后根据
-`delta_pred_raw` 恢复 vertex positions `X`。当前主线 dense objective 为
+等价求解为
 
 $$
-\mathcal L_{\mathrm{rec}}(X)=
-\lambda_{\mathrm{lap}}
-\sum_{i,k}H_\tau\!\left(
-\sqrt{w_i}\left[(L_{\mathrm{current}}X)_{ik}
--\delta_{ik}^{\mathrm{pred,raw}}\right]\right)
-+\frac{\lambda_{\mathrm{anchor}}}{2}\lVert X-X_0\rVert_F^2
-+\mathcal L_{\mathrm{edge}}+\mathcal L_{\mathrm{unseen}}.
+(L_{\mathrm{current}}^\top L_{\mathrm{current}}+\lambda I)
+\widehat X_\lambda
+=L_{\mathrm{current}}^\top\delta^{\mathrm{pred,raw}}+\lambda X_0.
 $$
 
-变量说明：`X in R^{N x 3}` 是待求 refined mesh，`X_0` 是固定 initial positions；
-`L_current` 是固定 current-graph operator；`delta^(pred,raw)` 是 network field；
-`w_i` 加权完整 equation row；`lambda_lap` 与 `lambda_anchor` 分别控制 Laplacian
-fitting 和 anchoring；`||.||_F` 是 Frobenius norm；`L_edge`/`L_unseen` 是可选 edge
-与 invisible-vertex terms（主线均关闭）。Indices `i` 和 `k` 分别遍历 vertices 与
-三个 Cartesian components，`H_tau` 是上面定义的训练 Huber function。
+变量说明：`L_current^T` 是 transpose operator，`I` 是 `N x N` identity。Evaluation
+使用 sparse LSMR；recovery-aware training 使用同一系统的 differentiable sparse
+PCG solve。
 
-当前主线 values 为 `lambda_lap = 1`、`lambda_anchor = 0.01`、
-`lambda_edge = 0` 和 `lambda_unseen_anchor = 0`。Visibility/confidence weight
-通过 `sqrt(w_i)` 作用于完整 Laplacian equation row。
-
-对于较大的 uniform-Laplacian meshes，sparse solver 使用对应的 L2 form：
+利用 same-index clean vertices，Arms B-D 加入
 
 $$
-\mathcal L_{\mathrm{sparse}}(X)=
-\frac{\lambda_{\mathrm{lap}}}{N}
-\left\lVert W^{1/2}(L_{\mathrm{current}}X-\delta^{\mathrm{pred,raw}})\right\rVert_F^2
-+\frac{\lambda_{\mathrm{anchor}}}{N}\lVert X-X_0\rVert_F^2,
-\qquad W=\mathrm{diag}(w).
+\mathcal L_{\mathrm{vertex}}=
+\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert\widehat X_{\lambda,i}-X_i^*\right\rVert_2^2,
+\qquad
+\mathcal L_{B,C,D}=\mathcal L_{\mathrm{lap}}
++\beta\mathcal L_{\mathrm{vertex}},
+\quad \beta=10^{-2}.
 $$
 
-变量说明：`N` 是 vertex count，`W in R^{N x N}` 是以 `w_i` 为 diagonal entries
-的矩阵，`W^(1/2)` 施加 square-root row weights。其他 symbol 与 dense objective
-一致；该 sparse variant 使用 squared L2/Frobenius penalties，而不是 component-wise
-Huber penalties。
+变量说明：`X_i*` 是与 current vertex `i` 精确对应的 clean position，`L_vertex` 是
+mean squared 3D position error，`beta` 是其 training coefficient。Clean vertices
+只用于 loss，不进入 model 或 solve。Arm B 使用 `lambda=10^-2`；C/D 测试
+`10^-3` 与 `10^-4`。
+
+Arm E 不走 Laplacian path，而是直接预测 residual：
+
+$$
+\Delta X^{\mathrm{pred}}=f_\theta(I,K,E,X_0,F),
+\qquad
+X^{\mathrm{refined}}=X_0+\Delta X^{\mathrm{pred}},
+$$
+
+$$
+\Delta X^*=X^*-X_0,
+\qquad
+\mathcal L_E=\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert\Delta X_i^{\mathrm{pred}}-\Delta X_i^*\right\rVert_2^2.
+$$
+
+变量说明：`Delta X_pred` 是 Arm E 的 `N x 3` output，`Delta X*` 是 exact clean
+displacement，`L_E` 是 direct vertex-space MSE。Arm E 使用相同 encoder/backbone/
+head width，但不使用 `L`、sparse solver、lambda 或 post-process。
+
+旧 visibility/confidence-weighted Huber/Adam recovery 仍作为冻结历史 baseline。
+Exact-target matched-domain diagnostics 表明 hard visibility 是已测试的最大 recovery-
+efficiency 损失，因此不能再把它描述为 active recovery design。
 
 ### 报告指标
 
@@ -579,8 +589,16 @@ deterministic area-weighted surface samples；`d(x,S)` 是 point 到 triangle su
 的最短距离；`|.|` 表示 set cardinality。修正后的 same-initial benchmark 固定
 `n=3000`、`s=7`；其他报告会分别序列化自己的 sample count 与 base seed。
 
-其中 `S_A` 和 `S_B` 是 triangle surfaces，`V_B'` 是实际评估或 subsampled GT
-vertex set。
+对于 same-topology recovered geometry，报告 vertex RMS：
+
+$$
+\mathrm{RMS}_{\mathrm{vertex}}=
+\sqrt{\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert X_i^{\mathrm{refined}}-X_i^*\right\rVert_2^2}.
+$$
+
+变量说明：`X_i^refined` 与 `X_i*` 是相同 vertex index 的 recovered/clean positions，
+`N` 是 mesh vertex count。该 correspondence metric 补充而不替代 surface Chamfer。
 
 ### 历史 `h^2`-normalized formulation
 
@@ -751,6 +769,25 @@ Gaussian-only 略微恶化 high-curvature tail，却获得最好的 mean downstr
 `F + (F-Gaussian(F))` 获得最好的 prediction/tail metrics，且 mean
 Chamfer/P2S 仍优于 original Arm B。
 
+### Strong-smoothing sparse recovery 与 recovery-aware training
+
+使用全部 Laplacian rows 并仅用 component centroid 固定 translation 时，v2
+exact-target sparse oracle 的 mean efficiency 为 `0.92366`。旧冻结 recovery 中，
+hard visibility 是最大的已测试 efficiency 损失；confidence 基本为常数，增加 Adam
+steps 也未关闭差距。因此当前研究采用全方程 regularized sparse recovery。
+
+已完成 A/B test 结果为：
+
+| Arm | Raw EPE ↓ | Raw RMS ↓ | Chamfer ↓ | Eta ↑ | P2S p95 ↓ | Normal ↑ | Vertex RMS ↓ |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| A：仅 Lap | **0.00252641** | 0.00737725 | 0.00395529 | 0.07206 | 0.0122582 | 0.954902 | 0.0135181 |
+| B：Lap + recovery-aware vertex | 0.00263986 | **0.00683290** | **0.00358497** | **0.13036** | **0.0105581** | **0.959366** | **0.0115532** |
+
+Arm B 在 32/50 上取得更低 paired Chamfer，在 43/50 上取得更低 vertex RMS，但
+raw EPE 仅胜 10/50。Arms C/D（`lambda=10^-3/10^-4`）和 direct-vertex Arm E 仍由
+dependency gate 控制；详见[当前研究合同与状态快照](docs/SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md)。
+完整 A-E matched evaluation 前不作 H1/H2 判定。
+
 ### Native 1920 + high-frequency residual（已完成）
 
 Native-1920 数据使用相同的 250 个 sample IDs、`200/25/25` split、28 个
@@ -796,8 +833,15 @@ batch 为 7。
 DataLoader worker 耗尽 `/dev/shm` 失败（`Bus error` / `No space left on device`）。
 这些 run 只保留为基础设施历史。Job 16607 不复用上述 checkpoint：RGB 被 stage 到
 node-local storage，workers 关闭，overwrite/resume guards 强制执行 from-scratch
-contract。8 月 21 日快照进度为 94%；最终 test 与 geometry evaluation 必须等待
-step 200,000。
+contract。该 job 已完成固定 200,000-step checkpoint。完整 1,000-sample learned-
+method evaluation 将 unified Chamfer 从 `0.00776417` 降至 `0.00522955`，959/1000
+samples 改善。
+
+Same-initial external comparison 也已完成。Ours 的 aggregate valid-sample Chamfer
+最低；paired 胜数为：对 NDS 742/998、对 NDS-28V-full 632/999、对 nvdiffrec
+799/999、对 ExMesh 955/996。Input contract 通过，但 strict/full metric completeness
+仍为 false：invalid method outputs 与 ExMesh connectivity change 显式保留，未被修复
+或静默填补。
 
 ### Sofa50 同初始网格外部对比
 

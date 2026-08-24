@@ -1,0 +1,23 @@
+{
+  "experiment": "future2000_same_initial_8sample_blackwell",
+  "source_manifest": "/networkhome/WMGDS/zhou_c/future2000_gt_adaptive_synthetic_current_28view_v2/manifest.json",
+  "source_manifest_sha256": "bb7baa2b2f34f7b2b00c176f6638e81915db13f96985820a007b55b5a764343d",
+  "source_test_contract": {
+    "objects": 200,
+    "variants_per_object": 5,
+    "samples": 1000
+  },
+  "selection_seed": 7,
+  "selection_algorithm": "Python random.Random(7): sample 8 sorted object IDs without replacement, then choose one of the five sorted variants uniformly for each object",
+  "sample_ids": [
+    "08f0e88a-cca8-43c2-947f-9a8062d342b6__v02",
+    "0f5d0383-79b1-488b-8a9a-520e50271e7d__v04",
+    "18b696da-a446-48e8-85c2-2f5f618aeabd__v00",
+    "28252bb2-07f3-4604-826c-23d18cc265b3__v04",
+    "61a88aba-4dd4-40f3-816e-58a51696e41c__v01",
+    "719b6e52-d85e-4e4e-ae53-cafedfd2ab15__v00",
+    "9c617ad9-d176-4b62-bd29-383e6a4e5d6b__v00",
+    "cb8ef374-1462-4eb5-ae5e-689da0abec7d__v03"
+  ],
+  "shared_input_contract": "Each method receives the exact same current mesh, 28 native-960 RGB observations and cameras for each selected sample; GT is evaluation-only."
+}

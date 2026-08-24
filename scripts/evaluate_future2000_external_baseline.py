@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import shlex
@@ -34,7 +35,8 @@ from mlr.learned_laplacian.evaluation import evaluate_mesh_geometry
 from mlr.learned_laplacian.multi_dataset import PreparedMeshDataset
 
 
-METHODS = ("openmvs_refinemesh", "nds", "nerf2mesh", "exmesh", "nvdiffrec")
+NDS_METHODS = ("nds", "nds_28v_full")
+METHODS = ("openmvs_refinemesh", *NDS_METHODS, "nerf2mesh", "exmesh", "nvdiffrec")
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -70,7 +72,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         matches = [index for index, value in enumerate(dataset.sample_ids) if value == args.sample_id]
         if len(matches) != 1:
             raise ValueError(f"Expected exactly one --sample-id match, found {matches}")
-        indices = matches if args.shard_index == 0 else []
+        # A selected-sample array gives every task a unique shard index while
+        # explicitly assigning its sample ID.  Do not apply modulo sharding a
+        # second time, otherwise only task zero would execute.
+        indices = matches
     preflight_error = _preflight(args)
     rows: list[dict[str, Any]] = []
     started = time.perf_counter()
@@ -139,6 +144,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             row = _failure_row(
                 static, source, args.method, "execution_or_evaluation", reason
             )
+            for log_path in sorted(work_dir.glob("command_*.log")):
+                shutil.copy2(log_path, sample_dir / log_path.name)
             (sample_dir / "traceback.txt").write_text(
                 traceback.format_exc(), encoding="utf-8"
             )
@@ -189,7 +196,7 @@ def _preflight(args: argparse.Namespace) -> str | None:
             missing.append(str(args.external_python))
         entry = args.external_root / (
             "reconstruct.py"
-            if args.method == "nds"
+            if args.method in NDS_METHODS
             else "main.py"
             if args.method == "nerf2mesh"
             else "train.py"
@@ -204,7 +211,7 @@ def _preflight(args: argparse.Namespace) -> str | None:
 def _export(method: str, sample: dict[str, Any], scene_dir: Path) -> ExternalSceneExport:
     if method == "openmvs_refinemesh":
         return export_openmvs_scene(sample, scene_dir)
-    if method == "nds":
+    if method in NDS_METHODS:
         return export_nds_scene(sample, scene_dir)
     if method == "nvdiffrec":
         return export_nvdiffrec_scene(sample, scene_dir)
@@ -279,7 +286,7 @@ def _execute(
         for number, command in enumerate(commands):
             peak = max(peak, _run_command(command, work_dir / f"command_{number}.log"))
         result = work_dir / "refined.ply"
-    elif args.method == "nds":
+    elif args.method in NDS_METHODS:
         output = work_dir / "nds_output"
         nds_arguments = method_config["arguments"]
         command = [
@@ -297,6 +304,10 @@ def _execute(
             str(nds_arguments["iterations"]),
             "--image_scale",
             str(nds_arguments.get("image_scale", 1)),
+            "--view_sampling_mode",
+            str(nds_arguments.get("view_sampling_mode", "random")),
+            "--views_per_iter",
+            str(nds_arguments.get("views_per_iter", 1)),
             "--lr_vertices",
             str(nds_arguments.get("lr_vertices", 0.001)),
             "--lr_shader",
@@ -606,6 +617,31 @@ def _audit_initial_identity(
 def _audit_source_identity(
     static: dict[str, Any], source: dict[str, Any]
 ) -> dict[str, Any]:
+    if "common_initial_mesh" not in source:
+        vertices = static["vertices"].detach().cpu().numpy()
+        faces = static["faces"].detach().cpu().numpy()
+        digest = hashlib.sha256()
+        digest.update(np.ascontiguousarray(vertices).tobytes())
+        digest.update(np.ascontiguousarray(faces).tobytes())
+        dataset_root = Path(str(static["_dataset_root"])).resolve()
+        container = (dataset_root / str(source["path"])).resolve()
+        image_paths = []
+        for value in static["image_paths"]:
+            path = Path(str(value))
+            image_paths.append((path if path.is_absolute() else dataset_root / path).resolve())
+        image_parents = {path.parent for path in image_paths}
+        if len(image_paths) != 28:
+            raise RuntimeError("Future2000 source does not have exactly 28 image paths")
+        return {
+            "common_initial_mesh": f"{container}::vertices/faces",
+            "common_initial_mesh_sha256": digest.hexdigest(),
+            "initial_vertex_count": len(vertices),
+            "initial_face_count": len(faces),
+            "common_initial_source_identity_audit": True,
+            "image_directory": ";".join(str(path) for path in sorted(image_parents)),
+            "view_count": len(image_paths),
+            "camera_and_gt_container": str(container),
+        }
     initial_path = Path(str(source["common_initial_mesh"]))
     expected_sha = str(source["common_initial_mesh_sha256"])
     observed_sha = _sha256_file(initial_path)
@@ -652,11 +688,18 @@ def _sha256_file(path: Path) -> str:
 
 def _failure_row(
     static: dict[str, Any],
-    source: dict[str, Any],
+    source: dict[str, Any] | str,
     method: str,
     stage: str,
-    reason: str,
+    reason: str | None = None,
 ) -> dict[str, Any]:
+    # Preserve the historical helper call used by lightweight unit tests and
+    # older local tooling: _failure_row(static, method, stage, reason).
+    if reason is None:
+        reason = stage
+        stage = method
+        method = str(source)
+        source = {}
     return {
         "sample_id": str(static["sample_id"]),
         "method": method,
@@ -774,9 +817,15 @@ def main() -> int:
         action="store_true",
         help="Re-run samples whose existing status.json is failed.",
     )
+    parser.add_argument(
+        "--fail-on-sample-error",
+        action="store_true",
+        help="Return a non-zero process status when any assigned sample fails.",
+    )
     args = parser.parse_args()
-    print(json.dumps(run(args), indent=2))
-    return 0
+    result = run(args)
+    print(json.dumps(result, indent=2))
+    return 2 if args.fail_on_sample_error and result["failed_samples"] else 0
 
 
 if __name__ == "__main__":

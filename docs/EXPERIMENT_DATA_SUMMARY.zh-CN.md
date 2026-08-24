@@ -327,6 +327,31 @@ Native 1920 未改善 Top-10%、Top-1%、raw RMS、recovery-weighted RMS、Chamf
 current-query training 的 query-distribution gap。历史 arm 早于 HF，因此这不是严格
 单变量 normalization ablation。
 
+### Strong-smoothing recovery 诊断与 recovery-aware A-E 研究
+
+Exact target 加全方程 sparse integration 证明 v2 raw Laplacian 可恢复：用 component-
+centroid translation gauge 时 mean oracle efficiency 为 `0.92366`。冻结 solver 中，
+hard visibility 是最大 incremental loss（mean eta `0.34258 -> 0.16875`，44/50
+变差）；confidence 可忽略，2,000 Adam steps 也只达到 `0.18635`。
+
+已完成 A/B 使用全部 rows、`lambda=10^-2`，不使用 confidence、recovery Huber 或
+Adam。Arm B 加入 `beta=10^-2` same-index recovered-vertex MSE。
+
+| Test metric | A：仅 Lap | B：Lap + vertex |
+|---|---:|---:|
+| Raw EPE | **0.00252641** | 0.00263986 |
+| Raw RMS | 0.00737725 | **0.00683290** |
+| Chamfer | 0.00395529 | **0.00358497** |
+| Eta | 0.07206 | **0.13036** |
+| P2S p95 | 0.0122582 | **0.0105581** |
+| Normal | 0.954902 | **0.959366** |
+| Vertex RMS | 0.0135181 | **0.0115532** |
+
+B 的 Chamfer 胜 32/50、vertex RMS 胜 43/50，但 raw EPE 只胜 10/50。C
+（`lambda=10^-3`）job `17274` 正在运行；D（`10^-4`）与 direct-vertex Arm E 依赖
+排队。E 保留 826,115 参数，只使用 `V_input + Delta V_pred` 与 direct residual MSE。
+Matched merge 完成前不作 A-E representation 结论。
+
 ## Future2000 GT-adaptive 扩展实验
 
 状态更新：2026-08-23 BST。数据集包含 2,000 个源物体，每个物体 5 个
@@ -360,7 +385,10 @@ batch 为 7；全部 RGB stage 到 node-local storage，DataLoader workers 为 0
 directory 中存在旧 checkpoint 时会直接拒绝启动。该 run 已产出固定 200,000-step
 checkpoint，并用于完整 held-out test。1,000 meshes 上统一 Chamfer 从 `0.00776417`
 降至 `0.00522955`，959/1000 samples 改善；mean normal consistency 从 `0.924252`
-降至 `0.895907`。External full-1000 arms 仍在运行，因此尚不报告最终跨方法排名。
+降至 `0.895907`。Full-1000 external comparison 已完成。Ours 的 valid-sample Chamfer
+为 `0.00522955`；paired Chamfer 对 NDS 胜 742/998、对 NDS-28V-full 胜 632/999、
+对 nvdiffrec 胜 799/999、对 ExMesh 胜 955/996。Input contract 通过；invalid outputs
+与 ExMesh connectivity changes 被显式保留，因此 metric completeness 仍为 false。
 
 ## Sofa50 同初始网格外部 benchmark
 
@@ -441,6 +469,8 @@ mesh 统一重算。Native metrics 只作 provenance。详见双语
 | 16736 | Sofa50 same-initial unified report | 已完成 | 四种方法均 25/25；使用 deterministic unified evaluator；`contract_audit=true`。 |
 | 17082 | Sofa50 多拓扑 strong-smoothing v2，20k | 已完成 | 2×L40；effective global batch 8；final/best validation `2.26915e-6`。 |
 | 17110–17113 | Sofa50 v1-v2 test/recovery 与 unified merge | 已完成 | Contract true；v2 raw EPE `0.00276820` 对 v1 `0.00840367`，但 refined Chamfer `0.00451747` 对 `0.00426879`。 |
+| 17274 | Sofa50 recovery-aware Arm C，`lambda=10^-3` | 2026-08-24 快照运行中 | 8×Blackwell；step 3,200/20,000；PCG failures 与 NaN/Inf 均为 0。 |
+| 17275/17278 | Arm D / direct-vertex Arm E | Dependency 排队 | D 在 C 后，E 在 D 后；冻结 evaluation 前不记录结果。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 

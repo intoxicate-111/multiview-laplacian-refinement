@@ -4,6 +4,7 @@ from __future__ import annotations
 """Run the frozen canonical HF learned-Laplacian model for the controlled benchmark."""
 
 import argparse
+import copy
 import csv
 import hashlib
 import json
@@ -48,19 +49,39 @@ def benchmark_rows(path: Path) -> dict[str, dict[str, Any]]:
     return {str(row["sample_id"]): dict(row) for row in payload["samples"]}
 
 
-def spec(run_dir: Path, device: torch.device) -> dict[str, Any]:
-    config = _run_config(run_dir)
+def spec(
+    run_dir: Path,
+    device: torch.device,
+    *,
+    view_chunk_size: int | None = None,
+) -> dict[str, Any]:
+    source_config = _run_config(run_dir)
+    config = copy.deepcopy(source_config)
+    if view_chunk_size is not None:
+        if view_chunk_size < 1:
+            raise ValueError("view_chunk_size must be positive")
+        config.setdefault("image_encoder", {})["view_chunk_size"] = view_chunk_size
     checkpoint = run_dir / "checkpoint_latest.pt"
     model = _build_model(config, None, False).to(device)
     payload = load_checkpoint(checkpoint, model, map_location=device)
     model.eval()
     amp_enabled, amp_dtype = _amp_settings(config, device)
-    if int(payload.get("optimizer_steps", -1)) != 20_000:
-        raise ValueError("Canonical checkpoint is not the completed 20,000-step model")
+    expected_optimizer_steps = int(
+        source_config.get("multi_object_training", {}).get("max_optimizer_steps", -1)
+    )
+    actual_optimizer_steps = int(payload.get("optimizer_steps", -1))
+    if expected_optimizer_steps < 1 or actual_optimizer_steps != expected_optimizer_steps:
+        raise ValueError(
+            "Checkpoint is not the completed configured run: "
+            f"expected {expected_optimizer_steps}, found {actual_optimizer_steps}"
+        )
     return {
         "config": config,
+        "source_config": source_config,
         "checkpoint": checkpoint,
         "checkpoint_sha256": sha256(checkpoint),
+        "optimizer_steps": actual_optimizer_steps,
+        "inference_view_chunk_size": view_chunk_size,
         "model": model,
         "amp_enabled": amp_enabled,
         "amp_dtype": amp_dtype,
@@ -76,6 +97,11 @@ def main() -> int:
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--view-chunk-size",
+        type=int,
+        help="Execution-only image-view chunking; this does not alter model weights.",
+    )
     args = parser.parse_args()
     device = torch.device(args.device)
     dataset = PreparedMeshDataset.from_manifest(args.manifest, "test")
@@ -90,7 +116,11 @@ def main() -> int:
     ]
     if args.sample_id is not None and len(selected) != 1:
         raise ValueError(f"Expected one selected sample, found {selected}")
-    model_spec = spec(args.run_dir.resolve(), device)
+    model_spec = spec(
+        args.run_dir.resolve(),
+        device,
+        view_chunk_size=args.view_chunk_size,
+    )
     rows = []
     for index in selected:
         static = dataset.load_static(index)
@@ -170,6 +200,8 @@ def main() -> int:
             "view_count": 28,
             "checkpoint": str(model_spec["checkpoint"]),
             "checkpoint_sha256": model_spec["checkpoint_sha256"],
+            "checkpoint_optimizer_steps": model_spec["optimizer_steps"],
+            "inference_view_chunk_size": model_spec["inference_view_chunk_size"],
             "runtime_seconds": runtime,
             "peak_gpu_memory_mb": peak,
             "method_config_path": str(sample_dir / "method_config.json"),

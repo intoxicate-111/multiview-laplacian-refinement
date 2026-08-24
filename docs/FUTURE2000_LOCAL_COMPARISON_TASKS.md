@@ -3,18 +3,17 @@
 These scripts run the comparison and reporting pipeline directly on the local
 machine. They contain no Slurm submission commands.
 
-Status snapshot: 2026-08-15 18:47 BST. Learned raw-Laplacian job 15795 resumed
-the intact step-32k checkpoint and reached step 64,000, then stopped after a
-DataLoader worker exhausted `/dev/shm` (`Bus error` / `No space left on
-device`). The step-64k checkpoint is intact and resumable. Paired direct-
-displacement jobs 15759/15760 were cancelled, so the learned comparison cannot
-start yet. Do not substitute an incomplete checkpoint for either final arm.
+Status update: 2026-08-24 BST. This local launcher is retained for
+reproducibility but is no longer the source of the primary comparison. The
+later seven-Blackwell from-scratch run completed its fixed 200,000-step
+checkpoint, and the same-initial full-1000 Ours/NDS/NDS-28V-full/nvdiffrec/
+ExMesh benchmark completed on the HPC. Ours has aggregate valid-sample Chamfer
+`0.00522955`; invalid external outputs remain explicit. Do not replace that
+frozen benchmark with the incomplete step-64k historical checkpoint or merge
+results from this local workflow into its primary table.
 
-An older external-method diagnostic array, job 15791, was already running on
-HPC when the workflow was moved local. Its partial outputs are not final and
-its high sample-level failure count must not be merged into the local report.
-Do not submit another external comparison through Slurm; this document is the
-supported launch path for new comparison work.
+The older job 15791 and the local workflow remain historical diagnostic paths.
+Their partial outputs must not be merged with the completed full-1000 report.
 
 ## Before running
 
@@ -40,6 +39,12 @@ The setup pins the same official commits as
 hermetic vcpkg FFmpeg; NeRF2Mesh installs a pkg_resources-compatible
 setuptools; ExMesh installs CUDA runtime headers and Ninja.
 
+OpenMVS RefineMesh is retained here only as an external low-quality-input
+baseline/stress arm. Its mesh must never become a training target, pseudo-GT,
+checkpoint-selection endpoint or desired output topology. Reports must show its
+initial quality and must not use its result alone to rank or scale the learned
+method; see [the OpenMVS input policy](OPENMVS_INPUT_POLICY.md).
+
 ## Run tasks
 
 List the available local tasks:
@@ -59,7 +64,7 @@ F2K_GPUS=0,1,2 bash scripts/local/run_future2000_comparisons.sh all
 `all` runs this strict sequence locally:
 
 1. learned Laplacian versus direct displacement;
-2. OpenMVS RefineMesh;
+2. OpenMVS RefineMesh (diagnostic external stress arm only);
 3. NDS;
 4. NeRF2Mesh;
 5. RGB-only DA3 priors and ExMesh;

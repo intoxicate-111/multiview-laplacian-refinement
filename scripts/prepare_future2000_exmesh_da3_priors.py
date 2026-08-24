@@ -63,7 +63,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         representatives = [item for item in representatives if item[0] == args.object_id]
         if len(representatives) != 1:
             raise ValueError(f"Expected exactly one --object-id match, found {representatives}")
-    assigned = representatives[args.shard_index :: args.shard_count]
+        assigned = representatives
+    else:
+        assigned = representatives[args.shard_index :: args.shard_count]
     device = torch.device(args.device)
     model = DepthAnything3.from_pretrained(prior_config["model"]).to(device)
     args.output_dir.mkdir(parents=True, exist_ok=True)
