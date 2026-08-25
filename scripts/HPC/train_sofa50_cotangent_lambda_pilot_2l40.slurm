@@ -1,12 +1,12 @@
 #!/bin/bash
 
 #SBATCH --job-name=s50_cot_pilot
-#SBATCH --partition=test
+#SBATCH --partition=xlong
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:L40:2
 #SBATCH --cpus-per-task=24
-#SBATCH --mem=192G
+#SBATCH --mem=128G
 #SBATCH --time=12:00:00
 #SBATCH --array=0-6%2
 #SBATCH --output=/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement-cotangent/slurm_logs/%x_%A_%a.out
@@ -51,4 +51,3 @@ test "$(grep -c 'L40' "${OUTPUT}/gpu_inventory_${SLURM_JOB_ID}.csv")" -eq 2
     --gradient-accumulation-meshes 4
 
 "${PYTHON}" -c 'import json,sys; p=json.load(open(sys.argv[1])); assert p["optimizer_steps"] == 2000; assert len(p["per_object_metrics"]["validation"]) == 50' "${OUTPUT}/metrics.json"
-
