@@ -13,7 +13,7 @@
 #SBATCH --error=/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/slurm_logs/%x_%j.err
 
 set -euo pipefail
-: "${ARM:?Submit with --export=ALL,ARM=C or ARM=D}"
+: "${ARM:?Submit with --export=ALL,ARM=C|D|E|F}"
 case "${ARM}" in
   C)
     LAMBDA="1e-3"
@@ -23,8 +23,16 @@ case "${ARM}" in
     LAMBDA="1e-4"
     OUTPUT_NAME="sofa50_v2_sparse_recovery_arm_d_lambda1e-4_20k_seed7"
     ;;
+  E)
+    LAMBDA="1e-1"
+    OUTPUT_NAME="sofa50_v2_sparse_recovery_arm_e_lambda1e-1_20k_seed7"
+    ;;
+  F)
+    LAMBDA="1"
+    OUTPUT_NAME="sofa50_v2_sparse_recovery_arm_f_lambda1_20k_seed7"
+    ;;
   *)
-    echo "ARM must be C or D, got ${ARM}" >&2
+    echo "ARM must be C, D, E or F, got ${ARM}" >&2
     exit 2
     ;;
 esac

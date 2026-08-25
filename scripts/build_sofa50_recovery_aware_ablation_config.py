@@ -37,7 +37,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--arm", required=True, choices=("A", "B", "C", "D"))
+    parser.add_argument(
+        "--arm", required=True, choices=("A", "B", "C", "D", "E", "F")
+    )
     parser.add_argument("--lambda-value", required=True, type=float)
     parser.add_argument("--beta", type=float, default=0.0)
     parser.add_argument("--max-optimizer-steps", type=int, default=20000)
@@ -53,7 +55,7 @@ def main() -> int:
         raise ValueError("lambda must be positive")
     if args.arm == "A" and args.beta != 0:
         raise ValueError("Arm A beta must be zero")
-    if args.arm in {"B", "C", "D"} and args.beta <= 0:
+    if args.arm in {"B", "C", "D", "E", "F"} and args.beta <= 0:
         raise ValueError(f"Arm {args.arm} beta must be positive")
     if args.run_kind == "final" and args.max_optimizer_steps != 20000:
         raise ValueError("Final runs require exactly 20,000 optimizer steps")
@@ -75,18 +77,20 @@ def main() -> int:
         "recovery_weight": "none",
     }
     config["training"]["recovery_aware_geometry_loss"] = {
-        "enabled": args.arm in {"B", "C", "D"},
+        "enabled": args.arm in {"B", "C", "D", "E", "F"},
         "lambda": args.lambda_value,
         "beta": args.beta,
-        "maximum_iterations": 2048 if args.arm in {"C", "D"} else 256,
+        "maximum_iterations": 2048 if args.arm in {"C", "D", "E", "F"} else 256,
         "tolerance": 1e-4,
-        "compute_dtype": "float64" if args.arm in {"C", "D"} else "float32",
+        "compute_dtype": (
+            "float64" if args.arm in {"C", "D", "E", "F"} else "float32"
+        ),
         "differentiation": "implicit_custom_autograd",
         "clean_vertex_use": "training_loss_only_never_model_input",
         # C/D require observational runtime logging. This flag only exposes
         # audit values from the same PCG solve and retains gradients for norm
         # measurement; it does not alter the solve, loss, or optimizer update.
-        "runtime_diagnostics": args.arm in {"C", "D"},
+        "runtime_diagnostics": args.arm in {"C", "D", "E", "F"},
     }
     config["multi_object_training"]["max_optimizer_steps"] = args.max_optimizer_steps
     config["multi_object_training"]["gradient_accumulation_meshes"] = (
@@ -112,7 +116,7 @@ def main() -> int:
     config["experiment_metadata"] = {
         "experiment": (
             "Sofa50MultiTopologyRawLap500_v2_recovery_aware_lambda_extension"
-            if args.arm in {"C", "D"}
+            if args.arm in {"C", "D", "E", "F"}
             else "Sofa50MultiTopologyRawLap500_v2_recovery_aware_two_arm"
         ),
         "arm": args.arm,
@@ -134,7 +138,7 @@ def main() -> int:
         "no_visibility_confidence_or_adam_recovery": True,
         "pcg_numerical_execution_difference": (
             "float64_with_maximum_iterations_2048_after_float32_smoke_stagnation; tolerance_unchanged_at_1e-4"
-            if args.arm in {"C", "D"}
+            if args.arm in {"C", "D", "E", "F"}
             else "none"
         ),
         # The completed strong_smooth_v2 pipeline has no patch sampler or

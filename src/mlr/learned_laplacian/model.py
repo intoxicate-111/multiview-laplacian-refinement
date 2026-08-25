@@ -60,6 +60,9 @@ class LearnedLaplacianOutput:
     dynamic_gate_logit: torch.Tensor | None = None
     dynamic_gate_signed: torch.Tensor | None = None
     dynamic_gate_effective: torch.Tensor | None = None
+    recovery_lambda_logit: torch.Tensor | None = None
+    recovery_lambda: torch.Tensor | None = None
+    direct_vertex_displacement_prediction: torch.Tensor | None = None
 
     @property
     def delta_hat_prediction(self) -> torch.Tensor:
@@ -98,6 +101,12 @@ class LearnedLaplacianModel(nn.Module):
         dynamic_residual_expert_hidden_dim: int = 32,
         dynamic_gate_hidden_dim: int = 32,
         dynamic_gate_initial_bias: float = 0.1,
+        recovery_lambda_head_enabled: bool = False,
+        recovery_lambda_head_hidden_dim: int = 16,
+        recovery_lambda_minimum: float = 1e-3,
+        recovery_lambda_maximum: float = 1e-1,
+        recovery_lambda_initial: float = 1e-2,
+        hybrid_direct_head_enabled: bool = False,
     ) -> None:
         super().__init__()
         if input_mode not in INPUT_MODES:
@@ -136,10 +145,26 @@ class LearnedLaplacianModel(nn.Module):
         )
         self.dynamic_gate_hidden_dim = int(dynamic_gate_hidden_dim)
         self.dynamic_gate_initial_bias = float(dynamic_gate_initial_bias)
+        self.recovery_lambda_head_enabled = bool(recovery_lambda_head_enabled)
+        self.recovery_lambda_head_hidden_dim = int(recovery_lambda_head_hidden_dim)
+        self.recovery_lambda_minimum = float(recovery_lambda_minimum)
+        self.recovery_lambda_maximum = float(recovery_lambda_maximum)
+        self.recovery_lambda_initial = float(recovery_lambda_initial)
+        self.hybrid_direct_head_enabled = bool(hybrid_direct_head_enabled)
         if self.dynamic_residual_expert_hidden_dim < 1:
             raise ValueError("dynamic_residual_expert_hidden_dim must be positive.")
         if self.dynamic_gate_hidden_dim < 1:
             raise ValueError("dynamic_gate_hidden_dim must be positive.")
+        if self.recovery_lambda_head_hidden_dim < 1:
+            raise ValueError("recovery_lambda_head_hidden_dim must be positive.")
+        if not (
+            0 < self.recovery_lambda_minimum
+            < self.recovery_lambda_initial
+            < self.recovery_lambda_maximum
+        ):
+            raise ValueError(
+                "Recovery lambda bounds must satisfy 0 < minimum < initial < maximum."
+            )
         self.position_encoder = FourierPositionEncoding(
             num_frequencies=position_num_frequencies,
             include_input=position_include_input,
@@ -221,6 +246,40 @@ class LearnedLaplacianModel(nn.Module):
             gate_final = self.dynamic_gate_head[-1]
             nn.init.zeros_(gate_final.weight)
             nn.init.constant_(gate_final.bias, self.dynamic_gate_initial_bias)
+        # A mesh-level scalar side head. Its zero output-layer weights make the
+        # initial lambda exactly the requested Arm-B operating point while
+        # preserving every canonical per-vertex prediction.
+        self.recovery_lambda_head = (
+            nn.Sequential(
+                nn.Linear(hidden_dim, self.recovery_lambda_head_hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.recovery_lambda_head_hidden_dim, 1),
+            )
+            if self.recovery_lambda_head_enabled
+            else None
+        )
+        if self.recovery_lambda_head is not None:
+            final = self.recovery_lambda_head[-1]
+            nn.init.zeros_(final.weight)
+            low = torch.log10(torch.tensor(self.recovery_lambda_minimum)).item()
+            high = torch.log10(torch.tensor(self.recovery_lambda_maximum)).item()
+            initial = torch.log10(torch.tensor(self.recovery_lambda_initial)).item()
+            fraction = (initial - low) / (high - low)
+            bias = torch.logit(torch.tensor(fraction)).item()
+            nn.init.constant_(final.bias, bias)
+        # The controlled end-to-end hybrid adds exactly one output head to the
+        # established shared backbone.  It mirrors the canonical Laplacian head
+        # and is constructed last, so enabling it cannot perturb the seeded
+        # initialization of any pre-existing parameter.
+        self.hybrid_direct_head = (
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_dim, 3),
+            )
+            if self.hybrid_direct_head_enabled
+            else None
+        )
 
     def forward(self, sample: Mapping[str, Any]) -> LearnedLaplacianOutput:
         query_positions = sample.get("query_positions", sample["vertices"])
@@ -319,6 +378,11 @@ class LearnedLaplacianModel(nn.Module):
         shared_features, predicted = self.predictor.forward_with_shared_features(
             vertex_features, edge_index
         )
+        direct_vertex_displacement_prediction = (
+            None
+            if self.hybrid_direct_head is None
+            else self.hybrid_direct_head(shared_features)
+        )
         base_laplacian_prediction = predicted
         oracle_residual_prediction = None
         if self.oracle_residual_expert is not None:
@@ -353,6 +417,20 @@ class LearnedLaplacianModel(nn.Module):
             if self.confidence_head is None
             else torch.sigmoid(self.confidence_head(vertex_features)).squeeze(-1)
         )
+        recovery_lambda_logit = None
+        recovery_lambda = None
+        if self.recovery_lambda_head is not None:
+            recovery_lambda_logit = self.recovery_lambda_head(
+                shared_features.mean(dim=0, keepdim=True)
+            ).reshape(())
+            low = torch.log10(
+                recovery_lambda_logit.new_tensor(self.recovery_lambda_minimum)
+            )
+            high = torch.log10(
+                recovery_lambda_logit.new_tensor(self.recovery_lambda_maximum)
+            )
+            log_lambda = low + torch.sigmoid(recovery_lambda_logit) * (high - low)
+            recovery_lambda = torch.pow(recovery_lambda_logit.new_tensor(10.0), log_lambda)
         return LearnedLaplacianOutput(
             predicted_laplacian=predicted,
             confidence_prediction=confidence_prediction,
@@ -366,6 +444,9 @@ class LearnedLaplacianModel(nn.Module):
             dynamic_gate_logit=dynamic_gate_logit,
             dynamic_gate_signed=dynamic_gate_signed,
             dynamic_gate_effective=dynamic_gate_effective,
+            recovery_lambda_logit=recovery_lambda_logit,
+            recovery_lambda=recovery_lambda,
+            direct_vertex_displacement_prediction=direct_vertex_displacement_prediction,
         )
 
     def architecture_config(self) -> dict[str, Any]:
@@ -393,6 +474,12 @@ class LearnedLaplacianModel(nn.Module):
             "dynamic_residual_expert_hidden_dim": self.dynamic_residual_expert_hidden_dim,
             "dynamic_gate_hidden_dim": self.dynamic_gate_hidden_dim,
             "dynamic_gate_initial_bias": self.dynamic_gate_initial_bias,
+            "recovery_lambda_head_enabled": self.recovery_lambda_head_enabled,
+            "recovery_lambda_head_hidden_dim": self.recovery_lambda_head_hidden_dim,
+            "recovery_lambda_minimum": self.recovery_lambda_minimum,
+            "recovery_lambda_maximum": self.recovery_lambda_maximum,
+            "recovery_lambda_initial": self.recovery_lambda_initial,
+            "hybrid_direct_head_enabled": self.hybrid_direct_head_enabled,
         }
 
     def _sample_image_features(

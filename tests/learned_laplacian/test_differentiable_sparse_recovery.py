@@ -117,3 +117,84 @@ def test_differentiable_audit_uses_the_same_forward_and_keeps_gradients() -> Non
     assert prediction.grad is not None
     assert torch.isfinite(prediction.grad).all()
     assert float(torch.linalg.vector_norm(prediction.grad)) > 0
+
+
+def test_regularization_scalar_receives_correct_finite_nonzero_gradient() -> None:
+    edge_index, degree = _cycle_graph()
+    initial = torch.tensor(
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        dtype=torch.double,
+    )
+    prediction = torch.tensor(
+        [[-0.8, -0.9, 0.1], [0.9, -0.7, -0.1], [0.8, 0.9, 0.2], [-0.9, 0.7, -0.2]],
+        dtype=torch.double,
+    )
+    target = 0.65 * initial
+    regularization = torch.tensor(1e-2, dtype=torch.double, requires_grad=True)
+
+    def objective(value: torch.Tensor) -> torch.Tensor:
+        recovered = differentiable_regularized_sparse_recovery(
+            prediction,
+            initial,
+            edge_index,
+            degree,
+            regularization=value,
+            maximum_iterations=256,
+            tolerance=1e-11,
+        )
+        return (recovered - target).square().mean()
+
+    loss = objective(regularization)
+    loss.backward()
+    assert regularization.grad is not None
+    assert torch.isfinite(regularization.grad)
+    assert abs(float(regularization.grad)) > 0
+    epsilon = 1e-6
+    finite_difference = (
+        objective(torch.tensor(1e-2 + epsilon, dtype=torch.double))
+        - objective(torch.tensor(1e-2 - epsilon, dtype=torch.double))
+    ) / (2 * epsilon)
+    torch.testing.assert_close(
+        regularization.grad, finite_difference, atol=2e-7, rtol=2e-6
+    )
+
+
+def test_hybrid_solve_has_correct_gradients_to_lap_and_direct_branches() -> None:
+    edge_index, degree = _cycle_graph()
+    generator = torch.Generator().manual_seed(17)
+    lap = torch.randn((4, 3), generator=generator, dtype=torch.double, requires_grad=True)
+    direct = torch.randn((4, 3), generator=generator, dtype=torch.double, requires_grad=True)
+    target = torch.randn((4, 3), generator=generator, dtype=torch.double)
+
+    def objective(lap_value: torch.Tensor, direct_value: torch.Tensor) -> torch.Tensor:
+        recovered = differentiable_regularized_sparse_recovery(
+            lap_value,
+            direct_value,
+            edge_index,
+            degree,
+            regularization=3e-2,
+            maximum_iterations=256,
+            tolerance=1e-11,
+        )
+        return (recovered - target).square().sum(dim=-1).mean()
+
+    objective(lap, direct).backward()
+    assert lap.grad is not None and direct.grad is not None
+    assert torch.isfinite(lap.grad).all() and torch.isfinite(direct.grad).all()
+    assert float(torch.linalg.vector_norm(lap.grad)) > 0
+    assert float(torch.linalg.vector_norm(direct.grad)) > 0
+
+    epsilon = 1e-6
+    for value, gradient, index in (
+        (lap.detach(), lap.grad, (1, 2)),
+        (direct.detach(), direct.grad, (2, 0)),
+    ):
+        plus = value.clone()
+        minus = value.clone()
+        plus[index] += epsilon
+        minus[index] -= epsilon
+        if value.data_ptr() == lap.detach().data_ptr():  # pragma: no cover - tensors differ
+            finite = (objective(plus, direct.detach()) - objective(minus, direct.detach())) / (2 * epsilon)
+        else:
+            finite = (objective(lap.detach(), plus) - objective(lap.detach(), minus)) / (2 * epsilon)
+        torch.testing.assert_close(gradient[index], finite, atol=3e-7, rtol=3e-6)

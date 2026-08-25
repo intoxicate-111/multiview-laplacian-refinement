@@ -28,7 +28,7 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 
 ## 项目状态
 
-状态日期：2026-08-24 BST。
+状态日期：2026-08-25 BST。
 
 OpenMVS 使用政策：现有 Sofa50 OpenMVS mesh 是低质量外部重建，只保留为
 分布外压力测试；它不是 training target、pseudo-GT、模型选择端点或期望质量
@@ -60,19 +60,22 @@ ceiling。详见 [OpenMVS 输入使用政策](docs/OPENMVS_INPUT_POLICY.zh-CN.md
 | Sofa50 多拓扑 coarse smoothing v2 | 20k 训练与受控 test/recovery 已完成 | Job `17082` 已在 2×L40 上从零完成，final/best validation 为 `2.26915e-6`。在相同 50 个 strong-smoothing test inputs 上，v2 将 raw EPE 从 v1 的 `0.00840367` 降到 `0.00276820`，但统一 refined Chamfer 更差（`0.00451747` vs `0.00426879`），normal 更低、flips 更多，改善数仅 26/50 对 38/50。更强 smoothing 改善 target prediction，但收益没有通过冻结 recovery contract 传递到 geometry。 |
 | Exact-target sparse-recovery 诊断 | 已完成 | 只用 component-centroid gauge 的全方程 sparse solve 在 v2 达到 mean oracle efficiency `0.92366`。在 `0.01` anchor 后加入 hard visibility，会把 mean efficiency 从 `0.34258` 降到 `0.16875`，并令 44/50 samples 变差；confidence 可忽略，2,000 Adam steps 也未消除坍塌。 |
 | Recovery-aware Arm A/B | 已完成 | 使用相同 `lambda=beta=10^-2` sparse recovery 时，Arm B 将 test Chamfer 从 A 的 `0.00395529` 降至 `0.00358497`，recovered vertex RMS 从 `0.0135181` 降至 `0.0115532`，尽管 raw EPE 更差。这支持 geometric-utility supervision，而不是 raw regression 改善。 |
-| Recovery-aware Arm C/D | 运行中/排队 | Arm C（`lambda=10^-3`）job `17274` 正在 8×Blackwell 上运行；Arm D（`10^-4`）job `17275` 随后执行。Objective 与 `10^-4` PCG tolerance 固定；float64/2,048-iteration PCG 是已记录的稳定性执行改动。当前不报告结果。 |
-| Direct-vertex Arm E | Audit 通过并排队 | 826,115 参数 C2F2+HF 直接预测 `Delta V`，只使用 same-index vertex MSE；不含 Laplacian target、sparse solver 或 recovery gate。Job `17278` 在 D 后执行，因此 H1/H2 representation 结论仍未判定。 |
+| Recovery-aware Arm C/D | 已完成 | 减弱 positional regularization 未改善 recovered geometry。C（`lambda=10^-3`）与 D（`10^-4`）的 test Chamfer 分别为 `0.00414926`、`0.00653139`，均差于 B（`10^-2`）的 `0.00358497`。两组使用已记录的 float64 PCG，objective 未改变。 |
+| Direct-vertex Arm E | 已完成 | 826,115 参数 C2F2+HF 仅以 same-index vertex MSE 训练 `Delta V`。Test Chamfer 为 `0.00334039`、vertex RMS 为 `0.00822130`，45/50 inputs 改善；E 不含 Laplacian target、sparse solver 或 recovery gate。 |
+| 冻结 B+E hybrid recovery | 已完成；只读 | 使用冻结 B Laplacian、冻结 E positions 作为唯一 anchor，并用 validation 选择 `lambda=3e-2`；test Chamfer 为 `0.00302983`，49/50 inputs 改善。它支持后续联合 hybrid 训练，但本身没有重训，也不授权 scaling。 |
+| End-to-end direct–Laplacian hybrid | Preflight 通过；训练中 | 单个 892,678 参数共享模型预测 latent raw-Laplacian 与 direct-displacement fields；唯一监督是固定 `lambda=3e-2` differentiable solve 后的最终 hybrid geometry。Float64 PCG/LSMR 与双分支 gradient audit 均通过；job `17363` 正在 8×Blackwell 上从零训练。 |
 | GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
 | Future2000 GT-adaptive 扩展 | 200k 训练与 learned-method test 已完成 | 固定 200,000-step checkpoint 已在 200 个 held-out objects × 5 variants 上评估。统一 Chamfer 从 `0.00776417` 降至 `0.00522955`，959/1000 samples 改善；mean normal consistency 从 `0.924252` 降至 `0.895907`，因此明确保留 distance/normal trade-off。 |
 | Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |
 | Future2000 外部基线 | Full-1000 对比已完成，invalid metrics 显式保留 | Ours 的 aggregate valid-sample Chamfer 最低（`0.00522955`），改善 959/1000 inputs。Paired Chamfer 胜数为：对 NDS 742/998、对 NDS-28V-full 632/999、对 nvdiffrec 799/999、对 ExMesh 955/996。Input-contract audit 通过；由于 invalid outputs 与 ExMesh topology change 未被修复，strict/full metric completeness 仍为 false。 |
 | 自动化测试 | 当前文档改动对应检查通过 | External adapters、same-initial aggregation、raw loss、dynamic expert/gate、image feature、native-1920 和分布式训练相关 targeted tests 通过；下文命令仍是新 checkout 的最终依据。 |
 
-当前 representation 主线是在 Sofa50 上确定的 synthetic-current、current-query/
-current-graph、direct-raw formulation。当前 recovery 研究用 regularized sparse
-solve 集成全部 predicted Laplacian rows；hard visibility、confidence、recovery
-Huber 和 Adam mesh optimization 均关闭。监督场 `L_current @ P_proxy` 只作为
-target，绝不会作为 inference feature 输入模型。已完成的 Future2000 scale-up 使用
+已确定的 representation 主线是在 Sofa50 上建立的 synthetic-current、current-query/
+current-graph、direct-raw formulation。最新受控扩展加入 direct-displacement head，
+两个 latent branches 只通过最终 hybrid geometry 训练。全部 predicted Laplacian rows
+都会被集成；hard visibility、confidence、recovery Huber 和 Adam mesh optimization
+均关闭。Clean geometry 只用于 loss，不会输入任一 branch 或 recovery solve。已完成的
+Future2000 scale-up 使用
 960 high-frequency construction、28 views、C2F2 与固定 200,000-step checkpoint；
 full-1000 same-initial external comparison 现已完成，invalid outputs 显式保留。
 
@@ -83,7 +86,8 @@ scale-up 决策之外。
 
 ## 当前训练方法
 
-模型根据 28 个标定视图和 current mesh graph，直接预测 raw target Laplacian：
+已建立的 A-D 模型根据 28 个标定视图和 current mesh graph，直接预测 raw target
+Laplacian：
 
 ```text
 28-view RGB + 相机 + current vertices/connectivity + 局部几何
@@ -122,8 +126,20 @@ current mesh vertices
 
 GT geometry 只用于构造监督与评估。Recovery-aware arms 只在 training-side vertex
 loss 使用 clean vertices，clean geometry 不进入 model 或 sparse solve。Dynamic
-residual expert、gate 和 raw-MSE loss 是已完成受控消融；direct displacement 现在是
-独立 audit 的 Arm E 对照，不属于 A-D。
+residual expert、gate 和 raw-MSE loss 是已完成受控消融；direct displacement 是独立
+audit 的 Arm E 对照。当前 end-to-end hybrid 实验复用相同 shared features，并预测
+两个 latent outputs：
+
+```text
+28-view RGB + 相机 + current vertices/connectivity + 局部几何
+    -> shared C2F2 + HF features
+    -> latent raw Laplacian delta_hat
+    -> latent direct displacement Delta V_direct
+    -> differentiable hybrid solve
+    -> final recovered mesh V_H
+```
+
+该实验不对任一 latent branch 添加 auxiliary target；clean vertices 只监督 `V_H`。
 
 ## 数学定义
 
@@ -526,6 +542,97 @@ $$
 displacement，`L_E` 是 direct vertex-space MSE。Arm E 使用相同 encoder/backbone/
 head width，但不使用 `L`、sparse solver、lambda 或 post-process。
 
+### End-to-end direct–Laplacian hybrid 与隐式反向传播
+
+当前受控 hybrid 使用一个 shared encoder 与两个 latent geometry heads：
+
+$$
+\widehat\delta=h_{\mathrm{lap}}(\Phi_\theta),
+\qquad
+\Delta V_{\mathrm{direct}}=h_{\mathrm{direct}}(\Phi_\theta),
+\qquad
+V_{\mathrm{direct}}=V_{\mathrm{input}}+\Delta V_{\mathrm{direct}}.
+$$
+
+变量说明：<code>Phi_theta</code> 是 shared C2F2+HF feature field；
+<code>delta_hat in R^(N x 3)</code> 与
+<code>Delta V_direct in R^(N x 3)</code> 是 latent outputs，二者都没有直接监督。
+双 head 模型共有 892,678 个参数，比 Arm B 或 Arm E 多 66,563 个。
+
+使用 validation 选择并固定的 <code>lambda=3e-2</code>，唯一 recovery 为
+
+$$
+V_H=
+\arg\min_V
+\left\lVert LV-\widehat\delta\right\rVert_F^2
++\lambda\left\lVert V-V_{\mathrm{direct}}\right\rVert_F^2.
+$$
+
+这里没有额外的 <code>V_input</code> anchor。定义
+
+$$
+A=L^\top L+\lambda I,
+\qquad
+b=L^\top\widehat\delta+\lambda V_{\mathrm{direct}},
+$$
+
+differentiable forward solve 为
+
+$$
+A V_H=b,
+\qquad
+V_H=A^{-1}\left(L^\top\widehat\delta+\lambda V_{\mathrm{direct}}\right).
+$$
+
+完整 training objective 只有最终 geometry supervision：
+
+$$
+\mathcal L_{\mathrm{hybrid}}
+=\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert V_{H,i}-V_{\mathrm{clean},i}\right\rVert_2^2.
+$$
+
+这里不加入 raw-Laplacian、direct-displacement、confidence、spectral、normal 或
+Chamfer auxiliary loss。只有在两个 predictions 与 solve 均已建立之后才读取
+<code>V_clean</code>；它从不进入 model 或 recovery input。
+
+对于精确 implicit backward，令
+
+$$
+G=\nabla_{V_H}\mathcal L_{\mathrm{hybrid}}
+=\frac{2}{N}\left(V_H-V_{\mathrm{clean}}\right),
+\qquad
+A^\top Z=G.
+$$
+
+由于 <code>lambda&gt;0</code> 时 <code>A</code> 是 symmetric positive definite，
+实际实现求解 <code>AZ=G</code>。两个 branch 的梯度为
+
+$$
+\boxed{
+\nabla_{\widehat\delta}\mathcal L_{\mathrm{hybrid}}=LZ,
+\qquad
+\nabla_{V_{\mathrm{direct}}}\mathcal L_{\mathrm{hybrid}}=\lambda Z,
+\qquad
+\nabla_{\Delta V_{\mathrm{direct}}}\mathcal L_{\mathrm{hybrid}}=\lambda Z
+}.
+$$
+
+等价 forward Jacobians 为
+
+$$
+\frac{\partial V_H}{\partial\widehat\delta}=A^{-1}L^\top,
+\qquad
+\frac{\partial V_H}{\partial V_{\mathrm{direct}}}=\lambda A^{-1}.
+$$
+
+因此 shared parameters 会通过两个 heads 的 Jacobian 同时接收梯度；无需展开 PCG
+iterations。该实验固定 <code>L</code> 与 <code>lambda</code>。Forward 与 adjoint
+solves 使用 float64 PCG、tolerance <code>1e-8</code>、最多 2,048 iterations。
+Preflight 在代表性 meshes 上相对 trusted LSMR 的最大 vertex RMS difference 为
+<code>6.10e-9</code>，finite-difference 最大 relative error 为
+<code>9.68e-11</code>；两个 branch 的梯度均 finite 且 non-zero。
+
 旧 visibility/confidence-weighted Huber/Adam recovery 仍作为冻结历史 baseline。
 Exact-target matched-domain diagnostics 表明 hard visibility 是已测试的最大 recovery-
 efficiency 损失，因此不能再把它描述为 active recovery design。
@@ -784,9 +891,12 @@ steps 也未关闭差距。因此当前研究采用全方程 regularized sparse 
 | B：Lap + recovery-aware vertex | 0.00263986 | **0.00683290** | **0.00358497** | **0.13036** | **0.0105581** | **0.959366** | **0.0115532** |
 
 Arm B 在 32/50 上取得更低 paired Chamfer，在 43/50 上取得更低 vertex RMS，但
-raw EPE 仅胜 10/50。Arms C/D（`lambda=10^-3/10^-4`）和 direct-vertex Arm E 仍由
-dependency gate 控制；详见[当前研究合同与状态快照](docs/SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md)。
-完整 A-E matched evaluation 前不作 H1/H2 判定。
+raw EPE 仅胜 10/50。C（`lambda=10^-3`）与 D（`10^-4`）的 recovered test geometry
+均未超过 B。Direct-vertex E 达到 Chamfer `0.00334039`、vertex RMS `0.00822130`、
+normal consistency `0.970112`。随后，只读冻结 B+E hybrid 使用 validation-selected
+`lambda=3e-2` 达到 Chamfer `0.00302983`，并改善 49/50 test inputs。正在运行的
+end-to-end 实验检验：当两个 latent branches 只接收上文最终 hybrid-geometry loss
+时，能否学出同样的互补性。
 
 ### Native 1920 + high-frequency residual（已完成）
 

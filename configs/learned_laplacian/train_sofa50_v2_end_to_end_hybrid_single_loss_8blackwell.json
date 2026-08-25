@@ -1,0 +1,208 @@
+{
+  "confidence": {
+    "enabled": false,
+    "quantile_bins": 5,
+    "recovery_weight": "none"
+  },
+  "data_loading": {
+    "cuda_prefetch": true,
+    "multiprocessing_sharing_strategy": "file_system",
+    "num_workers": 0,
+    "persistent_workers": false,
+    "pin_memory": true,
+    "prefetch_factor": 2,
+    "train_views_per_sample": null,
+    "validation_views_per_sample": null
+  },
+  "dataset": {
+    "degradation_profile": "strong_smooth_v2",
+    "expected_split_counts": {
+      "test": 50,
+      "train": 400,
+      "validation": 50
+    },
+    "name": "Sofa50MultiTopologyRawLap500_v2",
+    "object_level_split": true,
+    "objects": 50,
+    "variants_per_object": 10
+  },
+  "device": "cuda",
+  "experiment_metadata": {
+    "arm": "single_final_geometry_loss_hybrid_lambda3e-2",
+    "checkpoint_selector": "validation_final_hybrid_unified_v2_chamfer_only",
+    "distributed_world_size": 8,
+    "effective_global_batch_meshes": 8,
+    "experiment": "Sofa50_v2_end_to_end_direct_laplacian_hybrid_single_loss",
+    "fixed_lambda_source": "frozen_B_plus_E_validation_only_Chamfer_sweep",
+    "gradient_accumulation_meshes_per_rank": 1,
+    "initialization": "from_scratch",
+    "input_resolution": 960,
+    "no_B_E_head_initialization": true,
+    "no_auxiliary_branch_supervision": true,
+    "test_or_ood_selection": false,
+    "training_gpu_model": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "views": 28
+  },
+  "image_encoder": {
+    "feature_construction": {
+      "kernel_size": 5,
+      "mode": "original_plus_high_frequency",
+      "padding": "reflect",
+      "sigma": 1.0
+    },
+    "feature_dim": 64,
+    "first_stride": 1,
+    "normalization": {
+      "mean": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "std": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "second_stride": 1
+  },
+  "input_mode": "coarse_plus_multiview",
+  "local_query_jitter": {
+    "distribution": "isotropic_gaussian_xyz_clipped_at_3sigma",
+    "enabled": false,
+    "frozen": [
+      "clean_reference",
+      "target",
+      "graph",
+      "connectivity",
+      "operator"
+    ],
+    "maximum_offset_h": 0.009,
+    "scope": "training_only",
+    "std_h": 0.003
+  },
+  "method": "sofa50_v2_end_to_end_direct_laplacian_hybrid_single_loss",
+  "model": {
+    "dropout": 0.0,
+    "geometry_mode": "query_fourier",
+    "hidden_dim": 256,
+    "hybrid_direct_head": {
+      "architecture": "mirror_of_canonical_laplacian_output_mlp",
+      "enabled": true,
+      "initialization": "normal_seeded_from_scratch_no_B_or_E_checkpoint",
+      "source": "shared_post_graph_features"
+    },
+    "num_graph_layers": 3,
+    "position_encoding": {
+      "include_input": true,
+      "num_frequencies": 6
+    },
+    "recovery_lambda_head": {
+      "enabled": false
+    }
+  },
+  "multi_object_training": {
+    "cache_prepared_samples_on_device": false,
+    "checkpoint_epochs": [],
+    "checkpoint_every_epochs": 0,
+    "checkpoint_optimizer_steps": [
+      5000,
+      10000,
+      15000,
+      20000
+    ],
+    "early_stopping": {
+      "enabled": false,
+      "min_delta": 0.0001,
+      "patience_validations": 15
+    },
+    "epochs": 1000,
+    "gradient_accumulation_meshes": 1,
+    "max_optimizer_steps": 20000,
+    "profile_training": true,
+    "report_every_optimizer_steps": 200,
+    "shuffle": true,
+    "validation_every_epochs": 8
+  },
+  "query_training": {
+    "apply_to_validation": false,
+    "enabled": false,
+    "exact_fraction": 0.2,
+    "max_offset_h": 0.001,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "zero_initial_laplacian": false
+  },
+  "recovery": {
+    "V_direct": "V_input+delta_v_direct_pred",
+    "adam_vertex_optimization": false,
+    "additional_V_input_anchor": false,
+    "confidence_weighting": false,
+    "lambda": 0.03,
+    "objective": "||L V-delta_pred||_2^2+lambda||V-V_direct||_2^2",
+    "operator": "uniform_random_walk_current_graph",
+    "robust_loss": null,
+    "solver": "differentiable_float64_PCG",
+    "tolerance_change": "1e-4_to_1e-8_to_resolve_previously_observed_PCG_LSMR_solution_discrepancy;objective_and_lambda_unchanged",
+    "visibility_gate": false
+  },
+  "renderer_visibility": {
+    "condition": "backface_and_occlusion",
+    "depth_image_used": false,
+    "front_face_winding": "ccw",
+    "neighborhood_radius": 1,
+    "source": "precomputed_corrupted_input_graph_depth_tested_face_id_buffer"
+  },
+  "seed": 7,
+  "target_definition": "delta_target_raw=L(clean_reference_faces)@clean_reference_vertices",
+  "target_mode": "raw_laplacian",
+  "target_scaling": {
+    "applied_to_training_target": false,
+    "clip_max_norm": null,
+    "epsilon": 1e-12,
+    "method": "square_of_mean_incident_edge_length",
+    "source": "input_prediction_mesh_auxiliary_compatibility_fields_only"
+  },
+  "target_semantics": "same_topology_clean_reference_native_target",
+  "training": {
+    "amp": {
+      "dtype": "float16",
+      "enabled": true
+    },
+    "gradient_clip_norm": 1.0,
+    "huber_delta": 0.01,
+    "hybrid_single_geometry_loss": {
+      "auxiliary_direct_vertex_loss": false,
+      "auxiliary_laplacian_loss": false,
+      "compute_dtype": "float64",
+      "confidence_loss": false,
+      "enabled": true,
+      "gt_inside_recovery": false,
+      "lambda": 0.03,
+      "loss": "mean_i_squared_l2_VH_minus_Vclean",
+      "maximum_iterations": 2048,
+      "runtime_diagnostics": true,
+      "tolerance": 1e-08,
+      "validation_surface_samples": 3000
+    },
+    "learning_rate": 0.001,
+    "loss": "huber",
+    "lr_scheduler": {
+      "cooldown_validations": 1,
+      "factor": 0.5,
+      "min_lr": 1e-06,
+      "patience_validations": 10,
+      "threshold": 0.0001,
+      "threshold_mode": "abs",
+      "type": "reduce_on_plateau"
+    },
+    "prediction_loss_space": "output_representation",
+    "recovery_aware_geometry_loss": {
+      "enabled": false
+    },
+    "vertex_sampling": {
+      "mode": "full"
+    },
+    "weight_decay": 0.0
+  }
+}

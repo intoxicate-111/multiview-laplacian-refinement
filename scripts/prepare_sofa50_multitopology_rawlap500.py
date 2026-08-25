@@ -86,11 +86,17 @@ def resolve_record(manifest_path: Path, record: Mapping[str, Any]) -> Path:
     return path.resolve() if path.is_absolute() else (manifest_path.parent / path).resolve()
 
 
-def stable_seed(object_id: str, variant: str, base_seed: int) -> int:
+def stable_seed(
+    object_id: str,
+    variant: str,
+    base_seed: int,
+    *,
+    namespace: str = SEED_NAMESPACE,
+) -> int:
     # Keep the v1 seed namespace so strong_smooth_v2 is a true smoothing-only
     # data ablation with identical perturbation fields.
     digest = hashlib.sha256(
-        f"{SEED_NAMESPACE}|{base_seed}|{object_id}|{variant}".encode()
+        f"{namespace}|{base_seed}|{object_id}|{variant}".encode()
     ).digest()
     return int.from_bytes(digest[:4], "little") & 0x7FFFFFFF
 
@@ -220,13 +226,17 @@ def build_sample(
     visibility_backend: str,
     dataset_family: str,
     smoothing_profile: str,
+    seed_namespace: str = SEED_NAMESPACE,
+    source_dataset_label: str = "Sofa",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     source_vertices = source["gt_vertices"].detach().cpu().double().numpy()
     source_faces = source["gt_faces"].detach().cpu().numpy().astype(np.int64)
     clean, topology = construct_clean_topology(
         source_vertices, source_faces, variant, max_vertices=max_vertices
     )
-    seed = stable_seed(object_id, variant, base_seed)
+    seed = stable_seed(
+        object_id, variant, base_seed, namespace=seed_namespace
+    )
     degradation = degradation_for_variant(variant, smoothing_profile)
     corrupted, corruption = corrupt_clean_reference(clean, degradation, seed=seed)
     target_np = raw_uniform_laplacian(clean)
@@ -276,7 +286,9 @@ def build_sample(
             "variant_seed": seed,
             "view_count": 28,
             "input_resolution": 960,
-            "clean_reference_definition": "native topology constructed from source Sofa GT",
+            "clean_reference_definition": (
+                f"native topology constructed from source {source_dataset_label} GT"
+            ),
             "input_constructor": "clean_reference -> perturb -> smooth",
             "target_constructor": "delta_target_raw=L(clean_reference_faces)@clean_reference_vertices",
             "target_mode": "raw_laplacian",
@@ -314,7 +326,7 @@ def build_sample(
         "variant": variant,
         "dataset_family": dataset_family,
         "smoothing_profile": smoothing_profile,
-        "seed_namespace": SEED_NAMESPACE,
+        "seed_namespace": seed_namespace,
         "family": topology["family"],
         "seed": seed,
         "original_vertices": topology["original_vertices"],

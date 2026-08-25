@@ -68,7 +68,7 @@ def _normal_matrix_apply(
     values: torch.Tensor,
     edge_index: torch.Tensor,
     vertex_degree: torch.Tensor,
-    regularization: float,
+    regularization: float | torch.Tensor,
 ) -> torch.Tensor:
     return uniform_laplacian_transpose_apply(
         uniform_laplacian_apply(values, edge_index, vertex_degree),
@@ -84,13 +84,16 @@ def _jacobi_diagonal(
     vertices: int,
     dtype: torch.dtype,
     device: torch.device,
-    regularization: float,
+    regularization: float | torch.Tensor,
 ) -> torch.Tensor:
     degree = _degree_vector(vertex_degree, vertices).to(device=device, dtype=dtype)
     edges = edge_index.to(device=device, dtype=torch.long)
     source, destination = edges[0], edges[1]
-    diagonal = torch.full(
-        (vertices,), 1.0 + regularization, dtype=dtype, device=device
+    regularization_tensor = torch.as_tensor(
+        regularization, dtype=dtype, device=device
+    ).reshape(())
+    diagonal = torch.ones((vertices,), dtype=dtype, device=device) * (
+        1.0 + regularization_tensor
     )
     diagonal.index_add_(
         0,
@@ -104,13 +107,20 @@ def _pcg_solve(
     right_hand_side: torch.Tensor,
     edge_index: torch.Tensor,
     vertex_degree: torch.Tensor,
-    regularization: float,
+    regularization: float | torch.Tensor,
     *,
     maximum_iterations: int,
     tolerance: float,
     initial_guess: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ConjugateGradientAudit]:
-    if regularization <= 0:
+    regularization_tensor = torch.as_tensor(
+        regularization,
+        dtype=right_hand_side.dtype,
+        device=right_hand_side.device,
+    ).reshape(())
+    if not bool(torch.isfinite(regularization_tensor)) or bool(
+        regularization_tensor <= 0
+    ):
         raise ValueError("Differentiable recovery requires positive regularization.")
     if maximum_iterations < 1:
         raise ValueError("maximum_iterations must be positive.")
@@ -124,10 +134,10 @@ def _pcg_solve(
         vertices=int(rhs.shape[0]),
         dtype=rhs.dtype,
         device=rhs.device,
-        regularization=regularization,
+        regularization=regularization_tensor,
     ).unsqueeze(-1)
     residual = rhs - _normal_matrix_apply(
-        solution, edge_index, vertex_degree, regularization
+        solution, edge_index, vertex_degree, regularization_tensor
     )
     preconditioned = residual / diagonal
     direction = preconditioned.clone()
@@ -145,7 +155,7 @@ def _pcg_solve(
         if not bool(active):
             break
         matrix_direction = _normal_matrix_apply(
-            direction, edge_index, vertex_degree, regularization
+            direction, edge_index, vertex_degree, regularization_tensor
         )
         denominator = (direction * matrix_direction).sum()
         alpha = residual_preconditioned / denominator.clamp_min(epsilon)
@@ -162,7 +172,7 @@ def _pcg_solve(
         preconditioned = next_preconditioned
         residual_preconditioned = next_residual_preconditioned
     final_residual = rhs - _normal_matrix_apply(
-        solution, edge_index, vertex_degree, regularization
+        solution, edge_index, vertex_degree, regularization_tensor
     )
     relative = torch.linalg.vector_norm(final_residual) / rhs_norm
     # The recurrence residual can cross the requested tolerance one iteration
@@ -185,11 +195,13 @@ class _RegularizedSparseSolve(torch.autograd.Function):
         initial_vertices: torch.Tensor,
         edge_index: torch.Tensor,
         vertex_degree: torch.Tensor,
-        regularization: float,
+        regularization: torch.Tensor,
         maximum_iterations: int,
         tolerance: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        regularization = float(regularization)
+        regularization = regularization.to(
+            device=predicted_laplacian.device, dtype=predicted_laplacian.dtype
+        ).reshape(())
         maximum_iterations = int(maximum_iterations)
         tolerance = float(tolerance)
         rhs = uniform_laplacian_transpose_apply(
@@ -210,8 +222,9 @@ class _RegularizedSparseSolve(torch.autograd.Function):
                 f"relative_residual={audit.relative_residual:.6g}, "
                 f"iterations={audit.iterations}."
             )
-        ctx.save_for_backward(edge_index, vertex_degree)
-        ctx.regularization = regularization
+        ctx.save_for_backward(
+            edge_index, vertex_degree, regularization, solution, initial_vertices
+        )
         ctx.maximum_iterations = maximum_iterations
         ctx.tolerance = tolerance
         audit_tensor = torch.tensor(
@@ -230,12 +243,14 @@ class _RegularizedSparseSolve(torch.autograd.Function):
     def backward(
         ctx, output_gradient: torch.Tensor, audit_gradient: torch.Tensor | None
     ):
-        edge_index, vertex_degree = ctx.saved_tensors
+        edge_index, vertex_degree, regularization, solution, initial_vertices = (
+            ctx.saved_tensors
+        )
         adjoint, audit = _pcg_solve(
             output_gradient,
             edge_index,
             vertex_degree,
-            ctx.regularization,
+            regularization,
             maximum_iterations=ctx.maximum_iterations,
             tolerance=ctx.tolerance,
         )
@@ -248,8 +263,17 @@ class _RegularizedSparseSolve(torch.autograd.Function):
         prediction_gradient = uniform_laplacian_apply(
             adjoint, edge_index, vertex_degree
         )
-        initial_gradient = ctx.regularization * adjoint
-        return prediction_gradient, initial_gradient, None, None, None, None, None
+        initial_gradient = regularization * adjoint
+        regularization_gradient = (adjoint * (initial_vertices - solution)).sum()
+        return (
+            prediction_gradient,
+            initial_gradient,
+            None,
+            None,
+            regularization_gradient,
+            None,
+            None,
+        )
 
 
 def differentiable_regularized_sparse_recovery(
@@ -258,7 +282,7 @@ def differentiable_regularized_sparse_recovery(
     edge_index: torch.Tensor,
     vertex_degree: torch.Tensor,
     *,
-    regularization: float,
+    regularization: float | torch.Tensor,
     maximum_iterations: int = 128,
     tolerance: float = 1e-5,
 ) -> torch.Tensor:
@@ -267,12 +291,17 @@ def differentiable_regularized_sparse_recovery(
         raise ValueError("predicted_laplacian and initial_vertices must have shape [N, 3].")
     if predicted_laplacian.ndim != 2 or predicted_laplacian.shape[1] != 3:
         raise ValueError("predicted_laplacian and initial_vertices must have shape [N, 3].")
+    regularization_tensor = torch.as_tensor(
+        regularization,
+        dtype=predicted_laplacian.dtype,
+        device=predicted_laplacian.device,
+    ).reshape(())
     recovered, _ = _RegularizedSparseSolve.apply(
         predicted_laplacian,
         initial_vertices,
         edge_index,
         vertex_degree,
-        float(regularization),
+        regularization_tensor,
         int(maximum_iterations),
         float(tolerance),
     )
@@ -285,7 +314,7 @@ def differentiable_regularized_sparse_recovery_with_audit(
     edge_index: torch.Tensor,
     vertex_degree: torch.Tensor,
     *,
-    regularization: float,
+    regularization: float | torch.Tensor,
     maximum_iterations: int = 128,
     tolerance: float = 1e-5,
 ) -> tuple[torch.Tensor, ConjugateGradientAudit]:
@@ -294,12 +323,17 @@ def differentiable_regularized_sparse_recovery_with_audit(
         raise ValueError("predicted_laplacian and initial_vertices must have shape [N, 3].")
     if predicted_laplacian.ndim != 2 or predicted_laplacian.shape[1] != 3:
         raise ValueError("predicted_laplacian and initial_vertices must have shape [N, 3].")
+    regularization_tensor = torch.as_tensor(
+        regularization,
+        dtype=predicted_laplacian.dtype,
+        device=predicted_laplacian.device,
+    ).reshape(())
     recovered, audit_tensor = _RegularizedSparseSolve.apply(
         predicted_laplacian,
         initial_vertices,
         edge_index,
         vertex_degree,
-        float(regularization),
+        regularization_tensor,
         int(maximum_iterations),
         float(tolerance),
     )
@@ -317,7 +351,7 @@ def recovery_forward_audit(
     edge_index: torch.Tensor,
     vertex_degree: torch.Tensor,
     *,
-    regularization: float,
+    regularization: float | torch.Tensor,
     maximum_iterations: int = 128,
     tolerance: float = 1e-5,
 ) -> tuple[torch.Tensor, ConjugateGradientAudit]:

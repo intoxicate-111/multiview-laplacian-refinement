@@ -42,6 +42,21 @@ EXTENSION_RUN_NAMES = BASE_RUN_NAMES + (
     "sofa50_v2_sparse_recovery_arm_d_lambda1e-4_20k_seed7",
 )
 EXPECTED_EXTENSION_LAMBDAS = (1e-2, 1e-2, 1e-3, 1e-4)
+FIXED_SWEEP_ARMS = (
+    "B_lap_plus_refine",
+    "C_lap_plus_refine_lambda1e-3",
+    "D_lap_plus_refine_lambda1e-4",
+    "E_lap_plus_refine_lambda1e-1",
+    "F_lap_plus_refine_lambda1",
+)
+FIXED_SWEEP_RUN_NAMES = (
+    "sofa50_v2_sparse_recovery_arm_b_recovery_aware_20k_seed7",
+    "sofa50_v2_sparse_recovery_arm_c_lambda1e-3_20k_seed7",
+    "sofa50_v2_sparse_recovery_arm_d_lambda1e-4_20k_seed7",
+    "sofa50_v2_sparse_recovery_arm_e_lambda1e-1_20k_seed7",
+    "sofa50_v2_sparse_recovery_arm_f_lambda1_20k_seed7",
+)
+FIXED_SWEEP_LAMBDAS = (1e-2, 1e-3, 1e-4, 1e-1, 1.0)
 PREDICTION_FIELDS = (
     "raw_epe", "raw_rms", "raw_max", "raw_cosine", "recovery_weighted_raw_rms",
     "bottom90_epe", "top10_epe", "top1_epe",
@@ -78,6 +93,8 @@ def _sha256(path: Path) -> str:
 
 
 def _arms(args: argparse.Namespace) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    if args.include_fixed_lambda_sweep:
+        return FIXED_SWEEP_ARMS, FIXED_SWEEP_RUN_NAMES
     if args.include_lambda_extension:
         return EXTENSION_ARMS, EXTENSION_RUN_NAMES
     return BASE_ARMS, BASE_RUN_NAMES
@@ -198,15 +215,19 @@ def evaluate_arm(args: argparse.Namespace) -> None:
     beta_selection = _read(args.beta_selection.resolve())
     if not lambda_selection["contract_audit"]["passed"] or not beta_selection["contract_audit"]["passed"]:
         raise RuntimeError("Hyperparameter selection contract did not pass.")
-    regularization = (
-        EXPECTED_EXTENSION_LAMBDAS[args.arm_index]
-        if args.include_lambda_extension
-        else float(lambda_selection["selected_lambda"])
-    )
+    if args.include_fixed_lambda_sweep:
+        regularization = FIXED_SWEEP_LAMBDAS[args.arm_index]
+    elif args.include_lambda_extension:
+        regularization = EXPECTED_EXTENSION_LAMBDAS[args.arm_index]
+    else:
+        regularization = float(lambda_selection["selected_lambda"])
     config_recovery = spec["config"]["recovery"]
     if float(config_recovery["lambda"]) != regularization:
         raise RuntimeError("Training/evaluation lambda mismatch.")
-    if args.include_lambda_extension and args.arm_index >= 2:
+    requires_fp64_audit = (
+        args.include_fixed_lambda_sweep and args.arm_index >= 1
+    ) or (args.include_lambda_extension and args.arm_index >= 2)
+    if requires_fp64_audit:
         recovery_loss = spec["config"]["training"]["recovery_aware_geometry_loss"]
         if float(recovery_loss["beta"]) != 1e-2:
             raise RuntimeError("C/D require beta=1e-2.")
@@ -265,6 +286,9 @@ def evaluate_arm(args: argparse.Namespace) -> None:
                     "fscore": float(refined_geometry["fscore"]),
                     "normal_consistency": float(refined_geometry["normal_consistency"]),
                     "introduced_flipped_faces": int(refined_geometry["introduced_flipped_faces"]),
+                    "normalized_flip_rate": float(
+                        refined_geometry["introduced_flipped_faces"] / initial.num_faces
+                    ),
                     "new_degenerate_faces": int(refined_geometry["new_degenerate_faces"]),
                     "same_index_recovered_vertex_rms": float(
                         np.sqrt(np.mean(np.sum((recovered - clean.vertices) ** 2, axis=1)))
@@ -307,6 +331,11 @@ def merge(args: argparse.Namespace) -> None:
     arms, _ = _arms(args)
     payloads = [_read(output / "shards" / f"{arm}.json") for arm in arms]
     all_rows = [row for payload in payloads for row in payload["rows"]]
+    for row in all_rows:
+        row.setdefault(
+            "normalized_flip_rate",
+            float(row["introduced_flipped_faces"]) / float(row["faces"]),
+        )
     aggregate_prediction: list[dict[str, Any]] = []
     aggregate_geometry: list[dict[str, Any]] = []
     for arm in arms:
@@ -330,6 +359,7 @@ def merge(args: argparse.Namespace) -> None:
                     "p2s_p95": _mean(selected, "p2s_p95"), "fscore": _mean(selected, "fscore"),
                     "normal_consistency": _mean(selected, "normal_consistency"),
                     "introduced_flipped_faces": int(sum(int(row["introduced_flipped_faces"]) for row in selected)),
+                    "normalized_flip_rate": _mean(selected, "normalized_flip_rate"),
                     "new_degenerate_faces": int(sum(int(row["new_degenerate_faces"]) for row in selected)),
                     "improved": int(sum(bool(row["improved"]) for row in selected)),
                     "worsened": int(sum(bool(row["worsened"]) for row in selected)),
@@ -342,6 +372,8 @@ def merge(args: argparse.Namespace) -> None:
     requested_pairs = (
         ((arms[0], arms[1]),)
         if len(arms) == 2
+        else tuple((arms[0], candidate) for candidate in arms[1:])
+        if len(arms) == 5
         else (
             (arms[1], arms[2]),
             (arms[1], arms[3]),
@@ -478,7 +510,7 @@ def merge(args: argparse.Namespace) -> None:
             "unchanged 1e-4 tolerance. C/D therefore use the same PCG equations "
             "in float64 with maximum_iterations=2048; no tolerance, lambda, loss, "
             "gradient clipping, or objective was changed."
-            if len(arms) == 4
+            if len(arms) in {4, 5}
             else None
         ),
         "execution_difference": (
@@ -487,7 +519,7 @@ def merge(args: argparse.Namespace) -> None:
                 "Blackwell; C/D run independently from scratch on 8x Blackwell. "
                 "All arms retain effective global batch 8, but A/B have historical "
                 "DDP-sharding migration points while C/D do not."
-                if len(arms) == 4
+                if len(arms) in {4, 5}
                 else (
                     "Both arms began on 2x L40 with accumulation=4 and resumed at an "
                     "epoch boundary on 8x RTX PRO 6000 Blackwell with accumulation=1: "
@@ -539,31 +571,86 @@ def merge(args: argparse.Namespace) -> None:
         },
         "checkpoints": {payload["arm"]: {"path": payload["checkpoint"], "sha256": payload["checkpoint_sha256"]} for payload in payloads},
     }
+    grouped_rows: list[dict[str, Any]] = []
+    if len(arms) == 5:
+        by_key = {
+            (str(row["arm"]), str(row["split"]), str(row["sample_id"])): row
+            for row in all_rows
+        }
+        for split in ("validation", "test"):
+            sample_ids = sorted(
+                {str(row["sample_id"]) for row in all_rows if row["split"] == split}
+            )
+            for group_type, groups in (
+                ("recipe", ("A1", "A2", "B1", "B2", "C1", "C2", "C3", "C4", "D1", "D2")),
+                ("severity", ("mild", "strong")),
+            ):
+                for group in groups:
+                    selected_ids = [
+                        sample_id
+                        for sample_id in sample_ids
+                        if (
+                            sample_id.rsplit("__", 1)[-1] == group
+                            if group_type == "recipe"
+                            else (
+                                sample_id.rsplit("__", 1)[-1]
+                                in {"A1", "B1", "C1", "C3", "D1"}
+                            )
+                            == (group == "mild")
+                        )
+                    ]
+                    for arm in arms:
+                        selected = [by_key[(arm, split, sample_id)] for sample_id in selected_ids]
+                        baseline = [by_key[(arms[0], split, sample_id)] for sample_id in selected_ids]
+                        grouped_rows.append(
+                            {
+                                "split": split,
+                                "group_type": group_type,
+                                "group": group,
+                                "arm": arm,
+                                "lambda": selected[0]["lambda"],
+                                "samples": len(selected),
+                                "initial_chamfer": _mean(selected, "initial_chamfer"),
+                                "refined_chamfer": _mean(selected, "refined_chamfer"),
+                                "mean_per_sample_relative_gain": _mean(selected, "relative_chamfer_gain"),
+                                "wins_vs_lambda_1e-2": sum(
+                                    float(row["refined_chamfer"])
+                                    < float(base["refined_chamfer"])
+                                    for row, base in zip(selected, baseline)
+                                ),
+                                "normalized_flip_rate": _mean(selected, "normalized_flip_rate"),
+                                "vertex_rms": _mean(selected, "same_index_recovered_vertex_rms"),
+                            }
+                        )
+        summary["coarse_grouped_summary"] = grouped_rows
     _write_csv(output / "per_sample.csv", all_rows)
     _write_csv(output / "paired_per_sample.csv", paired)
     _write_csv(output / "prediction_summary.csv", aggregate_prediction)
     _write_csv(output / "geometry_summary.csv", aggregate_geometry)
+    if grouped_rows:
+        _write_csv(output / "coarse_grouped_summary.csv", grouped_rows)
     _write_json(output / "summary.json", summary)
     _write_json(output / "contract_audit.json", contract)
     lines = [
         (
-            "# Sofa50 v2 recovery-aware lambda extension"
+            "# Sofa50 v2 fixed recovery-lambda sweep"
+            if len(arms) == 5
+            else "# Sofa50 v2 recovery-aware lambda extension"
             if len(arms) == 4
             else "# Sofa50 v2 Lap-only vs recovery-aware training ablation"
         ), "",
         f"Strict contract audit: **{str(contract['contract_audit']).lower()}**; executable contract audit: **{str(executable_contract).lower()}**.", "",
         (
-            "A/B use validation-selected lambda `1e-2`; C/D use the predeclared "
-            "training/evaluation lambdas `1e-3` / `1e-4`. All recovery-aware "
-            "arms use beta `1e-2`."
-            if len(arms) == 4
+            "The recovery-aware fixed-lambda arms use `1e-4`, `1e-3`, `1e-2`, "
+            "`1e-1` or `1`, with beta `1e-2`."
+            if len(arms) in {4, 5}
             else f"Validation-selected lambda: `{lambda_selection['selected_lambda']:.0e}`; validation-selected beta: `{beta_selection['selected_beta']:.0e}`."
         ), "",
         "## Prediction", "",
         "| Split | Arm | Raw EPE | Raw RMS | Cosine | Weighted RMS | Bottom90 | Top10 | Top1 |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    if len(arms) == 4:
+    if len(arms) in {4, 5}:
         lines.extend(
             (
                 f"Numerical contract note: {contract['pcg_preflight_finding']}",
@@ -576,15 +663,55 @@ def merge(args: argparse.Namespace) -> None:
             f"{row['raw_cosine']:.9g} | {row['recovery_weighted_raw_rms']:.9g} | "
             f"{row['bottom90_epe']:.9g} | {row['top10_epe']:.9g} | {row['top1_epe']:.9g} |"
         )
-    lines.extend(("", "## Sparse-recovered geometry", "", "| Split | Arm | Initial CD | Refined CD | Gain | Eta | P2S | P2S p95 | F-score | Normal | Flips | New deg. | Improved/worsened | Vertex RMS |", "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"))
+    lines.extend(("", "## Sparse-recovered geometry", "", "| Split | Arm | Initial CD | Refined CD | Gain | Eta | P2S | P2S p95 | F-score | Normal | Flips | Flip rate | New deg. | Improved/worsened | Vertex RMS |", "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"))
     for row in aggregate_geometry:
         lines.append(
             f"| {row['split']} | {row['arm']} | {row['initial_chamfer']:.9g} | {row['refined_chamfer']:.9g} | "
             f"{row['relative_chamfer_gain']:.2%} | {row['eta']:.9g} | {row['p2s']:.9g} | {row['p2s_p95']:.9g} | "
             f"{row['fscore']:.9g} | {row['normal_consistency']:.9g} | {row['introduced_flipped_faces']} | "
-            f"{row['new_degenerate_faces']} | {row['improved']}/{row['worsened']} | {row['same_index_recovered_vertex_rms']:.9g} |"
+            f"{row['normalized_flip_rate']:.4%} | {row['new_degenerate_faces']} | {row['improved']}/{row['worsened']} | {row['same_index_recovered_vertex_rms']:.9g} |"
         )
-    if len(arms) == 4:
+    if grouped_rows:
+        lambda_order = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)
+        for split in ("validation", "test"):
+            lines.extend(
+                (
+                    "",
+                    f"## Coarse-recipe breakdown: {split}",
+                    "",
+                    "Each cell is `final CD (mean gain; wins vs λ=1e-2)`.",
+                    "",
+                    "| Group | Initial CD | λ=1e-4 | λ=1e-3 | λ=1e-2 | λ=1e-1 | λ=1 |",
+                    "|---|---:|---:|---:|---:|---:|---:|",
+                )
+            )
+            for group_type, groups in (
+                ("recipe", ("A1", "A2", "B1", "B2", "C1", "C2", "C3", "C4", "D1", "D2")),
+                ("severity", ("mild", "strong")),
+            ):
+                for group in groups:
+                    subset = [
+                        row
+                        for row in grouped_rows
+                        if row["split"] == split
+                        and row["group_type"] == group_type
+                        and row["group"] == group
+                    ]
+                    by_lambda = {float(row["lambda"]): row for row in subset}
+                    cells = []
+                    for regularization in lambda_order:
+                        row = by_lambda[regularization]
+                        cells.append(
+                            f"{row['refined_chamfer']:.6g} "
+                            f"({row['mean_per_sample_relative_gain']:+.1%}; "
+                            f"{row['wins_vs_lambda_1e-2']}/{row['samples']})"
+                        )
+                    lines.append(
+                        f"| {group} | {subset[0]['initial_chamfer']:.6g} | "
+                        + " | ".join(cells)
+                        + " |"
+                    )
+    if len(arms) in {4, 5}:
         lines.extend(
             (
                 "",
@@ -628,23 +755,25 @@ def merge(args: argparse.Namespace) -> None:
     test_prediction = {
         row["arm"]: row for row in aggregate_prediction if row["split"] == "test"
     }
-    b_geometry_better = test_geometry[arms[1]]["refined_chamfer"] < test_geometry[arms[0]]["refined_chamfer"]
-    raw_similar_or_worse = test_prediction[arms[1]]["raw_epe"] >= 0.95 * test_prediction[arms[0]]["raw_epe"]
+    b_geometry_better = len(arms) == 2 and test_geometry[arms[1]]["refined_chamfer"] < test_geometry[arms[0]]["refined_chamfer"]
+    raw_similar_or_worse = len(arms) == 2 and test_prediction[arms[1]]["raw_epe"] >= 0.95 * test_prediction[arms[0]]["raw_epe"]
     lines.extend(("", "## Conclusion", ""))
-    if len(arms) == 4:
+    if len(arms) in {4, 5}:
         best_arm = min(arms, key=lambda arm: test_geometry[arm]["refined_chamfer"])
         lines.append(
             f"Lowest test Chamfer is **{best_arm}** at "
             f"`{test_geometry[best_arm]['refined_chamfer']:.9g}`. The decision is "
             "based on recovered geometry; raw EPE is reported but is not the selector."
         )
-        for candidate in arms[2:]:
+        candidates = arms[1:] if len(arms) == 5 else arms[2:]
+        baseline_arm = arms[0] if len(arms) == 5 else arms[1]
+        for candidate in candidates:
             stable = payloads[arms.index(candidate)].get("training_runtime_diagnostics")
             beats_b = (
                 test_geometry[candidate]["refined_chamfer"]
-                < test_geometry[arms[1]]["refined_chamfer"]
+                < test_geometry[baseline_arm]["refined_chamfer"]
                 and test_geometry[candidate]["same_index_recovered_vertex_rms"]
-                < test_geometry[arms[1]]["same_index_recovered_vertex_rms"]
+                < test_geometry[baseline_arm]["same_index_recovered_vertex_rms"]
             )
             numerically_stable = bool(
                 stable is not None
@@ -681,6 +810,7 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--arm-index", type=int)
     parser.add_argument("--include-lambda-extension", action="store_true")
+    parser.add_argument("--include-fixed-lambda-sweep", action="store_true")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--merge-only", action="store_true")
     args = parser.parse_args()
@@ -689,7 +819,9 @@ def main() -> int:
     else:
         if args.manifest is None or args.runs_root is None or args.arm_index is None:
             parser.error("arm evaluation requires manifest, runs-root and arm-index")
-        arm_count = 4 if args.include_lambda_extension else 2
+        if args.include_fixed_lambda_sweep and args.include_lambda_extension:
+            parser.error("choose only one extension mode")
+        arm_count = 5 if args.include_fixed_lambda_sweep else 4 if args.include_lambda_extension else 2
         if not 0 <= args.arm_index < arm_count:
             parser.error(f"arm-index must be in [0, {arm_count - 1}]")
         evaluate_arm(args)

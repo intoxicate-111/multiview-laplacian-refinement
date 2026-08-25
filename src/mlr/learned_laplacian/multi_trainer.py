@@ -35,6 +35,11 @@ from .differentiable_sparse_recovery import (
     differentiable_regularized_sparse_recovery,
     differentiable_regularized_sparse_recovery_with_audit,
 )
+from .hard_anchor_sparse_recovery import (
+    deterministic_component_anchor_indices,
+    differentiable_hard_anchor_sparse_recovery,
+    differentiable_hard_anchor_sparse_recovery_with_audit,
+)
 from .losses import (
     confidence_calibration_metrics,
     confidence_reliability_loss,
@@ -48,6 +53,8 @@ from .local_query_jitter import (
     validate_local_query_jitter_contract,
 )
 from .model import LearnedLaplacianModel
+from .evaluation import evaluate_mesh_geometry
+from mlr.data import Mesh
 from .query_training import (
     QUERY_FOURIER_GEOMETRY_MODE,
     QueryAugmentationSettings,
@@ -159,6 +166,19 @@ class _RecoveryAwareGeometrySettings:
     tolerance: float
     runtime_diagnostics: bool
     compute_dtype: str
+    adaptive_lambda: bool
+    solver_mode: str
+
+
+@dataclass(frozen=True)
+class _HybridSingleGeometrySettings:
+    enabled: bool
+    regularization: float
+    maximum_iterations: int
+    tolerance: float
+    runtime_diagnostics: bool
+    compute_dtype: str
+    validation_surface_samples: int
 
 
 class _MaterializedPreparedDataset(Dataset[dict[str, Any]]):
@@ -396,6 +416,7 @@ def train_multi_object(
     loss_kwargs = _loss_kwargs(training)
     confidence_settings = _confidence_settings(config)
     recovery_aware = _recovery_aware_geometry_settings(config)
+    hybrid_single = _hybrid_single_geometry_settings(config)
     direct_vertex_runtime_diagnostics = bool(
         training.get("direct_vertex_runtime_diagnostics", False)
     )
@@ -408,6 +429,26 @@ def train_multi_object(
             raise ValueError(
                 "recovery-aware geometry supervision requires full vertex sampling."
             )
+        if recovery_aware.adaptive_lambda != bool(
+            base_model.recovery_lambda_head_enabled
+        ):
+            raise ValueError(
+                "training.recovery_aware_geometry_loss.adaptive_lambda must match "
+                "model.recovery_lambda_head.enabled."
+            )
+    if hybrid_single.enabled:
+        if recovery_aware.enabled:
+            raise ValueError("Hybrid single-geometry training cannot enable recovery-aware auxiliary loss.")
+        if confidence_settings["enabled"]:
+            raise ValueError("Hybrid single-geometry training requires confidence.enabled=false.")
+        if not base_model.hybrid_direct_head_enabled:
+            raise ValueError("Hybrid single-geometry training requires model.hybrid_direct_head.enabled=true.")
+        if base_model.recovery_lambda_head_enabled:
+            raise ValueError("Hybrid single-geometry training forbids adaptive lambda.")
+        if vertex_sampling.mode != "full":
+            raise ValueError("Hybrid single-geometry training requires all vertices.")
+        if output_semantics != CURRENT_GRAPH_LAPLACIAN:
+            raise ValueError("Hybrid Laplacian branch must retain current-graph Laplacian semantics.")
     if output_semantics == DIRECT_VERTEX_DISPLACEMENT:
         if str(loss_kwargs["loss_type"]) != "mse":
             raise ValueError("direct vertex displacement training requires MSE.")
@@ -447,8 +488,50 @@ def train_multi_object(
             raise ValueError(
                 "resume_checkpoint is not an optimizer-step checkpoint."
             )
-        base_model.load_state_dict(resume_payload["model_state_dict"])
-        optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
+        allow_lambda_head_extension = bool(
+            training.get("allow_resume_with_new_recovery_lambda_head", False)
+        )
+        if allow_lambda_head_extension:
+            incompatible = base_model.load_state_dict(
+                resume_payload["model_state_dict"], strict=False
+            )
+            disallowed_missing = [
+                key
+                for key in incompatible.missing_keys
+                if not key.startswith("recovery_lambda_head.")
+            ]
+            if incompatible.unexpected_keys or disallowed_missing:
+                raise ValueError(
+                    "Recovery-lambda continuation checkpoint is incompatible: "
+                    f"missing={disallowed_missing}, "
+                    f"unexpected={list(incompatible.unexpected_keys)}."
+                )
+            if not incompatible.missing_keys:
+                raise ValueError(
+                    "allow_resume_with_new_recovery_lambda_head was set but the "
+                    "checkpoint is not missing a recovery lambda head."
+                )
+            old_optimizer = resume_payload["optimizer_state_dict"]
+            new_optimizer = optimizer.state_dict()
+            if len(old_optimizer["param_groups"]) != 1 or len(new_optimizer["param_groups"]) != 1:
+                raise ValueError("Lambda-head extension requires one optimizer parameter group.")
+            old_ids = list(old_optimizer["param_groups"][0]["params"])
+            new_ids = list(new_optimizer["param_groups"][0]["params"])
+            if len(new_ids) <= len(old_ids):
+                raise ValueError("Lambda-head extension did not add optimizer parameters.")
+            remapped_state = {
+                new_id: copy.deepcopy(old_optimizer["state"][old_id])
+                for old_id, new_id in zip(old_ids, new_ids)
+                if old_id in old_optimizer["state"]
+            }
+            remapped_group = copy.deepcopy(old_optimizer["param_groups"][0])
+            remapped_group["params"] = new_ids
+            optimizer.load_state_dict(
+                {"state": remapped_state, "param_groups": [remapped_group]}
+            )
+        else:
+            base_model.load_state_dict(resume_payload["model_state_dict"])
+            optimizer.load_state_dict(resume_payload["optimizer_state_dict"])
         if scheduler is not None and resume_payload.get("scheduler_state_dict") is not None:
             scheduler.load_state_dict(resume_payload["scheduler_state_dict"])
         if resume_payload.get("scaler_state_dict") is not None:
@@ -662,11 +745,17 @@ def train_multi_object(
     report_pcg_relative_residuals: list[float] = []
     report_pcg_failed_solves = 0
     report_prediction_gradient_norms: list[float] = []
+    report_direct_gradient_norms: list[float] = []
     report_prediction_head_gradient_norms: list[float] = []
+    report_direct_head_gradient_norms: list[float] = []
     report_image_encoder_gradient_norms: list[float] = []
     report_graph_block_gradient_norms: list[float] = []
     report_prediction_displacement_rms: list[float] = []
     report_prediction_displacement_mean: list[float] = []
+    report_laplacian_output_rms: list[float] = []
+    report_recovery_lambda_values: list[float] = []
+    report_recovery_lambda_gradient_norms: list[float] = []
+    report_recovery_lambda_head_gradient_norms: list[float] = []
     report_nonfinite_counts = 0
     report_started_at = time.perf_counter()
     start_epoch = int(resume_state.get("next_epoch", 1))
@@ -811,6 +900,8 @@ def train_multi_object(
                 break
             optimizer.zero_grad(set_to_none=True)
             diagnostic_predictions: list[torch.Tensor] = []
+            diagnostic_direct_predictions: list[torch.Tensor] = []
+            diagnostic_recovery_lambdas: list[torch.Tensor] = []
             gradient_scale = float(scaler.get_scale())
             pending_cuda_transfer = None
             if cuda_transfer_stream is not None:
@@ -898,15 +989,64 @@ def train_multi_object(
                 ):
                     model_output = model(prepared.sample)
                 prediction_fp32 = model_output.predicted_laplacian.float()
+                direct_prediction_fp32 = model_output.direct_vertex_displacement_prediction
+                if hybrid_single.enabled:
+                    if direct_prediction_fp32 is None:
+                        raise RuntimeError("Hybrid training requires the direct branch output.")
+                    direct_prediction_fp32 = direct_prediction_fp32.float()
+                elif direct_prediction_fp32 is not None:
+                    raise RuntimeError("A hybrid direct output is present while hybrid loss is disabled.")
+                recovery_regularization: float | torch.Tensor = (
+                    recovery_aware.regularization
+                )
+                if recovery_aware.adaptive_lambda:
+                    if model_output.recovery_lambda is None:
+                        raise RuntimeError(
+                            "Adaptive recovery requires a predicted mesh-level lambda."
+                        )
+                    recovery_regularization = model_output.recovery_lambda
+                    recovery_regularization.retain_grad()
+                    diagnostic_recovery_lambdas.append(recovery_regularization)
+                    report_recovery_lambda_values.append(
+                        float(recovery_regularization.detach().cpu())
+                    )
+                    report_nonfinite_counts += int(
+                        (~torch.isfinite(recovery_regularization.detach())).sum().item()
+                    )
+                elif model_output.recovery_lambda is not None:
+                    raise RuntimeError(
+                        "Fixed-lambda recovery must not instantiate the lambda head."
+                    )
                 runtime_gradient_diagnostics = (
                     recovery_aware.enabled and recovery_aware.runtime_diagnostics
-                ) or direct_vertex_runtime_diagnostics
+                ) or direct_vertex_runtime_diagnostics or (
+                    hybrid_single.enabled and hybrid_single.runtime_diagnostics
+                )
                 if runtime_gradient_diagnostics:
                     prediction_fp32.retain_grad()
                     diagnostic_predictions.append(prediction_fp32)
                     report_nonfinite_counts += int(
                         (~torch.isfinite(prediction_fp32.detach())).sum().item()
                     )
+                    if hybrid_single.enabled:
+                        assert direct_prediction_fp32 is not None
+                        direct_prediction_fp32.retain_grad()
+                        diagnostic_direct_predictions.append(direct_prediction_fp32)
+                        report_nonfinite_counts += int(
+                            (~torch.isfinite(direct_prediction_fp32.detach())).sum().item()
+                        )
+                        report_laplacian_output_rms.append(
+                            float(torch.sqrt(prediction_fp32.detach().square().mean()).item())
+                        )
+                        direct_magnitude = torch.linalg.vector_norm(
+                            direct_prediction_fp32.detach(), dim=-1
+                        )
+                        report_prediction_displacement_rms.append(
+                            float(torch.sqrt(direct_magnitude.square().mean()).item())
+                        )
+                        report_prediction_displacement_mean.append(
+                            float(direct_magnitude.mean().item())
+                        )
                 if direct_vertex_runtime_diagnostics:
                     displacement_magnitude = torch.linalg.vector_norm(
                         prediction_fp32.detach(), dim=-1
@@ -942,7 +1082,11 @@ def train_multi_object(
                     )
                     loss_target = loss_target.index_select(0, sampled_vertices.indices)
                     loss_weight = loss_weight.index_select(0, sampled_vertices.indices)
-                if output_semantics == DIRECT_VERTEX_DISPLACEMENT:
+                if hybrid_single.enabled:
+                    # Both branch targets are deliberately absent.  The scalar
+                    # is replaced below by the final recovered-geometry loss.
+                    prediction_loss = prediction_fp32.new_zeros(())
+                elif output_semantics == DIRECT_VERTEX_DISPLACEMENT:
                     # Exact Arm-E objective: mean_i ||delta_v_pred-delta_v_gt||_2^2.
                     prediction_loss = _direct_vertex_residual_mse(
                         loss_prediction, loss_target
@@ -989,7 +1133,10 @@ def train_multi_object(
                         try:
                             refine_loss, recovered_vertices, pcg_audit = (
                                 _recovery_refine_loss_with_audit(
-                                    prediction_fp32, prepared, recovery_aware
+                                    prediction_fp32,
+                                    prepared,
+                                    recovery_aware,
+                                    regularization=recovery_regularization,
                                 )
                             )
                         except RuntimeError as error:
@@ -1008,7 +1155,18 @@ def train_multi_object(
                                             "sample_id": str(
                                                 prepared.sample["sample_id"]
                                             ),
-                                            "lambda": recovery_aware.regularization,
+                                            "lambda": float(
+                                                torch.as_tensor(
+                                                    recovery_regularization
+                                                ).detach().cpu()
+                                            ),
+                                            "solver_mode": recovery_aware.solver_mode,
+                                            "hard_anchor_count": int(
+                                                prepared.sample.get(
+                                                    "hard_anchor_indices",
+                                                    torch.empty(0),
+                                                ).numel()
+                                            ),
                                             "maximum_iterations": recovery_aware.maximum_iterations,
                                             "tolerance": recovery_aware.tolerance,
                                             "error": str(error),
@@ -1029,10 +1187,37 @@ def train_multi_object(
                         )
                     else:
                         refine_loss, _ = _recovery_refine_loss(
-                            prediction_fp32, prepared, recovery_aware
+                            prediction_fp32,
+                            prepared,
+                            recovery_aware,
+                            regularization=recovery_regularization,
                         )
                     objective = objective + recovery_aware.beta * refine_loss
                     refine_loss_tensors.append(refine_loss.detach())
+                if hybrid_single.enabled:
+                    assert direct_prediction_fp32 is not None
+                    try:
+                        refine_loss, recovered_vertices, pcg_audit, _ = (
+                            _hybrid_single_geometry_loss(
+                                prediction_fp32,
+                                direct_prediction_fp32,
+                                prepared,
+                                hybrid_single,
+                                with_audit=hybrid_single.runtime_diagnostics,
+                            )
+                        )
+                    except RuntimeError:
+                        report_pcg_failed_solves += 1
+                        raise
+                    objective = refine_loss
+                    prediction_loss = refine_loss
+                    refine_loss_tensors.append(refine_loss.detach())
+                    if pcg_audit is not None:
+                        report_pcg_iterations.append(float(pcg_audit.iterations))
+                        report_pcg_relative_residuals.append(float(pcg_audit.relative_residual))
+                    report_nonfinite_counts += int(
+                        (~torch.isfinite(recovered_vertices.detach())).sum().item()
+                    )
                 if not torch.isfinite(objective):
                     sample_id = prepared.sample["sample_id"]
                     raise FloatingPointError(
@@ -1054,7 +1239,7 @@ def train_multi_object(
                 visible_query_count += int(visible.sum().item())
                 invisible_query_count += int((~visible).sum().item())
                 with torch.no_grad():
-                    exact_loss, perturbed_loss = _query_subset_losses(
+                    exact_loss, perturbed_loss = (None, None) if hybrid_single.enabled else _query_subset_losses(
                         full_loss_prediction,
                         full_loss_target,
                         prepared.sample["target_confidence"].float(),
@@ -1067,7 +1252,9 @@ def train_multi_object(
                     perturbed_query_loss_tensors.append(perturbed_loss.detach())
             runtime_gradient_diagnostics = (
                 recovery_aware.enabled and recovery_aware.runtime_diagnostics
-            ) or direct_vertex_runtime_diagnostics
+            ) or direct_vertex_runtime_diagnostics or (
+                hybrid_single.enabled and hybrid_single.runtime_diagnostics
+            )
             if gradient_clip > 0 or runtime_gradient_diagnostics:
                 scaler.unscale_(optimizer)
             if runtime_gradient_diagnostics:
@@ -1084,6 +1271,17 @@ def train_multi_object(
                     report_nonfinite_counts += int(
                         (~torch.isfinite(unscaled_prediction_gradient)).sum().item()
                     )
+                for diagnostic_direct in diagnostic_direct_predictions:
+                    direct_gradient = diagnostic_direct.grad
+                    if direct_gradient is None:
+                        raise RuntimeError("Hybrid runtime diagnostic lost the V_direct gradient.")
+                    unscaled_direct_gradient = direct_gradient / gradient_scale
+                    report_direct_gradient_norms.append(
+                        float(torch.linalg.vector_norm(unscaled_direct_gradient).item())
+                    )
+                    report_nonfinite_counts += int(
+                        (~torch.isfinite(unscaled_direct_gradient)).sum().item()
+                    )
                 prediction_head_parameters = tuple(
                     _unwrap_model(model).predictor.output_mlp.parameters()
                 )
@@ -1098,6 +1296,34 @@ def train_multi_object(
                 report_prediction_head_gradient_norms.append(
                     float(torch.sqrt(finite_head_squares).item())
                 )
+                direct_head = _unwrap_model(model).hybrid_direct_head
+                if direct_head is not None:
+                    direct_head_norm, direct_head_nonfinite = _parameter_gradient_diagnostics(
+                        direct_head.parameters(), device
+                    )
+                    report_direct_head_gradient_norms.append(direct_head_norm)
+                    report_nonfinite_counts += direct_head_nonfinite
+                for recovery_lambda in diagnostic_recovery_lambdas:
+                    if recovery_lambda.grad is None:
+                        raise RuntimeError(
+                            "Adaptive lambda diagnostic did not retain a gradient."
+                        )
+                    unscaled_lambda_gradient = recovery_lambda.grad / gradient_scale
+                    report_recovery_lambda_gradient_norms.append(
+                        abs(float(unscaled_lambda_gradient.detach().cpu()))
+                    )
+                    report_nonfinite_counts += int(
+                        (~torch.isfinite(unscaled_lambda_gradient)).sum().item()
+                    )
+                lambda_head = _unwrap_model(model).recovery_lambda_head
+                if lambda_head is not None:
+                    lambda_head_norm, lambda_head_nonfinite = (
+                        _parameter_gradient_diagnostics(lambda_head.parameters(), device)
+                    )
+                    report_recovery_lambda_head_gradient_norms.append(
+                        lambda_head_norm
+                    )
+                    report_nonfinite_counts += lambda_head_nonfinite
                 if direct_vertex_runtime_diagnostics:
                     unwrapped = _unwrap_model(model)
                     image_norm, image_nonfinite = _parameter_gradient_diagnostics(
@@ -1195,9 +1421,21 @@ def train_multi_object(
                     else None,
                     distributed,
                 )
+                direct_gradient_norm = _distributed_optional_mean(
+                    float(np.mean(report_direct_gradient_norms))
+                    if report_direct_gradient_norms
+                    else None,
+                    distributed,
+                )
                 prediction_head_gradient_norm = _distributed_optional_mean(
                     float(np.mean(report_prediction_head_gradient_norms))
                     if report_prediction_head_gradient_norms
+                    else None,
+                    distributed,
+                )
+                direct_head_gradient_norm = _distributed_optional_mean(
+                    float(np.mean(report_direct_head_gradient_norms))
+                    if report_direct_head_gradient_norms
                     else None,
                     distributed,
                 )
@@ -1222,6 +1460,48 @@ def train_multi_object(
                 prediction_displacement_mean = _distributed_optional_mean(
                     float(np.mean(report_prediction_displacement_mean))
                     if report_prediction_displacement_mean
+                    else None,
+                    distributed,
+                )
+                laplacian_output_rms = _distributed_optional_mean(
+                    float(np.mean(report_laplacian_output_rms))
+                    if report_laplacian_output_rms
+                    else None,
+                    distributed,
+                )
+                recovery_lambda_mean = _distributed_optional_mean(
+                    float(np.mean(report_recovery_lambda_values))
+                    if report_recovery_lambda_values
+                    else None,
+                    distributed,
+                )
+                recovery_lambda_min = (
+                    reduce_scalar(
+                        min(report_recovery_lambda_values),
+                        distributed,
+                        reduction="min",
+                    )
+                    if report_recovery_lambda_values
+                    else None
+                )
+                recovery_lambda_max = (
+                    reduce_scalar(
+                        max(report_recovery_lambda_values),
+                        distributed,
+                        reduction="max",
+                    )
+                    if report_recovery_lambda_values
+                    else None
+                )
+                recovery_lambda_gradient_norm = _distributed_optional_mean(
+                    float(np.mean(report_recovery_lambda_gradient_norms))
+                    if report_recovery_lambda_gradient_norms
+                    else None,
+                    distributed,
+                )
+                recovery_lambda_head_gradient_norm = _distributed_optional_mean(
+                    float(np.mean(report_recovery_lambda_head_gradient_norms))
+                    if report_recovery_lambda_head_gradient_norms
                     else None,
                     distributed,
                 )
@@ -1269,6 +1549,7 @@ def train_multi_object(
                     "pcg_relative_residual_max": pcg_relative_residual_max,
                     "pcg_failed_solves": pcg_failed_solves,
                     "delta_pred_gradient_norm": prediction_gradient_norm,
+                    "v_direct_gradient_norm": direct_gradient_norm,
                     "delta_v_gradient_norm": (
                         prediction_gradient_norm
                         if output_semantics == DIRECT_VERTEX_DISPLACEMENT
@@ -1277,8 +1558,15 @@ def train_multi_object(
                     "image_encoder_gradient_norm": image_encoder_gradient_norm,
                     "graph_block_gradient_norm": graph_block_gradient_norm,
                     "prediction_head_gradient_norm": prediction_head_gradient_norm,
+                    "direct_head_gradient_norm": direct_head_gradient_norm,
+                    "laplacian_output_rms": laplacian_output_rms,
                     "prediction_displacement_rms": prediction_displacement_rms,
                     "prediction_displacement_mean": prediction_displacement_mean,
+                    "recovery_lambda_mean": recovery_lambda_mean,
+                    "recovery_lambda_min": recovery_lambda_min,
+                    "recovery_lambda_max": recovery_lambda_max,
+                    "recovery_lambda_gradient_norm": recovery_lambda_gradient_norm,
+                    "recovery_lambda_head_gradient_norm": recovery_lambda_head_gradient_norm,
                     "nan_inf_count": nonfinite_count,
                     "peak_gpu_memory_mb": peak_gpu_memory_mb,
                     "validation_loss": None,
@@ -1335,9 +1623,15 @@ def train_multi_object(
                         f"pcg_residual_max={residual_text} "
                         f"pcg_failed={pcg_failed_solves} "
                         f"delta_grad={prediction_gradient_norm} "
+                        f"v_direct_grad={direct_gradient_norm} "
                         f"image_grad={image_encoder_gradient_norm} "
                         f"graph_grad={graph_block_gradient_norm} "
                         f"head_grad={prediction_head_gradient_norm} "
+                        f"direct_head_grad={direct_head_gradient_norm} "
+                        f"laplacian_rms={laplacian_output_rms} "
+                        f"recovery_lambda={recovery_lambda_mean} "
+                        f"lambda_grad={recovery_lambda_gradient_norm} "
+                        f"lambda_head_grad={recovery_lambda_head_gradient_norm} "
                         f"displacement_rms={prediction_displacement_rms} "
                         f"nan_inf={nonfinite_count} "
                         f"peak_gpu_mb={peak_gpu_memory_mb} "
@@ -1353,11 +1647,17 @@ def train_multi_object(
                 report_pcg_relative_residuals.clear()
                 report_pcg_failed_solves = 0
                 report_prediction_gradient_norms.clear()
+                report_direct_gradient_norms.clear()
                 report_prediction_head_gradient_norms.clear()
+                report_direct_head_gradient_norms.clear()
                 report_image_encoder_gradient_norms.clear()
                 report_graph_block_gradient_norms.clear()
                 report_prediction_displacement_rms.clear()
                 report_prediction_displacement_mean.clear()
+                report_laplacian_output_rms.clear()
+                report_recovery_lambda_values.clear()
+                report_recovery_lambda_gradient_norms.clear()
+                report_recovery_lambda_head_gradient_norms.clear()
                 report_nonfinite_counts = 0
                 report_started_at = time.perf_counter()
                 while (
@@ -1503,6 +1803,7 @@ def train_multi_object(
         validation_laplacian_loss = None
         validation_refine_loss = None
         validation_recovered_vertex_rms = None
+        validation_hybrid_chamfer = None
         validation_seconds = 0.0
         if should_validate:
             _set_loader_epoch(validation_loader, 0)
@@ -1536,6 +1837,12 @@ def train_multi_object(
             )
             validation_recovered_vertex_rms = _mean_metric(
                 validation_epoch_metrics, "recovered_vertex_rms"
+            )
+            validation_hybrid_chamfer = _mean_metric(
+                validation_epoch_metrics, "hybrid_chamfer"
+            )
+            validation_hybrid_chamfer = _distributed_optional_mean(
+                validation_hybrid_chamfer, distributed
             )
             validation_perturbed_query_loss = _mean_metric(
                 validation_epoch_metrics, "perturbed_query_loss"
@@ -1592,7 +1899,11 @@ def train_multi_object(
                         f"seconds={validation_seconds:.2f}",
                         flush=True,
                     )
-        selection_loss = validation_loss if prepared_validation else train_loss
+        selection_loss = (
+            validation_hybrid_chamfer
+            if hybrid_single.enabled and prepared_validation
+            else (validation_loss if prepared_validation else train_loss)
+        )
         if selection_loss is not None and selection_loss < best_selection_loss:
             best_selection_loss = selection_loss
             best_epoch = epoch
@@ -1638,6 +1949,7 @@ def train_multi_object(
             "validation_normalized_laplacian_loss": validation_laplacian_loss,
             "validation_recovery_refine_loss": validation_refine_loss,
             "validation_recovered_vertex_rms": validation_recovered_vertex_rms,
+            "validation_hybrid_chamfer": validation_hybrid_chamfer,
             "optimizer_steps": optimizer_steps,
             "train_seconds": train_seconds,
             "validation_seconds": validation_seconds,
@@ -2027,6 +2339,12 @@ def _build_model(
     dynamic_expert_config = model_config.get("dynamic_residual_expert", {})
     if not isinstance(dynamic_expert_config, Mapping):
         raise ValueError("model.dynamic_residual_expert must be an object.")
+    recovery_lambda_config = model_config.get("recovery_lambda_head", {})
+    if not isinstance(recovery_lambda_config, Mapping):
+        raise ValueError("model.recovery_lambda_head must be an object.")
+    hybrid_direct_config = model_config.get("hybrid_direct_head", {})
+    if not isinstance(hybrid_direct_config, Mapping):
+        raise ValueError("model.hybrid_direct_head must be an object.")
     return LearnedLaplacianModel(
         image_feature_dim=int(image_config.get("feature_dim", 32)),
         image_first_stride=int(image_config.get("first_stride", 2)),
@@ -2069,6 +2387,22 @@ def _build_model(
         dynamic_gate_initial_bias=float(
             dynamic_expert_config.get("gate_initial_bias", 0.1)
         ),
+        recovery_lambda_head_enabled=bool(
+            recovery_lambda_config.get("enabled", False)
+        ),
+        recovery_lambda_head_hidden_dim=int(
+            recovery_lambda_config.get("hidden_dim", 16)
+        ),
+        recovery_lambda_minimum=float(
+            recovery_lambda_config.get("lambda_min", 1e-3)
+        ),
+        recovery_lambda_maximum=float(
+            recovery_lambda_config.get("lambda_max", 1e-1)
+        ),
+        recovery_lambda_initial=float(
+            recovery_lambda_config.get("lambda_initial", 1e-2)
+        ),
+        hybrid_direct_head_enabled=bool(hybrid_direct_config.get("enabled", False)),
     )
 
 
@@ -2085,6 +2419,7 @@ def _load_initialization_checkpoint(
     allowed_missing_prefixes = (
         "dynamic_residual_expert.",
         "dynamic_gate_head.",
+        "recovery_lambda_head.",
     )
     unexpected = list(incompatible.unexpected_keys)
     disallowed_missing = [
@@ -2261,6 +2596,7 @@ def _prepare_object_static(
     )
     static_sample = _select_renderer_visibility(static_sample, config)
     recovery_aware = _recovery_aware_geometry_settings(config)
+    hybrid_single = _hybrid_single_geometry_settings(config)
     if query_augmentation_settings(config).enabled:
         validate_gt_query_contract(static_sample)
     if local_query_jitter_settings(config).enabled:
@@ -2312,9 +2648,13 @@ def _prepare_object_static(
         static_sample["oracle_high_signal_mask"] = _oracle_top_magnitude_mask(
             target, static_sample["valid_scale_mask"], top_fraction
         )
+    if recovery_aware.enabled and recovery_aware.solver_mode == "hard_anchor_lambda0":
+        static_sample["hard_anchor_indices"] = deterministic_component_anchor_indices(
+            static_sample["edge_index"], int(static_sample["vertices"].shape[0])
+        )
     face_count = int(static_sample["faces"].shape[0])
     clean_vertices = None
-    if recovery_aware.enabled:
+    if recovery_aware.enabled or hybrid_single.enabled:
         clean_vertices = static_sample.get("clean_reference_vertices")
         clean_faces = static_sample.get("clean_reference_faces")
         if not isinstance(clean_vertices, torch.Tensor) or tuple(
@@ -2336,6 +2676,11 @@ def _prepare_object_static(
         keep_image_payload=keep_image_payload,
         keep_projection=keep_projection,
     )
+    if hybrid_single.enabled:
+        # Required only by the validation unified-v2 Chamfer selector.  Clean
+        # faces are not retained because the equality contract was checked
+        # above and the shared input faces are sufficient for evaluation.
+        static_sample["faces"] = clean_faces
     return _PreparedObject(
         sample=static_sample,
         training_target=target,
@@ -2407,6 +2752,7 @@ def _prune_sample_for_training(
         "position_normalization_center",
         "position_normalization_scale",
         "oracle_high_signal_mask",
+        "hard_anchor_indices",
     }
     if keep_projection:
         fields.update({"intrinsics", "extrinsics", "visibility"})
@@ -2991,9 +3337,20 @@ def _recovery_aware_geometry_settings(
         tolerance=float(raw.get("tolerance", 1e-5)),
         runtime_diagnostics=bool(raw.get("runtime_diagnostics", False)),
         compute_dtype=str(raw.get("compute_dtype", "float32")),
+        adaptive_lambda=bool(raw.get("adaptive_lambda", False)),
+        solver_mode=str(raw.get("solver", "regularized_sparse")),
     )
-    if settings.regularization <= 0:
-        raise ValueError("recovery-aware geometry lambda must be positive.")
+    if settings.solver_mode not in {"regularized_sparse", "hard_anchor_lambda0"}:
+        raise ValueError(
+            "recovery-aware solver must be regularized_sparse or hard_anchor_lambda0."
+        )
+    if settings.solver_mode == "regularized_sparse":
+        if settings.regularization <= 0:
+            raise ValueError("regularized recovery-aware geometry lambda must be positive.")
+    elif settings.regularization != 0:
+        raise ValueError("hard_anchor_lambda0 requires lambda exactly equal to zero.")
+    if settings.solver_mode == "hard_anchor_lambda0" and settings.adaptive_lambda:
+        raise ValueError("hard_anchor_lambda0 cannot use adaptive lambda.")
     if settings.beta < 0:
         raise ValueError("recovery-aware geometry beta must be non-negative.")
     if settings.enabled and settings.beta <= 0:
@@ -3007,25 +3364,120 @@ def _recovery_aware_geometry_settings(
     return settings
 
 
+def _hybrid_single_geometry_settings(
+    config: Mapping[str, Any],
+) -> _HybridSingleGeometrySettings:
+    training = config.get("training", {})
+    if not isinstance(training, Mapping):
+        raise ValueError("training must be an object.")
+    raw = training.get("hybrid_single_geometry_loss", {})
+    if not isinstance(raw, Mapping):
+        raise ValueError("training.hybrid_single_geometry_loss must be an object.")
+    settings = _HybridSingleGeometrySettings(
+        enabled=bool(raw.get("enabled", False)),
+        regularization=float(raw.get("lambda", 3e-2)),
+        maximum_iterations=int(raw.get("maximum_iterations", 2048)),
+        tolerance=float(raw.get("tolerance", 1e-6)),
+        runtime_diagnostics=bool(raw.get("runtime_diagnostics", False)),
+        compute_dtype=str(raw.get("compute_dtype", "float64")),
+        validation_surface_samples=int(raw.get("validation_surface_samples", 3000)),
+    )
+    if settings.regularization <= 0:
+        raise ValueError("hybrid single-geometry lambda must be positive.")
+    if settings.maximum_iterations < 1 or settings.tolerance <= 0:
+        raise ValueError("hybrid PCG iteration budget and tolerance must be positive.")
+    if settings.compute_dtype not in {"float32", "float64"}:
+        raise ValueError("hybrid compute_dtype must be float32 or float64.")
+    if settings.validation_surface_samples < 1:
+        raise ValueError("hybrid validation_surface_samples must be positive.")
+    return settings
+
+
+def _hybrid_single_geometry_loss(
+    laplacian_prediction: torch.Tensor,
+    direct_displacement_prediction: torch.Tensor,
+    prepared: _PreparedObject,
+    settings: _HybridSingleGeometrySettings,
+    *,
+    with_audit: bool,
+) -> tuple[torch.Tensor, torch.Tensor, ConjugateGradientAudit | None, torch.Tensor]:
+    clean_vertices = prepared.clean_vertices
+    if clean_vertices is None:
+        raise RuntimeError("Hybrid single-geometry loss requires loss-side clean vertices.")
+    if direct_displacement_prediction.shape != laplacian_prediction.shape:
+        raise ValueError("Hybrid Laplacian and direct outputs must both have shape [N, 3].")
+    sample = prepared.sample
+    solve_dtype = torch.float64 if settings.compute_dtype == "float64" else torch.float32
+    v_direct = sample["vertices"].to(dtype=solve_dtype) + direct_displacement_prediction.to(
+        dtype=solve_dtype
+    )
+    arguments = dict(
+        regularization=settings.regularization,
+        maximum_iterations=settings.maximum_iterations,
+        tolerance=settings.tolerance,
+    )
+    if with_audit:
+        recovered, audit = differentiable_regularized_sparse_recovery_with_audit(
+            laplacian_prediction.to(dtype=solve_dtype),
+            v_direct,
+            sample["edge_index"],
+            sample["vertex_degree"].to(dtype=solve_dtype),
+            **arguments,
+        )
+    else:
+        recovered = differentiable_regularized_sparse_recovery(
+            laplacian_prediction.to(dtype=solve_dtype),
+            v_direct,
+            sample["edge_index"],
+            sample["vertex_degree"].to(dtype=solve_dtype),
+            **arguments,
+        )
+        audit = None
+    loss = (
+        (recovered - clean_vertices.to(dtype=solve_dtype))
+        .square()
+        .sum(dim=-1)
+        .mean()
+    )
+    return loss, recovered, audit, v_direct
+
+
 def _recovery_refine_loss(
     prediction: torch.Tensor,
     prepared: _PreparedObject,
     settings: _RecoveryAwareGeometrySettings,
+    regularization: float | torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     clean_vertices = prepared.clean_vertices
     if clean_vertices is None:
         raise RuntimeError("Recovery-aware loss requires loss-side clean vertices.")
     sample = prepared.sample
     solve_dtype = torch.float64 if settings.compute_dtype == "float64" else torch.float32
-    recovered = differentiable_regularized_sparse_recovery(
-        prediction.to(dtype=solve_dtype),
-        sample["vertices"].to(dtype=solve_dtype),
-        sample["edge_index"],
-        sample["vertex_degree"].to(dtype=solve_dtype),
-        regularization=settings.regularization,
-        maximum_iterations=settings.maximum_iterations,
-        tolerance=settings.tolerance,
-    )
+    if settings.solver_mode == "hard_anchor_lambda0":
+        anchors = sample.get("hard_anchor_indices")
+        if not isinstance(anchors, torch.Tensor):
+            raise RuntimeError("hard_anchor_lambda0 requires graph-derived anchors.")
+        recovered = differentiable_hard_anchor_sparse_recovery(
+            prediction.to(dtype=solve_dtype),
+            sample["vertices"].to(dtype=solve_dtype),
+            sample["edge_index"],
+            sample["vertex_degree"].to(dtype=solve_dtype),
+            anchors,
+            maximum_iterations=settings.maximum_iterations,
+            tolerance=settings.tolerance,
+        )
+    else:
+        recovered = differentiable_regularized_sparse_recovery(
+            prediction.to(dtype=solve_dtype),
+            sample["vertices"].to(dtype=solve_dtype),
+            sample["edge_index"],
+            sample["vertex_degree"].to(dtype=solve_dtype),
+            regularization=(
+                settings.regularization if regularization is None else regularization
+            ),
+            maximum_iterations=settings.maximum_iterations,
+            tolerance=settings.tolerance,
+        )
     refine_loss = (
         (recovered - clean_vertices.to(dtype=solve_dtype))
         .square()
@@ -3039,21 +3491,38 @@ def _recovery_refine_loss_with_audit(
     prediction: torch.Tensor,
     prepared: _PreparedObject,
     settings: _RecoveryAwareGeometrySettings,
+    regularization: float | torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, ConjugateGradientAudit]:
     clean_vertices = prepared.clean_vertices
     if clean_vertices is None:
         raise RuntimeError("Recovery-aware loss requires loss-side clean vertices.")
     sample = prepared.sample
     solve_dtype = torch.float64 if settings.compute_dtype == "float64" else torch.float32
-    recovered, audit = differentiable_regularized_sparse_recovery_with_audit(
-        prediction.to(dtype=solve_dtype),
-        sample["vertices"].to(dtype=solve_dtype),
-        sample["edge_index"],
-        sample["vertex_degree"].to(dtype=solve_dtype),
-        regularization=settings.regularization,
-        maximum_iterations=settings.maximum_iterations,
-        tolerance=settings.tolerance,
-    )
+    if settings.solver_mode == "hard_anchor_lambda0":
+        anchors = sample.get("hard_anchor_indices")
+        if not isinstance(anchors, torch.Tensor):
+            raise RuntimeError("hard_anchor_lambda0 requires graph-derived anchors.")
+        recovered, audit = differentiable_hard_anchor_sparse_recovery_with_audit(
+            prediction.to(dtype=solve_dtype),
+            sample["vertices"].to(dtype=solve_dtype),
+            sample["edge_index"],
+            sample["vertex_degree"].to(dtype=solve_dtype),
+            anchors,
+            maximum_iterations=settings.maximum_iterations,
+            tolerance=settings.tolerance,
+        )
+    else:
+        recovered, audit = differentiable_regularized_sparse_recovery_with_audit(
+            prediction.to(dtype=solve_dtype),
+            sample["vertices"].to(dtype=solve_dtype),
+            sample["edge_index"],
+            sample["vertex_degree"].to(dtype=solve_dtype),
+            regularization=(
+                settings.regularization if regularization is None else regularization
+            ),
+            maximum_iterations=settings.maximum_iterations,
+            tolerance=settings.tolerance,
+        )
     refine_loss = (
         (recovered - clean_vertices.to(dtype=solve_dtype))
         .square()
@@ -3227,6 +3696,7 @@ def _evaluate_dataset(
     prediction_loss_space = _prediction_loss_space(config.get("training", {}))
     confidence_settings = _confidence_settings(config)
     recovery_aware = _recovery_aware_geometry_settings(config)
+    hybrid_single = _hybrid_single_geometry_settings(config)
     losses = []
     metrics: dict[str, dict[str, Any]] = {}
     if prediction_dir is not None:
@@ -3277,6 +3747,11 @@ def _evaluate_dataset(
         ):
             model_output = model(prepared.sample)
         prediction = model_output.predicted_laplacian.float()
+        direct_prediction = model_output.direct_vertex_displacement_prediction
+        if hybrid_single.enabled:
+            if direct_prediction is None:
+                raise RuntimeError("Hybrid evaluation requires the direct branch output.")
+            direct_prediction = direct_prediction.float()
         loss_prediction, loss_target = _prediction_loss_inputs(
             prediction,
             prepared,
@@ -3296,6 +3771,8 @@ def _evaluate_dataset(
             )
         refine_loss = None
         recovered_vertex_rms = None
+        recovered_vertices = None
+        hybrid_geometry = None
         objective = loss
         if recovery_aware.enabled:
             refine_loss, _ = _recovery_refine_loss(
@@ -3303,6 +3780,30 @@ def _evaluate_dataset(
             )
             recovered_vertex_rms = torch.sqrt(refine_loss)
             objective = objective + recovery_aware.beta * refine_loss
+        if hybrid_single.enabled:
+            assert direct_prediction is not None
+            refine_loss, recovered_vertices, _, v_direct = _hybrid_single_geometry_loss(
+                prediction,
+                direct_prediction,
+                prepared,
+                hybrid_single,
+                with_audit=False,
+            )
+            recovered_vertex_rms = torch.sqrt(refine_loss)
+            objective = refine_loss
+            faces_np = prepared.sample["faces"].detach().cpu().numpy().astype(np.int64)
+            clean_vertices = prepared.clean_vertices
+            if clean_vertices is None:
+                raise RuntimeError("Hybrid evaluation requires clean vertices.")
+            hybrid_geometry = evaluate_mesh_geometry(
+                Mesh(
+                    recovered_vertices.detach().cpu().numpy(), faces_np
+                ).ensure_normals(),
+                Mesh(clean_vertices.detach().cpu().numpy(), faces_np).ensure_normals(),
+                surface_samples=hybrid_single.validation_surface_samples,
+                seed=7,
+                fscore_threshold=0.01,
+            )
         loss_value = float(objective.item())
         laplacian_loss_value = float(loss.item())
         exact_loss, perturbed_loss = _query_subset_losses(
@@ -3362,6 +3863,10 @@ def _evaluate_dataset(
                 if recovered_vertex_rms is None
                 else float(recovered_vertex_rms.item())
             ),
+            "hybrid_chamfer": (
+                None if hybrid_geometry is None else float(hybrid_geometry["chamfer"])
+            ),
+            "hybrid_geometry": hybrid_geometry,
             "prediction_semantics": output_semantics,
             "prediction_loss_space": prediction_loss_space,
             "exact_query_loss": None if exact_loss is None else float(exact_loss.item()),
@@ -3401,6 +3906,16 @@ def _evaluate_dataset(
                 np.save(
                     prediction_dir / f"{safe_id}_confidence.npy",
                     confidence_prediction_cpu.numpy(),
+                )
+            if hybrid_single.enabled:
+                assert direct_prediction is not None and recovered_vertices is not None
+                np.save(
+                    prediction_dir / f"{safe_id}_direct_displacement.npy",
+                    direct_prediction.detach().cpu().numpy(),
+                )
+                np.save(
+                    prediction_dir / f"{safe_id}_hybrid_vertices.npy",
+                    recovered_vertices.detach().cpu().numpy(),
                 )
     if not losses:
         raise ValueError("Cannot evaluate an empty dataset split.")

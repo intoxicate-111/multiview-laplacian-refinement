@@ -28,7 +28,7 @@ View-count and query-resolution results: [Ablation report](runs/learned_laplacia
 
 ## Project status
 
-Status date: 2026-08-24 BST.
+Status date: 2026-08-25 BST.
 
 OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
 reconstructions and are retained only as out-of-distribution stress tests.
@@ -61,20 +61,23 @@ desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLIC
 | Sofa50 multi-topology coarse smoothing v2 | 20k training and controlled test/recovery complete | Job `17082` completed from scratch on 2×L40 with final/best validation `2.26915e-6`. On the same 50 strong-smoothing test inputs, v2 lowers raw EPE from v1's `0.00840367` to `0.00276820`, but unified refined Chamfer is worse (`0.00451747` vs `0.00426879`), normal consistency is lower, flips are higher and only 26/50 improve versus 38/50. Stronger smoothing improves target prediction but does not transfer through the frozen recovery contract. |
 | Exact-target sparse-recovery diagnosis | Complete | A centroid-gauged all-equation sparse solve reaches mean oracle efficiency `0.92366` on v2. Adding hard visibility after the `0.01` anchor lowers mean efficiency from `0.34258` to `0.16875` and worsens 44/50 samples; confidence is negligible and 2,000 Adam steps do not remove the collapse. |
 | Recovery-aware Arm A/B | Complete | With the same `lambda=beta=10^-2` sparse recovery, Arm B lowers test Chamfer from Arm A's `0.00395529` to `0.00358497` and recovered vertex RMS from `0.0135181` to `0.0115532`, despite worse raw EPE. This supports geometric-utility supervision rather than raw-regression improvement. |
-| Recovery-aware Arms C/D | Running/queued | Arm C (`lambda=10^-3`) job `17274` is running on 8×Blackwell; Arm D (`10^-4`) job `17275` follows it. The objective and `10^-4` PCG tolerance are fixed; float64/2,048-iteration PCG is a documented stability execution change. No result is claimed yet. |
-| Direct-vertex Arm E | Audited and queued | The 826,115-parameter C2F2+HF model predicts `Delta V` and uses only same-index vertex MSE; it contains no Laplacian target, sparse solver or recovery gate. Job `17278` follows D, so the H1-versus-H2 representation conclusion remains open. |
+| Recovery-aware Arms C/D | Complete | Weakening positional regularisation does not improve recovered geometry. Test Chamfer is `0.00414926` for C (`lambda=10^-3`) and `0.00653139` for D (`10^-4`), versus `0.00358497` for B (`10^-2`). Both runs use documented float64 PCG without changing their objectives. |
+| Direct-vertex Arm E | Complete | The 826,115-parameter C2F2+HF model predicts `Delta V` using only same-index vertex MSE. Test Chamfer is `0.00334039`, vertex RMS is `0.00822130`, and 45/50 inputs improve; E contains no Laplacian target, sparse solver or recovery gate. |
+| Frozen B+E hybrid recovery | Complete; read-only | With frozen B Laplacians, frozen E positions as the sole anchor and validation-selected `lambda=3e-2`, test Chamfer is `0.00302983` and 49/50 inputs improve. This motivates joint hybrid training but does not itself retrain or authorise scaling. |
+| End-to-end direct–Laplacian hybrid | Preflight passed; training running | One 892,678-parameter shared model predicts latent raw-Laplacian and direct-displacement fields. Their only supervision is final hybrid geometry after a fixed-`lambda=3e-2` differentiable solve. The float64 PCG/LSMR and two-branch gradient audit passes; job `17363` runs from scratch on 8×Blackwell. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
 | Future2000 GT-adaptive scale-up | 200k training and learned-method test complete | The fixed 200,000-step checkpoint was evaluated on 200 held-out objects × 5 variants. Unified Chamfer changes from `0.00776417` to `0.00522955`, with 959/1000 improved samples; mean normal consistency decreases from `0.924252` to `0.895907`, so the distance/normal trade-off remains explicit. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
 | Future2000 external baselines | Full-1000 comparison complete with explicit invalid metrics | Ours has the lowest aggregate valid-sample Chamfer (`0.00522955`) and improves 959/1000 inputs. Paired Chamfer wins are 742/998 vs NDS, 632/999 vs NDS-28V-full, 799/999 vs nvdiffrec and 955/996 vs ExMesh. Input-contract audit passes; strict/full metric completeness remains false because invalid outputs and ExMesh topology changes are preserved rather than repaired. |
 | Automated tests | Passing for the documented changes | Targeted external-adapter, same-initial aggregation, raw-loss, dynamic-expert/gate, image-feature, native-1920 and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
 
-The active representation is the synthetic-current, current-query/current-
-graph, direct-raw formulation established on Sofa50. The current recovery
-study integrates every predicted Laplacian row with a regularised sparse solve;
-hard visibility, confidence, recovery Huber and Adam mesh optimisation are
-disabled. The supervised field `L_current @ P_proxy` is a target only and is
-never passed to the model as an inference feature. The completed Future2000
+The established representation is the synthetic-current, current-query/current-
+graph, direct-raw formulation on Sofa50. The latest controlled extension adds a
+direct-displacement head and trains both latent branches only through the final
+hybrid geometry. Every predicted Laplacian row is integrated; hard visibility,
+confidence, recovery Huber and Adam mesh optimisation are disabled. Clean
+geometry is loss-only and is never passed to either branch or the solve. The
+completed Future2000
 scale-up uses the 960 high-frequency construction, 28 views, C2F2 and a fixed
 200,000-step checkpoint; its full-1000 same-initial external comparison is now
 complete, with invalid method outputs retained explicitly.
@@ -88,8 +91,8 @@ poor for that role.
 
 ## Current training method
 
-The model maps 28 calibrated views and the current mesh graph directly to a raw
-target Laplacian field:
+The established A-D model maps 28 calibrated views and the current mesh graph
+directly to a raw target Laplacian field:
 
 ```text
 28-view RGB + cameras + current vertices/connectivity + local geometry
@@ -133,7 +136,20 @@ GT geometry is used only for constructing supervision and evaluation. The
 recovery-aware arms use clean vertices only in the training-side vertex loss;
 they never enter the model or sparse solve. The dynamic residual expert, gate
 and raw-MSE loss remain completed controlled ablations. Direct displacement is
-now the separately audited Arm E control, not part of Arms A-D.
+the separately audited Arm E control. The current end-to-end hybrid experiment
+uses the same shared features and predicts both latent outputs:
+
+```text
+28-view RGB + cameras + current vertices/connectivity + local geometry
+    -> shared C2F2 + HF features
+    -> latent raw Laplacian delta_hat
+    -> latent direct displacement Delta V_direct
+    -> differentiable hybrid solve
+    -> final recovered mesh V_H
+```
+
+Neither latent branch receives an auxiliary target in this experiment. Clean
+vertices supervise only `V_H`.
 
 ## Mathematical specification
 
@@ -556,6 +572,99 @@ Variables: `Delta X_pred` is Arm E's `N x 3` output, `Delta X*` is the exact
 clean displacement and `L_E` is direct vertex-space MSE. Arm E uses the same
 encoder/backbone/head width but no `L`, sparse solver, lambda or post-process.
 
+### End-to-end direct–Laplacian hybrid and implicit backward
+
+The current controlled hybrid uses one shared encoder and two latent geometric
+heads:
+
+$$
+\widehat\delta=h_{\mathrm{lap}}(\Phi_\theta),
+\qquad
+\Delta V_{\mathrm{direct}}=h_{\mathrm{direct}}(\Phi_\theta),
+\qquad
+V_{\mathrm{direct}}=V_{\mathrm{input}}+\Delta V_{\mathrm{direct}}.
+$$
+
+Variables: `Phi_theta` is the shared C2F2+HF feature field;
+`delta_hat in R^(N x 3)` and `Delta V_direct in R^(N x 3)` are latent outputs.
+Neither is directly supervised. The two-head model has 892,678 parameters,
+66,563 more than Arm B or Arm E.
+
+With the validation-selected fixed value `lambda=3e-2`, the only recovery is
+
+$$
+V_H=
+\arg\min_V
+\left\lVert LV-\widehat\delta\right\rVert_F^2
++\lambda\left\lVert V-V_{\mathrm{direct}}\right\rVert_F^2.
+$$
+
+There is no additional `V_input` anchor. Defining
+
+$$
+A=L^\top L+\lambda I,
+\qquad
+b=L^\top\widehat\delta+\lambda V_{\mathrm{direct}},
+$$
+
+the differentiable forward solve is
+
+$$
+A V_H=b,
+\qquad
+V_H=A^{-1}\left(L^\top\widehat\delta+\lambda V_{\mathrm{direct}}\right).
+$$
+
+The complete training objective is final-geometry supervision only:
+
+$$
+\mathcal L_{\mathrm{hybrid}}
+=\frac{1}{N}\sum_{i=1}^{N}
+\left\lVert V_{H,i}-V_{\mathrm{clean},i}\right\rVert_2^2.
+$$
+
+No raw-Laplacian, direct-displacement, confidence, spectral, normal or Chamfer
+auxiliary loss is added. `V_clean` is read only after the two predictions and
+the solve have been formed; it is never a model or recovery input.
+
+For the exact implicit backward, let
+
+$$
+G=\nabla_{V_H}\mathcal L_{\mathrm{hybrid}}
+=\frac{2}{N}\left(V_H-V_{\mathrm{clean}}\right),
+\qquad
+A^\top Z=G.
+$$
+
+Because `A` is symmetric positive definite for `lambda>0`, the implementation
+solves `AZ=G`. The branch gradients are
+
+$$
+\boxed{
+\nabla_{\widehat\delta}\mathcal L_{\mathrm{hybrid}}=LZ,
+\qquad
+\nabla_{V_{\mathrm{direct}}}\mathcal L_{\mathrm{hybrid}}=\lambda Z,
+\qquad
+\nabla_{\Delta V_{\mathrm{direct}}}\mathcal L_{\mathrm{hybrid}}=\lambda Z
+}.
+$$
+
+Equivalently, the forward Jacobians are
+
+$$
+\frac{\partial V_H}{\partial\widehat\delta}=A^{-1}L^\top,
+\qquad
+\frac{\partial V_H}{\partial V_{\mathrm{direct}}}=\lambda A^{-1}.
+$$
+
+Thus the shared parameters receive both contributions through the two head
+Jacobians; the PCG iterations themselves do not need to be unrolled. `L` and
+`lambda` are fixed in this experiment. Forward and adjoint solves use float64
+PCG with tolerance `1e-8` and at most 2,048 iterations. The preflight audit
+matches trusted LSMR within `6.10e-9` vertex RMS on representative meshes and
+finite differences within `9.68e-11` relative error; both branch gradients are
+finite and non-zero.
+
 The old visibility/confidence-weighted Huber/Adam recovery remains a frozen
 historical baseline. Exact-target matched-domain diagnostics show that its hard
 visibility intervention is the largest tested recovery-efficiency loss, so it
@@ -845,10 +954,13 @@ Completed A/B test results are:
 | B: Lap + recovery-aware vertex | 0.00263986 | **0.00683290** | **0.00358497** | **0.13036** | **0.0105581** | **0.959366** | **0.0115532** |
 
 Arm B wins paired Chamfer on 32/50 and vertex RMS on 43/50, while winning raw
-EPE on only 10/50. Arms C/D (`lambda=10^-3/10^-4`) and the direct-vertex Arm E
-are still dependency-gated; see the [current study contract and live-status
-snapshot](docs/SOFA50_RECOVERY_AWARE_STUDY.md). No H1/H2 conclusion is drawn
-before the matched A-E evaluation.
+EPE on only 10/50. C (`lambda=10^-3`) and D (`10^-4`) do not beat B in
+recovered test geometry. Direct-vertex E reaches Chamfer `0.00334039`, vertex
+RMS `0.00822130` and normal consistency `0.970112`. The read-only frozen B+E
+hybrid then reaches Chamfer `0.00302983` and improves 49/50 test inputs with
+validation-selected `lambda=3e-2`. The running end-to-end experiment tests
+whether the same complementarity emerges when both latent branches receive
+only the final hybrid-geometry loss defined above.
 
 ### Native 1920 plus high-frequency residual, complete
 

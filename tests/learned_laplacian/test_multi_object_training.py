@@ -241,6 +241,121 @@ def test_recovery_aware_training_reports_geometry_loss(tmp_path) -> None:
     assert int(step_record["nan_inf_count"]) == 0
 
 
+def test_hybrid_single_loss_trains_both_heads_and_selects_validation_chamfer(
+    tmp_path,
+) -> None:
+    config = _multi_config()
+    config["target_mode"] = "raw_laplacian"
+    config["confidence"] = {"enabled": False}
+    config["model"]["hybrid_direct_head"] = {"enabled": True}
+    config["model"]["recovery_lambda_head"] = {"enabled": False}
+    config["training"]["vertex_sampling"] = {"mode": "full"}
+    config["training"]["recovery_aware_geometry_loss"] = {"enabled": False}
+    config["training"]["hybrid_single_geometry_loss"] = {
+        "enabled": True,
+        "lambda": 3e-2,
+        "maximum_iterations": 256,
+        "tolerance": 1e-8,
+        "compute_dtype": "float64",
+        "runtime_diagnostics": True,
+        "validation_surface_samples": 50,
+    }
+    config["multi_object_training"].update(
+        {
+            "epochs": 1,
+            "gradient_accumulation_meshes": 1,
+            "validation_every_epochs": 1,
+            "report_every_optimizer_steps": 1,
+        }
+    )
+    result = train_multi_object(
+        [_recovery_aware_sample("hybrid_train")],
+        [_recovery_aware_sample("hybrid_validation")],
+        config,
+        output_dir=tmp_path,
+        progress=False,
+    )
+    record = result.history[-1]
+    assert record["validation_hybrid_chamfer"] is not None
+    assert result.best_selection_loss == pytest.approx(
+        float(record["validation_hybrid_chamfer"])
+    )
+    step = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert float(step["delta_pred_gradient_norm"]) > 0
+    assert float(step["v_direct_gradient_norm"]) > 0
+    assert float(step["prediction_head_gradient_norm"]) > 0
+    assert float(step["direct_head_gradient_norm"]) > 0
+    assert float(step["laplacian_output_rms"]) > 0
+    assert int(step["pcg_failed_solves"]) == 0
+    assert int(step["nan_inf_count"]) == 0
+
+
+def test_hard_anchor_lambda0_training_uses_graph_only_anchors(tmp_path) -> None:
+    config = _recovery_aware_config()
+    config["training"]["recovery_aware_geometry_loss"].update(
+        {
+            "solver": "hard_anchor_lambda0",
+            "lambda": 0.0,
+            "compute_dtype": "float64",
+            "maximum_iterations": 256,
+            "tolerance": 1e-7,
+        }
+    )
+    config["multi_object_training"]["report_every_optimizer_steps"] = 1
+    prepared = _prepare_object_static(
+        _recovery_aware_sample("hard_anchor_static"), config
+    )
+    assert prepared.sample["hard_anchor_indices"].tolist() == [0]
+    assert "clean_reference_vertices" not in prepared.sample
+    result = train_multi_object(
+        [_recovery_aware_sample("hard_anchor_train")],
+        [_recovery_aware_sample("hard_anchor_validation")],
+        config,
+        output_dir=tmp_path,
+        progress=False,
+    )
+    assert math.isfinite(result.final_train_loss)
+    step = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert int(step["pcg_failed_solves"]) == 0
+    assert float(step["pcg_relative_residual_max"]) <= 1.05e-7
+    assert float(step["delta_pred_gradient_norm"]) > 0
+    assert float(step["prediction_head_gradient_norm"]) > 0
+    assert int(step["nan_inf_count"]) == 0
+
+
+def test_adaptive_recovery_lambda_training_reports_finite_nonzero_gradients(
+    tmp_path,
+) -> None:
+    config = _recovery_aware_config()
+    config["model"]["recovery_lambda_head"] = {
+        "enabled": True,
+        "hidden_dim": 4,
+        "lambda_min": 1e-3,
+        "lambda_max": 1e-1,
+        "lambda_initial": 1e-2,
+    }
+    config["training"]["recovery_aware_geometry_loss"]["adaptive_lambda"] = True
+    config["multi_object_training"]["report_every_optimizer_steps"] = 1
+    train_multi_object(
+        [_recovery_aware_sample("adaptive_lambda_train")],
+        [_recovery_aware_sample("adaptive_lambda_validation")],
+        config,
+        output_dir=tmp_path,
+        progress=False,
+    )
+    step = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert 1e-3 < float(step["recovery_lambda_mean"]) < 1e-1
+    assert float(step["recovery_lambda_gradient_norm"]) > 0
+    assert float(step["recovery_lambda_head_gradient_norm"]) > 0
+    assert int(step["nan_inf_count"]) == 0
+
+
 def _multi_view_sample(num_views: int = 14) -> dict:
     sample = tiny_sample()
     sample["sample_id"] = "multi_view"
