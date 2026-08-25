@@ -30,6 +30,11 @@ from .distributed import (
     current_distributed_context,
     reduce_scalar,
 )
+from .cotangent_sparse_recovery import (
+    build_symmetric_cotangent_stiffness,
+    differentiable_cotangent_sparse_recovery,
+    differentiable_cotangent_sparse_recovery_with_audit,
+)
 from .differentiable_sparse_recovery import (
     ConjugateGradientAudit,
     differentiable_regularized_sparse_recovery,
@@ -179,6 +184,8 @@ class _HybridSingleGeometrySettings:
     runtime_diagnostics: bool
     compute_dtype: str
     validation_surface_samples: int
+    operator: str
+    cotangent_relative_area_epsilon: float
 
 
 class _MaterializedPreparedDataset(Dataset[dict[str, Any]]):
@@ -2652,6 +2659,20 @@ def _prepare_object_static(
         static_sample["hard_anchor_indices"] = deterministic_component_anchor_indices(
             static_sample["edge_index"], int(static_sample["vertices"].shape[0])
         )
+    if (
+        hybrid_single.enabled
+        and hybrid_single.operator == "symmetric_cotangent_stiffness"
+    ):
+        cotangent_edges, cotangent_weights, cotangent_diagonal, _ = (
+            build_symmetric_cotangent_stiffness(
+                static_sample["vertices"],
+                static_sample["faces"],
+                relative_area_epsilon=hybrid_single.cotangent_relative_area_epsilon,
+            )
+        )
+        static_sample["cotangent_edge_index"] = cotangent_edges
+        static_sample["cotangent_edge_weight"] = cotangent_weights
+        static_sample["cotangent_diagonal"] = cotangent_diagonal
     face_count = int(static_sample["faces"].shape[0])
     clean_vertices = None
     if recovery_aware.enabled or hybrid_single.enabled:
@@ -2753,6 +2774,9 @@ def _prune_sample_for_training(
         "position_normalization_scale",
         "oracle_high_signal_mask",
         "hard_anchor_indices",
+        "cotangent_edge_index",
+        "cotangent_edge_weight",
+        "cotangent_diagonal",
     }
     if keep_projection:
         fields.update({"intrinsics", "extrinsics", "visibility"})
@@ -3381,6 +3405,10 @@ def _hybrid_single_geometry_settings(
         runtime_diagnostics=bool(raw.get("runtime_diagnostics", False)),
         compute_dtype=str(raw.get("compute_dtype", "float64")),
         validation_surface_samples=int(raw.get("validation_surface_samples", 3000)),
+        operator=str(raw.get("operator", "uniform_random_walk")),
+        cotangent_relative_area_epsilon=float(
+            raw.get("cotangent_relative_area_epsilon", 1e-12)
+        ),
     )
     if settings.regularization <= 0:
         raise ValueError("hybrid single-geometry lambda must be positive.")
@@ -3390,6 +3418,16 @@ def _hybrid_single_geometry_settings(
         raise ValueError("hybrid compute_dtype must be float32 or float64.")
     if settings.validation_surface_samples < 1:
         raise ValueError("hybrid validation_surface_samples must be positive.")
+    if settings.operator not in {
+        "uniform_random_walk",
+        "symmetric_cotangent_stiffness",
+    }:
+        raise ValueError(
+            "hybrid operator must be uniform_random_walk or "
+            "symmetric_cotangent_stiffness."
+        )
+    if settings.cotangent_relative_area_epsilon <= 0:
+        raise ValueError("cotangent_relative_area_epsilon must be positive.")
     return settings
 
 
@@ -3416,23 +3454,45 @@ def _hybrid_single_geometry_loss(
         maximum_iterations=settings.maximum_iterations,
         tolerance=settings.tolerance,
     )
-    if with_audit:
-        recovered, audit = differentiable_regularized_sparse_recovery_with_audit(
-            laplacian_prediction.to(dtype=solve_dtype),
-            v_direct,
-            sample["edge_index"],
-            sample["vertex_degree"].to(dtype=solve_dtype),
-            **arguments,
-        )
+    if settings.operator == "uniform_random_walk":
+        if with_audit:
+            recovered, audit = differentiable_regularized_sparse_recovery_with_audit(
+                laplacian_prediction.to(dtype=solve_dtype),
+                v_direct,
+                sample["edge_index"],
+                sample["vertex_degree"].to(dtype=solve_dtype),
+                **arguments,
+            )
+        else:
+            recovered = differentiable_regularized_sparse_recovery(
+                laplacian_prediction.to(dtype=solve_dtype),
+                v_direct,
+                sample["edge_index"],
+                sample["vertex_degree"].to(dtype=solve_dtype),
+                **arguments,
+            )
+            audit = None
     else:
-        recovered = differentiable_regularized_sparse_recovery(
-            laplacian_prediction.to(dtype=solve_dtype),
-            v_direct,
-            sample["edge_index"],
-            sample["vertex_degree"].to(dtype=solve_dtype),
-            **arguments,
+        cotangent_arguments = (
+            sample["cotangent_edge_index"],
+            sample["cotangent_edge_weight"].to(dtype=solve_dtype),
+            sample["cotangent_diagonal"].to(dtype=solve_dtype),
         )
-        audit = None
+        if with_audit:
+            recovered, audit = differentiable_cotangent_sparse_recovery_with_audit(
+                laplacian_prediction.to(dtype=solve_dtype),
+                v_direct,
+                *cotangent_arguments,
+                **arguments,
+            )
+        else:
+            recovered = differentiable_cotangent_sparse_recovery(
+                laplacian_prediction.to(dtype=solve_dtype),
+                v_direct,
+                *cotangent_arguments,
+                **arguments,
+            )
+            audit = None
     loss = (
         (recovered - clean_vertices.to(dtype=solve_dtype))
         .square()

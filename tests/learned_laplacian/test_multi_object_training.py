@@ -292,6 +292,60 @@ def test_hybrid_single_loss_trains_both_heads_and_selects_validation_chamfer(
     assert int(step["nan_inf_count"]) == 0
 
 
+def test_cotangent_hybrid_single_loss_preserves_dual_gradient_contract(
+    tmp_path,
+) -> None:
+    config = _multi_config()
+    config["target_mode"] = "raw_laplacian"
+    config["confidence"] = {"enabled": False}
+    config["model"]["hybrid_direct_head"] = {"enabled": True}
+    config["model"]["recovery_lambda_head"] = {"enabled": False}
+    config["training"]["vertex_sampling"] = {"mode": "full"}
+    config["training"]["recovery_aware_geometry_loss"] = {"enabled": False}
+    config["training"]["hybrid_single_geometry_loss"] = {
+        "enabled": True,
+        "operator": "symmetric_cotangent_stiffness",
+        "cotangent_relative_area_epsilon": 1e-12,
+        "lambda": 3e-2,
+        "maximum_iterations": 256,
+        "tolerance": 1e-8,
+        "compute_dtype": "float64",
+        "runtime_diagnostics": True,
+        "validation_surface_samples": 50,
+    }
+    config["multi_object_training"].update(
+        {
+            "epochs": 1,
+            "gradient_accumulation_meshes": 1,
+            "validation_every_epochs": 1,
+            "report_every_optimizer_steps": 1,
+        }
+    )
+    static = _prepare_object_static(
+        _recovery_aware_sample("cotangent_static"), config
+    )
+    assert "cotangent_edge_index" in static.sample
+    assert "cotangent_edge_weight" in static.sample
+    assert "cotangent_diagonal" in static.sample
+    result = train_multi_object(
+        [_recovery_aware_sample("cotangent_train")],
+        [_recovery_aware_sample("cotangent_validation")],
+        config,
+        output_dir=tmp_path,
+        progress=False,
+    )
+    assert math.isfinite(result.final_train_loss)
+    step = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert float(step["delta_pred_gradient_norm"]) > 0
+    assert float(step["v_direct_gradient_norm"]) > 0
+    assert float(step["prediction_head_gradient_norm"]) > 0
+    assert float(step["direct_head_gradient_norm"]) > 0
+    assert int(step["pcg_failed_solves"]) == 0
+    assert int(step["nan_inf_count"]) == 0
+
+
 def test_hard_anchor_lambda0_training_uses_graph_only_anchors(tmp_path) -> None:
     config = _recovery_aware_config()
     config["training"]["recovery_aware_geometry_loss"].update(
