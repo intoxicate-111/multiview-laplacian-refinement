@@ -1,0 +1,77 @@
+{
+  "experiment": "sofa50_external_56v_vs_ours_28v_stress",
+  "test_samples": 25,
+  "input_contract": "exact common prepared mesh; external methods receive the exact original 28 native-1920 RGB/cameras plus the next 28 cameras from the same nested 56-view master; Ours remains the archived native-1920 28-view result; GT is evaluation-only",
+  "no_test_tuning": true,
+  "methods": {
+    "nds": {
+      "repository": "https://github.com/fraunhoferhhi/neural-deferred-shading",
+      "commit": "760e4549f59adaed9adf1bd705599786a00ba6b8",
+      "group": "external_56v_stress",
+      "arguments": {
+        "iterations": 2000,
+        "image_scale": 1,
+        "lr_vertices": 0.001,
+        "lr_shader": 0.001,
+        "upsample_iterations": [2001],
+        "weight_mask": 2.0,
+        "weight_normal": 0.1,
+        "weight_laplacian": 40.0,
+        "weight_shading": 1.0
+      },
+      "initial_mesh_argument": "--initial_mesh initial_current.obj",
+      "default_visual_hull_bypassed": true,
+      "topology_compatibility": "fixed_topology_nonmanifold_input"
+    },
+    "exmesh": {
+      "repository": "https://github.com/Fan-Treasure/ExMesh",
+      "commit": "09950d283fc5372a09079e30c88d998f1c40b2d0",
+      "group": "external_56v_stress",
+      "arguments": {
+        "iterations": 10000,
+        "resolution": 1,
+        "position_lr_max_steps": 10000,
+        "feature_lr": 0.0025,
+        "lambda_dssim": 0.2,
+        "split_from_iter": 1000,
+        "split_until_iter": 7000,
+        "lambda_dist": 0.01,
+        "lambda_smooth": 3000,
+        "lambda_deviation": 10000,
+        "lambda_silhouette": 0.005,
+        "lambda_depth": 0.003
+      },
+      "initial_mesh_path": "<scene>/mesh.ply",
+      "default_pgsr_bypassed": true,
+      "depth_prior": {
+        "repository": "https://github.com/ByteDance-Seed/depth-anything-3",
+        "commit": "3d835ec1a5802d64a8b8b15f817a1ab54809bfe4",
+        "model": "depth-anything/DA3NESTED-GIANT-LARGE",
+        "input_contract": "same 56 RGB images and cameras only; no GT"
+      }
+    },
+    "nvdiffrec": {
+      "repository": "https://github.com/NVlabs/nvdiffrec",
+      "commit": "abf3a34b1eb6e782abffefc2462c7e9bcd89f9bb",
+      "group": "external_56v_stress",
+      "seed": 7,
+      "arguments": {
+        "iterations": 5000,
+        "save_interval": 100,
+        "texture_res": [2048, 2048],
+        "train_res": [1920, 1920],
+        "batch": 1,
+        "spp": 1,
+        "learning_rate": [0.03, 0.01],
+        "laplace_scale": 3000
+      },
+      "initial_mesh_argument": "base_mesh -> official DLMesh fixed-topology path"
+    }
+  },
+  "evaluation": {
+    "surface_samples": 3000,
+    "surface_sampling_seed": 7,
+    "fscore_threshold": 0.01,
+    "alignment": "shared_prepared_coordinate_frame_no_ICP"
+  }
+}

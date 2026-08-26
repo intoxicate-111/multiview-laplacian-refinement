@@ -146,7 +146,8 @@ def _pcg_solve(
     # zero RHS (common for nearly planar meshes and adjoint gradients).
     residual_preconditioned = (residual * preconditioned).sum()
     rhs_norm = torch.linalg.vector_norm(rhs).clamp_min(torch.finfo(rhs.dtype).eps)
-    active = torch.linalg.vector_norm(residual) > tolerance * rhs_norm
+    convergence_target = tolerance * rhs_norm
+    active = torch.linalg.vector_norm(residual) > convergence_target
     iterations = 0
     # Dot products naturally become far smaller than machine epsilon near
     # convergence. Clamping them to eps stalls CG; only protect true underflow.
@@ -162,9 +163,24 @@ def _pcg_solve(
         solution = solution + direction * alpha
         residual = residual - matrix_direction * alpha
         iterations = iteration + 1
-        active = torch.linalg.vector_norm(residual) > tolerance * rhs_norm
+        active = torch.linalg.vector_norm(residual) > convergence_target
         if not bool(active):
-            break
+            # In float32, the recursively updated CG residual can drift below
+            # the requested tolerance while the true residual of the current
+            # solution is still above it. Recompute the residual from the
+            # original system before accepting convergence. If it has drifted,
+            # restart the Krylov recurrence from the true residual and use the
+            # remaining iteration budget instead of returning a false failure.
+            residual = rhs - _normal_matrix_apply(
+                solution, edge_index, vertex_degree, regularization_tensor
+            )
+            active = torch.linalg.vector_norm(residual) > convergence_target
+            if not bool(active):
+                break
+            preconditioned = residual / diagonal
+            direction = preconditioned.clone()
+            residual_preconditioned = (residual * preconditioned).sum()
+            continue
         next_preconditioned = residual / diagonal
         next_residual_preconditioned = (residual * next_preconditioned).sum()
         beta = next_residual_preconditioned / residual_preconditioned.clamp_min(epsilon)

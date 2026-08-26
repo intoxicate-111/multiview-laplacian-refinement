@@ -15,7 +15,7 @@
 set -euo pipefail
 REPO="/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement-cotangent"
 MAIN_REPO="/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement"
-PYTHON="/networkhome/WMGDS/zhou_c/miniconda3/envs/mlr_blackwell/bin/python"
+PYTHON="/networkhome/WMGDS/zhou_c/miniconda3/envs/test/bin/python"
 U_RUN="${MAIN_REPO}/runs/learned_laplacian/sofa50_v2_end_to_end_hybrid_single_loss_lambda3e-2_20k_seed7"
 C_RUN="${REPO}/runs/learned_laplacian/sofa50_v2_cotangent_hybrid_selected_20k_seed7"
 OUTPUT="${REPO}/reports/sofa50_multitopology_rawlap500_v2/uniform_vs_cotangent_single_loss/evaluation"
@@ -37,9 +37,12 @@ fi
 mkdir -p "${OUTPUT}" "${REPO}/slurm_logs"
 cd "${REPO}"
 export PYTHONPATH="${REPO}/src:${REPO}/scripts" OMP_NUM_THREADS=8 PYTHONHASHSEED=7
+unset PYTHONHOME
+export PYTHONNOUSERSITE=1
+export PATH="$(dirname "${PYTHON}"):${PATH}"
 nvidia-smi
+"${PYTHON}" -c 'from pathlib import Path; import torch; expected=Path("/networkhome/WMGDS/zhou_c/miniconda3/envs/test"); actual=Path(torch.__file__).resolve(); assert str(actual).startswith(str(expected)), (actual, expected); assert torch.cuda.is_available(); assert "L40" in torch.cuda.get_device_name(0); print(torch.__version__, torch.version.cuda, actual, flush=True)'
 "${PYTHON}" scripts/evaluate_sofa50_uniform_vs_cotangent_hybrid.py \
     --arm "${ARM}" --domain "${DOMAIN}" --run "${RUN}" \
     --manifest "${MANIFEST}" --output-dir "${OUTPUT}" --splits "${SPLITS[@]}" \
     --device cuda
-

@@ -76,10 +76,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         image_paths = _resolve_images(sample)
         intrinsics = _numpy(sample["intrinsics"])
         extrinsics = _numpy(sample["extrinsics"])
-        if len(image_paths) != 28 or intrinsics.shape != (28, 3, 3) or extrinsics.shape != (28, 4, 4):
-            raise ValueError(f"{object_id} does not contain exactly 28 RGB/camera inputs.")
+        views = int(args.expected_view_count)
+        if (
+            len(image_paths) != views
+            or intrinsics.shape != (views, 3, 3)
+            or extrinsics.shape != (views, 4, 4)
+        ):
+            raise ValueError(
+                f"{object_id} does not contain exactly {views} RGB/camera inputs."
+            )
         object_dir = args.output_dir / object_id
-        if _is_complete(object_dir, 28):
+        if _is_complete(object_dir, views):
             skipped += 1
             continue
         object_dir.mkdir(parents=True, exist_ok=True)
@@ -88,9 +95,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             extrinsics=extrinsics,
             intrinsics=intrinsics,
         )
-        if tuple(prediction.depth.shape[:1]) != (28,):
+        if tuple(prediction.depth.shape[:1]) != (views,):
             raise ValueError(f"DA3 returned {prediction.depth.shape[0]} views for {object_id}.")
-        for view in range(28):
+        for view in range(views):
             stem = f"{view + 1:08d}"
             payload = {"depth": np.round(prediction.depth[view], 6)}
             if prediction.conf is not None:
@@ -100,7 +107,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "status": "completed",
             "object_id": object_id,
             "representative_sample_id": str(sample["sample_id"]),
-            "view_count": 28,
+            "view_count": views,
             "input_contract": "same RGB images and cameras only; no GT",
             "consumed_sample_fields": [
                 "sample_id",
@@ -225,6 +232,7 @@ def main() -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--expected-test-samples", type=int, default=1000)
     parser.add_argument("--expected-test-objects", type=int, default=200)
+    parser.add_argument("--expected-view-count", type=int, default=28)
     parser.add_argument("--object-id")
     args = parser.parse_args()
     print(json.dumps(run(args), indent=2))

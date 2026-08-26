@@ -40,6 +40,7 @@ OBJECT_SPLITS = {"train": 1600, "validation": 200, "test": 200}
 SAMPLE_SPLITS = {key: value * VARIANT_COUNT for key, value in OBJECT_SPLITS.items()}
 FORMAT_VERSION = "Future2000MultiTopologyRawLap20000_v1"
 SEED_NAMESPACE = FORMAT_VERSION
+SOURCE_DEGENERATE_DOUBLE_AREA_EPSILON = 1e-14
 
 
 def _records(path: Path, *, expected: int) -> list[dict[str, Any]]:
@@ -81,6 +82,78 @@ def observation_index(path: Path) -> dict[str, dict[str, Any]]:
     return selected
 
 
+def clean_source_geometry(
+    vertices_tensor: torch.Tensor,
+    faces_tensor: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """Remove geometric zero-area faces and newly unreferenced vertices deterministically."""
+
+    vertices = vertices_tensor.detach().cpu().double().numpy()
+    faces = faces_tensor.detach().cpu().numpy().astype(np.int64, copy=False)
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError("Source GT vertices must have shape [N, 3]")
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("Source GT faces must have shape [F, 3]")
+    if not np.isfinite(vertices).all():
+        raise ValueError("Source GT vertices contain NaN or Inf")
+    if faces.size and (int(faces.min()) < 0 or int(faces.max()) >= len(vertices)):
+        raise ValueError("Source GT faces contain an out-of-range vertex index")
+
+    triangles = vertices[faces]
+    doubled_area = np.linalg.norm(
+        np.cross(
+            triangles[:, 1] - triangles[:, 0],
+            triangles[:, 2] - triangles[:, 0],
+        ),
+        axis=1,
+    )
+    retained_mask = doubled_area > SOURCE_DEGENERATE_DOUBLE_AREA_EPSILON
+    removed_faces = np.flatnonzero(~retained_mask).astype(np.int64)
+    retained_faces = faces[retained_mask]
+    if len(retained_faces) == 0:
+        raise RuntimeError("Source GT cleaning removed every face")
+
+    referenced = np.zeros(len(vertices), dtype=bool)
+    referenced[np.unique(retained_faces)] = True
+    new_to_old = np.flatnonzero(referenced).astype(np.int64)
+    removed_vertices = np.flatnonzero(~referenced).astype(np.int64)
+    old_to_new = np.full(len(vertices), -1, dtype=np.int64)
+    old_to_new[new_to_old] = np.arange(len(new_to_old), dtype=np.int64)
+    cleaned_faces = old_to_new[retained_faces]
+    cleaned_vertices = vertices[new_to_old]
+
+    cleaned_triangles = cleaned_vertices[cleaned_faces]
+    cleaned_doubled_area = np.linalg.norm(
+        np.cross(
+            cleaned_triangles[:, 1] - cleaned_triangles[:, 0],
+            cleaned_triangles[:, 2] - cleaned_triangles[:, 0],
+        ),
+        axis=1,
+    )
+    if np.any(cleaned_doubled_area <= SOURCE_DEGENERATE_DOUBLE_AREA_EPSILON):
+        raise RuntimeError("Source GT cleaning retained a geometric degenerate face")
+
+    audit = {
+        "policy": "remove_faces_with_double_area_le_1e-14_then_remove_unreferenced_vertices",
+        "double_area_epsilon": SOURCE_DEGENERATE_DOUBLE_AREA_EPSILON,
+        "applied": bool(len(removed_faces) or len(removed_vertices)),
+        "original_vertices": int(len(vertices)),
+        "original_faces": int(len(faces)),
+        "cleaned_vertices": int(len(cleaned_vertices)),
+        "cleaned_faces": int(len(cleaned_faces)),
+        "removed_degenerate_faces": int(len(removed_faces)),
+        "removed_unreferenced_vertices": int(len(removed_vertices)),
+        "removed_face_indices": removed_faces.tolist(),
+        "removed_vertex_indices": removed_vertices.tolist(),
+        "minimum_retained_double_area": float(cleaned_doubled_area.min()),
+    }
+    return (
+        torch.as_tensor(cleaned_vertices, dtype=vertices_tensor.dtype),
+        torch.as_tensor(cleaned_faces, dtype=torch.long),
+        audit,
+    )
+
+
 def combined_source(
     source_manifest: Path,
     source_record: Mapping[str, Any],
@@ -109,15 +182,19 @@ def combined_source(
         raise RuntimeError(f"{object_id}: invalid archived intrinsics")
     if tuple(observation["extrinsics"].shape) != (28, 4, 4):
         raise RuntimeError(f"{object_id}: invalid archived extrinsics")
+    cleaned_vertices, cleaned_faces, source_cleaning = clean_source_geometry(
+        original["gt_vertices"], original["gt_faces"]
+    )
     return {
         "sample_id": object_id,
-        "gt_vertices": original["gt_vertices"],
-        "gt_faces": original["gt_faces"],
+        "gt_vertices": cleaned_vertices,
+        "gt_faces": cleaned_faces,
         "image_paths": list(observation["image_paths"]),
         "intrinsics": observation["intrinsics"],
         "extrinsics": observation["extrinsics"],
         "prepared_image_size": int(observation.get("prepared_image_size", 960)),
         "source_image_size": list(observation.get("source_image_size", [960, 960])),
+        "source_cleaning": source_cleaning,
     }
 
 
@@ -213,6 +290,16 @@ def generate(args: argparse.Namespace) -> None:
                     seed_namespace=SEED_NAMESPACE,
                     source_dataset_label="3D-FUTURE",
                 )
+                source_cleaning = dict(source["source_cleaning"])
+                audit["source_cleaning"] = source_cleaning
+                audit["source_cleaning_applied"] = bool(source_cleaning["applied"])
+                audit["source_degenerate_faces_removed"] = int(
+                    source_cleaning["removed_degenerate_faces"]
+                )
+                audit["source_unreferenced_vertices_removed"] = int(
+                    source_cleaning["removed_unreferenced_vertices"]
+                )
+                sample["metadata"]["source_cleaning"] = source_cleaning
                 sample["metadata"]["observation_source_dataset"] = str(
                     observation_manifest.parent
                 )
@@ -336,6 +423,9 @@ def merge(args: argparse.Namespace) -> None:
         "target_definition": "L(clean_reference_faces)@clean_reference_vertices",
         "smoothing_profile": STRONG_SMOOTHING_PROFILE,
         "perturbation_seed_namespace": SEED_NAMESPACE,
+        "source_cleaning_policy": (
+            "remove_faces_with_double_area_le_1e-14_then_remove_unreferenced_vertices"
+        ),
         "samples": records,
     }
     full_audit = {
@@ -357,6 +447,18 @@ def merge(args: argparse.Namespace) -> None:
         ),
         "smoothing_profile": STRONG_SMOOTHING_PROFILE,
         "perturbation_seed_namespace": SEED_NAMESPACE,
+        "source_cleaning_policy": (
+            "remove_faces_with_double_area_le_1e-14_then_remove_unreferenced_vertices"
+        ),
+        "source_samples_with_cleaning": sum(
+            bool(row.get("source_cleaning_applied", False)) for row in audits
+        ),
+        "source_degenerate_faces_removed": sum(
+            int(row.get("source_degenerate_faces_removed", 0)) for row in audits
+        ),
+        "source_unreferenced_vertices_removed": sum(
+            int(row.get("source_unreferenced_vertices_removed", 0)) for row in audits
+        ),
         "c_density_monotonic": c_density_monotonic,
         "c_density_meaningfully_distinct": c_density_distinct,
         "topology_statistics": stats,

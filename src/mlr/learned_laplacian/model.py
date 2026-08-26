@@ -107,6 +107,7 @@ class LearnedLaplacianModel(nn.Module):
         recovery_lambda_maximum: float = 1e-1,
         recovery_lambda_initial: float = 1e-2,
         hybrid_direct_head_enabled: bool = False,
+        split_geometry_towers_enabled: bool = False,
     ) -> None:
         super().__init__()
         if input_mode not in INPUT_MODES:
@@ -151,6 +152,11 @@ class LearnedLaplacianModel(nn.Module):
         self.recovery_lambda_maximum = float(recovery_lambda_maximum)
         self.recovery_lambda_initial = float(recovery_lambda_initial)
         self.hybrid_direct_head_enabled = bool(hybrid_direct_head_enabled)
+        self.split_geometry_towers_enabled = bool(split_geometry_towers_enabled)
+        if self.split_geometry_towers_enabled and not self.hybrid_direct_head_enabled:
+            raise ValueError(
+                "Split geometry towers require hybrid_direct_head_enabled=true."
+            )
         if self.dynamic_residual_expert_hidden_dim < 1:
             raise ValueError("dynamic_residual_expert_hidden_dim must be positive.")
         if self.dynamic_gate_hidden_dim < 1:
@@ -278,6 +284,22 @@ class LearnedLaplacianModel(nn.Module):
                 nn.Linear(hidden_dim, 3),
             )
             if self.hybrid_direct_head_enabled
+            and not self.split_geometry_towers_enabled
+            else None
+        )
+        # S1 forks the exact shared per-vertex input tensor before graph
+        # processing.  The canonical predictor is the Lap tower and this
+        # complete, independently stored predictor is the Direct tower.
+        # Constructing it last preserves the seeded S0 initialization of every
+        # shared/frontend and Lap-tower parameter.
+        self.direct_predictor = (
+            LaplacianPredictor(
+                input_dim=geometry_dim + 1 + self.projected_image_feature_dim,
+                hidden_dim=hidden_dim,
+                num_graph_layers=num_graph_layers,
+                dropout=dropout,
+            )
+            if self.split_geometry_towers_enabled
             else None
         )
 
@@ -378,11 +400,18 @@ class LearnedLaplacianModel(nn.Module):
         shared_features, predicted = self.predictor.forward_with_shared_features(
             vertex_features, edge_index
         )
-        direct_vertex_displacement_prediction = (
-            None
-            if self.hybrid_direct_head is None
-            else self.hybrid_direct_head(shared_features)
-        )
+        if self.direct_predictor is not None:
+            _, direct_vertex_displacement_prediction = (
+                self.direct_predictor.forward_with_shared_features(
+                    vertex_features, edge_index
+                )
+            )
+        else:
+            direct_vertex_displacement_prediction = (
+                None
+                if self.hybrid_direct_head is None
+                else self.hybrid_direct_head(shared_features)
+            )
         base_laplacian_prediction = predicted
         oracle_residual_prediction = None
         if self.oracle_residual_expert is not None:
@@ -480,6 +509,34 @@ class LearnedLaplacianModel(nn.Module):
             "recovery_lambda_maximum": self.recovery_lambda_maximum,
             "recovery_lambda_initial": self.recovery_lambda_initial,
             "hybrid_direct_head_enabled": self.hybrid_direct_head_enabled,
+            "split_geometry_towers_enabled": self.split_geometry_towers_enabled,
+        }
+
+    def split_geometry_parameter_groups(
+        self,
+    ) -> dict[str, tuple[nn.Parameter, ...]]:
+        """Return disjoint S1 parameter groups for fail-closed audits."""
+
+        if self.direct_predictor is None:
+            raise RuntimeError("The model does not have split geometry towers.")
+        lap_parameters = tuple(self.predictor.parameters())
+        direct_parameters = tuple(self.direct_predictor.parameters())
+        lap_ids = {id(parameter) for parameter in lap_parameters}
+        direct_ids = {id(parameter) for parameter in direct_parameters}
+        if lap_ids.intersection(direct_ids):
+            raise RuntimeError("Lap and Direct towers share parameter storage.")
+        tower_ids = lap_ids.union(direct_ids)
+        shared_parameters = tuple(
+            parameter
+            for parameter in self.parameters()
+            if id(parameter) not in tower_ids
+        )
+        return {
+            "shared_frontend": shared_parameters,
+            "lap_tower": lap_parameters,
+            "lap_head": tuple(self.predictor.output_mlp.parameters()),
+            "direct_tower": direct_parameters,
+            "direct_head": tuple(self.direct_predictor.output_mlp.parameters()),
         }
 
     def _sample_image_features(

@@ -76,6 +76,10 @@ from .target_scaling import (
     denormalize_laplacian_by_edge_scale,
     normalize_laplacian_by_edge_scale,
 )
+from .two_branch_hybrid import (
+    TwoBranchPretrainedHybridModel,
+    load_specialist_checkpoint,
+)
 from .trainer import _resolve_device, _seed_everything
 from .vertex_sampling import sample_training_vertices, vertex_sampling_settings
 
@@ -755,6 +759,8 @@ def train_multi_object(
     report_direct_gradient_norms: list[float] = []
     report_prediction_head_gradient_norms: list[float] = []
     report_direct_head_gradient_norms: list[float] = []
+    report_b_backbone_gradient_norms: list[float] = []
+    report_e_backbone_gradient_norms: list[float] = []
     report_image_encoder_gradient_norms: list[float] = []
     report_graph_block_gradient_norms: list[float] = []
     report_prediction_displacement_rms: list[float] = []
@@ -1230,7 +1236,15 @@ def train_multi_object(
                     raise FloatingPointError(
                         f"Training produced a non-finite loss for {sample_id!r} at epoch {epoch}."
                     )
-                scaler.scale(objective / len(group)).backward()
+                try:
+                    scaler.scale(objective / len(group)).backward()
+                except RuntimeError as error:
+                    raise RuntimeError(
+                        "Training backward failed for "
+                        f"sample_id={prepared.sample['sample_id']!r}, "
+                        f"epoch={epoch}, optimizer_steps={optimizer_steps}, "
+                        f"rank={distributed.rank}, group_index={group_index}."
+                    ) from error
                 forward_events.append(_finish_cuda_timing(device, forward_event))
                 if device.type != "cuda":
                     forward_backward_seconds += time.perf_counter() - forward_start
@@ -1303,13 +1317,61 @@ def train_multi_object(
                 report_prediction_head_gradient_norms.append(
                     float(torch.sqrt(finite_head_squares).item())
                 )
-                direct_head = _unwrap_model(model).hybrid_direct_head
+                unwrapped_model = _unwrap_model(model)
+                direct_head = unwrapped_model.hybrid_direct_head
+                if (
+                    direct_head is None
+                    and getattr(unwrapped_model, "direct_predictor", None) is not None
+                ):
+                    direct_head = unwrapped_model.direct_predictor.output_mlp
                 if direct_head is not None:
                     direct_head_norm, direct_head_nonfinite = _parameter_gradient_diagnostics(
                         direct_head.parameters(), device
                     )
                     report_direct_head_gradient_norms.append(direct_head_norm)
                     report_nonfinite_counts += direct_head_nonfinite
+                if isinstance(unwrapped_model, TwoBranchPretrainedHybridModel):
+                    branch_groups = unwrapped_model.branch_parameter_groups()
+                    b_backbone_norm, b_backbone_nonfinite = (
+                        _parameter_gradient_diagnostics(
+                            branch_groups["b_backbone"], device
+                        )
+                    )
+                    e_backbone_norm, e_backbone_nonfinite = (
+                        _parameter_gradient_diagnostics(
+                            branch_groups["e_backbone"], device
+                        )
+                    )
+                    report_b_backbone_gradient_norms.append(b_backbone_norm)
+                    report_e_backbone_gradient_norms.append(e_backbone_norm)
+                    report_nonfinite_counts += (
+                        b_backbone_nonfinite + e_backbone_nonfinite
+                    )
+                elif getattr(
+                    unwrapped_model, "split_geometry_towers_enabled", False
+                ):
+                    direct_predictor = unwrapped_model.direct_predictor
+                    if direct_predictor is None:
+                        raise RuntimeError("Split geometry Direct tower is missing.")
+                    lap_backbone = tuple(
+                        unwrapped_model.predictor.input_mlp.parameters()
+                    ) + tuple(unwrapped_model.predictor.blocks.parameters())
+                    direct_backbone = tuple(
+                        direct_predictor.input_mlp.parameters()
+                    ) + tuple(direct_predictor.blocks.parameters())
+                    lap_backbone_norm, lap_backbone_nonfinite = (
+                        _parameter_gradient_diagnostics(lap_backbone, device)
+                    )
+                    direct_backbone_norm, direct_backbone_nonfinite = (
+                        _parameter_gradient_diagnostics(direct_backbone, device)
+                    )
+                    report_b_backbone_gradient_norms.append(lap_backbone_norm)
+                    report_e_backbone_gradient_norms.append(
+                        direct_backbone_norm
+                    )
+                    report_nonfinite_counts += (
+                        lap_backbone_nonfinite + direct_backbone_nonfinite
+                    )
                 for recovery_lambda in diagnostic_recovery_lambdas:
                     if recovery_lambda.grad is None:
                         raise RuntimeError(
@@ -1446,6 +1508,18 @@ def train_multi_object(
                     else None,
                     distributed,
                 )
+                b_backbone_gradient_norm = _distributed_optional_mean(
+                    float(np.mean(report_b_backbone_gradient_norms))
+                    if report_b_backbone_gradient_norms
+                    else None,
+                    distributed,
+                )
+                e_backbone_gradient_norm = _distributed_optional_mean(
+                    float(np.mean(report_e_backbone_gradient_norms))
+                    if report_e_backbone_gradient_norms
+                    else None,
+                    distributed,
+                )
                 image_encoder_gradient_norm = _distributed_optional_mean(
                     float(np.mean(report_image_encoder_gradient_norms))
                     if report_image_encoder_gradient_norms
@@ -1566,6 +1640,10 @@ def train_multi_object(
                     "graph_block_gradient_norm": graph_block_gradient_norm,
                     "prediction_head_gradient_norm": prediction_head_gradient_norm,
                     "direct_head_gradient_norm": direct_head_gradient_norm,
+                    "b_laplacian_head_gradient_norm": prediction_head_gradient_norm,
+                    "b_backbone_gradient_norm": b_backbone_gradient_norm,
+                    "e_direct_head_gradient_norm": direct_head_gradient_norm,
+                    "e_backbone_gradient_norm": e_backbone_gradient_norm,
                     "laplacian_output_rms": laplacian_output_rms,
                     "prediction_displacement_rms": prediction_displacement_rms,
                     "prediction_displacement_mean": prediction_displacement_mean,
@@ -1577,6 +1655,7 @@ def train_multi_object(
                     "nan_inf_count": nonfinite_count,
                     "peak_gpu_memory_mb": peak_gpu_memory_mb,
                     "validation_loss": None,
+                    "validation_hybrid_chamfer": None,
                     "validation_seconds": None,
                     "learning_rate": float(optimizer.param_groups[0]["lr"]),
                     "interval_seconds": report_seconds,
@@ -1635,6 +1714,8 @@ def train_multi_object(
                         f"graph_grad={graph_block_gradient_norm} "
                         f"head_grad={prediction_head_gradient_norm} "
                         f"direct_head_grad={direct_head_gradient_norm} "
+                        f"b_backbone_grad={b_backbone_gradient_norm} "
+                        f"e_backbone_grad={e_backbone_gradient_norm} "
                         f"laplacian_rms={laplacian_output_rms} "
                         f"recovery_lambda={recovery_lambda_mean} "
                         f"lambda_grad={recovery_lambda_gradient_norm} "
@@ -1657,6 +1738,8 @@ def train_multi_object(
                 report_direct_gradient_norms.clear()
                 report_prediction_head_gradient_norms.clear()
                 report_direct_head_gradient_norms.clear()
+                report_b_backbone_gradient_norms.clear()
+                report_e_backbone_gradient_norms.clear()
                 report_image_encoder_gradient_norms.clear()
                 report_graph_block_gradient_norms.clear()
                 report_prediction_displacement_rms.clear()
@@ -1889,6 +1972,9 @@ def train_multi_object(
                 and step_history[-1]["optimizer_steps"] == optimizer_steps
             ):
                 step_history[-1]["validation_loss"] = validation_loss
+                step_history[-1]["validation_hybrid_chamfer"] = (
+                    validation_hybrid_chamfer
+                )
                 step_history[-1]["validation_seconds"] = validation_seconds
                 _write_step_history(output_path, step_history)
                 if progress:
@@ -1903,6 +1989,7 @@ def train_multi_object(
                         f"progress={progress_text} "
                         f"step={optimizer_steps} "
                         f"validation={validation_loss:.8f} "
+                        f"hybrid_chamfer={validation_hybrid_chamfer} "
                         f"seconds={validation_seconds:.2f}",
                         flush=True,
                     )
@@ -2332,6 +2419,34 @@ def _write_step_history(
 def _build_model(
     config: Mapping[str, Any], input_mode_override: str | None, zero_images: bool
 ) -> LearnedLaplacianModel:
+    model_config = config.get("model", {})
+    two_branch = model_config.get("two_branch_pretrained_hybrid", {})
+    if not isinstance(two_branch, Mapping):
+        raise ValueError("model.two_branch_pretrained_hybrid must be an object.")
+    if bool(two_branch.get("enabled", False)):
+        b_checkpoint = two_branch.get("arm_b_checkpoint")
+        e_checkpoint = two_branch.get("arm_e_checkpoint")
+        if not b_checkpoint or not e_checkpoint:
+            raise ValueError(
+                "Two-branch continuous hybrid requires arm_b_checkpoint and "
+                "arm_e_checkpoint."
+            )
+        arm_b = _build_single_model(config, input_mode_override, zero_images)
+        arm_e = _build_single_model(config, input_mode_override, zero_images)
+        load_specialist_checkpoint(arm_b, b_checkpoint)
+        load_specialist_checkpoint(arm_e, e_checkpoint)
+        return TwoBranchPretrainedHybridModel(
+            arm_b,
+            arm_e,
+            arm_b_checkpoint=b_checkpoint,
+            arm_e_checkpoint=e_checkpoint,
+        )
+    return _build_single_model(config, input_mode_override, zero_images)
+
+
+def _build_single_model(
+    config: Mapping[str, Any], input_mode_override: str | None, zero_images: bool
+) -> LearnedLaplacianModel:
     image_config = config.get("image_encoder", {})
     feature_construction = image_config.get("feature_construction", {})
     if not isinstance(feature_construction, Mapping):
@@ -2352,6 +2467,9 @@ def _build_model(
     hybrid_direct_config = model_config.get("hybrid_direct_head", {})
     if not isinstance(hybrid_direct_config, Mapping):
         raise ValueError("model.hybrid_direct_head must be an object.")
+    split_geometry_config = model_config.get("split_geometry_towers", {})
+    if not isinstance(split_geometry_config, Mapping):
+        raise ValueError("model.split_geometry_towers must be an object.")
     return LearnedLaplacianModel(
         image_feature_dim=int(image_config.get("feature_dim", 32)),
         image_first_stride=int(image_config.get("first_stride", 2)),
@@ -2410,6 +2528,9 @@ def _build_model(
             recovery_lambda_config.get("lambda_initial", 1e-2)
         ),
         hybrid_direct_head_enabled=bool(hybrid_direct_config.get("enabled", False)),
+        split_geometry_towers_enabled=bool(
+            split_geometry_config.get("enabled", False)
+        ),
     )
 
 
@@ -2678,6 +2799,30 @@ def _prepare_object_static(
     if recovery_aware.enabled or hybrid_single.enabled:
         clean_vertices = static_sample.get("clean_reference_vertices")
         clean_faces = static_sample.get("clean_reference_faces")
+        compatibility = config.get("dataset", {}).get(
+            "clean_reference_compatibility"
+        )
+        if (
+            compatibility == "gt_vertices_same_topology"
+            and clean_vertices is None
+            and clean_faces is None
+        ):
+            legacy_vertices = static_sample.get("gt_vertices")
+            legacy_faces = static_sample.get("gt_faces")
+            target_positions = static_sample.get("target_positions")
+            if (
+                not isinstance(legacy_vertices, torch.Tensor)
+                or not isinstance(legacy_faces, torch.Tensor)
+                or not isinstance(target_positions, torch.Tensor)
+                or not torch.equal(legacy_faces, static_sample["faces"])
+                or not torch.equal(target_positions, legacy_vertices)
+            ):
+                raise ValueError(
+                    "gt_vertices_same_topology compatibility requires exact "
+                    "gt/input connectivity and target_positions == gt_vertices."
+                )
+            clean_vertices = legacy_vertices
+            clean_faces = legacy_faces
         if not isinstance(clean_vertices, torch.Tensor) or tuple(
             clean_vertices.shape
         ) != tuple(static_sample["vertices"].shape):

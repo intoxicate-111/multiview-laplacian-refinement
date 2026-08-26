@@ -14,7 +14,7 @@
 
 set -euo pipefail
 REPO="/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement-cotangent"
-PYTHON="/networkhome/WMGDS/zhou_c/miniconda3/envs/mlr_blackwell/bin/python"
+PYTHON="/networkhome/WMGDS/zhou_c/miniconda3/envs/test/bin/python"
 MANIFEST="/networkhome/WMGDS/zhou_c/Sofa50MultiTopologyRawLap500_v2/manifest.json"
 VALUES=("1e-3" "3e-3" "1e-2" "3e-2" "1e-1" "3e-1" "1")
 VALUE="${VALUES[${SLURM_ARRAY_TASK_ID}]}"
@@ -28,6 +28,9 @@ done
 mkdir -p "${OUTPUT}" "${REPO}/slurm_logs"
 cd "${REPO}"
 export PYTHONPATH="${REPO}/src:${REPO}/scripts"
+unset PYTHONHOME
+export PYTHONNOUSERSITE=1
+export PATH="$(dirname "${PYTHON}"):${PATH}"
 export NCCL_SOCKET_IFNAME=lo GLOO_SOCKET_IFNAME=lo TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True PYTHONHASHSEED=7 OMP_NUM_THREADS=8
 
@@ -35,6 +38,7 @@ nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
     --format=csv,noheader > "${OUTPUT}/gpu_inventory_${SLURM_JOB_ID}.csv"
 test "$(wc -l < "${OUTPUT}/gpu_inventory_${SLURM_JOB_ID}.csv")" -eq 2
 test "$(grep -c 'L40' "${OUTPUT}/gpu_inventory_${SLURM_JOB_ID}.csv")" -eq 2
+"${PYTHON}" -c 'from pathlib import Path; import torch; expected=Path("/networkhome/WMGDS/zhou_c/miniconda3/envs/test"); actual=Path(torch.__file__).resolve(); assert str(actual).startswith(str(expected)), (actual, expected); assert torch.cuda.is_available(); assert torch.cuda.device_count()==2; assert all("L40" in torch.cuda.get_device_name(i) for i in range(2)); print(torch.__version__, torch.version.cuda, actual, flush=True)'
 
 {
     echo "pilot=true operator=symmetric_cotangent_stiffness mass_normalization=false"

@@ -145,7 +145,8 @@ def export_nerf_scene(
     if method == "exmesh":
         # The official ExMesh loader selects COLMAP whenever ``sparse`` is
         # present.  This avoids its Blender loader concatenating duplicated
-        # train/test transform files and keeps the input at exactly 28 views.
+        # train/test transform files and keeps the input at exactly the
+        # supplied observation count.
         write_colmap_text_model(output, images, cameras, copy_images=True)
         sparse = output / "sparse"
         sparse_zero = sparse / "0"
@@ -187,7 +188,7 @@ def export_nerf_scene(
             "cy": float(first.intrinsics[1, 2]),
             "frames": frames,
         }
-        # The same 28 observations are inputs, not a tuning/evaluation split.
+        # The same observations are inputs, not a tuning/evaluation split.
         for split in ("train", "val", "test"):
             (output / f"transforms_{split}.json").write_text(
                 json.dumps(transforms, indent=2) + "\n", encoding="utf-8"
@@ -424,7 +425,9 @@ def _write_metadata(
     payload = {
         "sample_id": str(core["sample_id"]),
         "method": method,
-        "input_contract": "current mesh + same 28 RGB images + same cameras; no GT",
+        "input_contract": (
+            f"current mesh + same {len(images)} RGB images + same cameras; no GT"
+        ),
         "consumed_sample_fields": sorted(core.keys()),
         "forbidden_fields_consumed": [],
         "initial_obj": str(initial_obj),

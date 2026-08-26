@@ -1,0 +1,199 @@
+{
+  "confidence": {
+    "enabled": false,
+    "quantile_bins": 5,
+    "recovery_weight": "none"
+  },
+  "data_loading": {
+    "cuda_prefetch": true,
+    "multiprocessing_sharing_strategy": "file_system",
+    "num_workers": 0,
+    "persistent_workers": false,
+    "pin_memory": true,
+    "prefetch_factor": 2,
+    "train_views_per_sample": null,
+    "validation_views_per_sample": null
+  },
+  "dataset": {
+    "clean_reference_compatibility": "gt_vertices_same_topology",
+    "degradation_profile": "historical_synthetic_current_v1",
+    "expected_split_counts": {
+      "test": 25,
+      "train": 200,
+      "validation": 25
+    },
+    "name": "Sofa50SyntheticCurrent28ViewNative1920",
+    "object_level_split": true,
+    "objects": 50,
+    "variants_per_object": 5
+  },
+  "device": "cuda",
+  "experiment_metadata": {
+    "arm": "E_direct_vertex_residual",
+    "capacity": "C2",
+    "checkpoint_selection": "established_arm_e_validation_vertex_mse",
+    "distributed_world_size": 4,
+    "effective_global_batch_meshes": 8,
+    "execution_only_native1920_memory_controls": "view_chunk_size=4;gradient_checkpointing=true",
+    "experiment": "Sofa50_old_domain_native1920_independent_specialists",
+    "feature_resolution": "F2",
+    "forward_equation": "delta_v_pred=f_theta(images,cameras,V_input,mesh_features);V_refined=V_input+delta_v_pred",
+    "gradient_accumulation_meshes_per_rank": 2,
+    "initialization": "from_scratch",
+    "input_resolution": 1920,
+    "loss": "mean_vertex_squared_l2",
+    "native_input_contract": "decode_exact_native_1920_png_no_resize_or_downsample",
+    "no_laplacian_target_loss_or_recovery": true,
+    "render_resolution": 1920,
+    "sealed_test_policy": "test unavailable to training_validation_checkpoint_selection_and_lambda_selection",
+    "training_gpu_model": "NVIDIA L40",
+    "views": 28
+  },
+  "image_encoder": {
+    "feature_construction": {
+      "kernel_size": 5,
+      "mode": "original_plus_high_frequency",
+      "padding": "reflect",
+      "sigma": 1.0
+    },
+    "feature_dim": 64,
+    "first_stride": 1,
+    "gradient_checkpointing": true,
+    "normalization": {
+      "mean": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "std": [
+        1.0,
+        1.0,
+        1.0
+      ]
+    },
+    "second_stride": 1,
+    "view_chunk_size": 4
+  },
+  "input_mode": "coarse_plus_multiview",
+  "local_query_jitter": {
+    "distribution": "isotropic_gaussian_xyz_clipped_at_3sigma",
+    "enabled": false,
+    "frozen": [
+      "clean_reference",
+      "target",
+      "graph",
+      "connectivity",
+      "operator"
+    ],
+    "maximum_offset_h": 0.009,
+    "scope": "training_only",
+    "std_h": 0.003
+  },
+  "method": "sofa50_old_domain_native1920_direct_vertex_arm_e",
+  "model": {
+    "dropout": 0.0,
+    "geometry_mode": "query_fourier",
+    "hidden_dim": 256,
+    "num_graph_layers": 3,
+    "position_encoding": {
+      "include_input": true,
+      "num_frequencies": 6
+    }
+  },
+  "multi_object_training": {
+    "cache_prepared_samples_on_device": false,
+    "checkpoint_epochs": [],
+    "checkpoint_every_epochs": 0,
+    "checkpoint_optimizer_steps": [
+      5000,
+      10000,
+      15000,
+      20000
+    ],
+    "early_stopping": {
+      "enabled": false,
+      "min_delta": 0.0001,
+      "patience_validations": 15
+    },
+    "epochs": 1000,
+    "gradient_accumulation_meshes": 2,
+    "max_optimizer_steps": 20000,
+    "profile_training": true,
+    "report_every_optimizer_steps": 200,
+    "shuffle": true,
+    "validation_every_epochs": 8
+  },
+  "prediction_semantics": "direct_vertex_displacement",
+  "query_training": {
+    "apply_to_validation": false,
+    "enabled": false,
+    "exact_fraction": 0.2,
+    "max_offset_h": 0.001,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "zero_initial_laplacian": false
+  },
+  "recovery": {
+    "confidence_weighting": false,
+    "equation": "V_refined=V_input+delta_v_pred",
+    "lambda": null,
+    "laplacian_operator_used": false,
+    "mode": "direct_vertex_addition",
+    "optimizer": null,
+    "pcg_or_lsmr": false,
+    "postprocessing": null,
+    "robust_loss": null,
+    "sparse_integration": false,
+    "visibility_gate": false
+  },
+  "renderer_visibility": {
+    "condition": "backface_and_occlusion",
+    "depth_image_used": false,
+    "front_face_winding": "ccw",
+    "neighborhood_radius": 1,
+    "source": "precomputed_current_graph_depth_tested_face_id_buffer"
+  },
+  "seed": 7,
+  "target_definition": "delta_v_gt=V_clean-V_input",
+  "target_mode": "raw_laplacian",
+  "target_scaling": {
+    "applied_to_training_target": false,
+    "clip_max_norm": null,
+    "epsilon": 1e-12,
+    "method": "square_of_mean_incident_edge_length",
+    "source": "input_prediction_mesh_auxiliary_compatibility_fields_only"
+  },
+  "target_semantics": "same_index_clean_minus_input_vertex_residual",
+  "training": {
+    "amp": {
+      "dtype": "float16",
+      "enabled": true
+    },
+    "direct_vertex_runtime_diagnostics": true,
+    "gradient_clip_norm": 1.0,
+    "huber_delta": 0.01,
+    "learning_rate": 0.001,
+    "loss": "mse",
+    "lr_scheduler": {
+      "cooldown_validations": 1,
+      "factor": 0.5,
+      "min_lr": 1e-06,
+      "patience_validations": 10,
+      "threshold": 0.0001,
+      "threshold_mode": "abs",
+      "type": "reduce_on_plateau"
+    },
+    "prediction_loss_space": "output_representation",
+    "recovery_aware_geometry_loss": {
+      "beta": 0.0,
+      "enabled": false,
+      "lambda": 0.01,
+      "runtime_diagnostics": false
+    },
+    "target_magnitude_weight_lambda": 0.0,
+    "vertex_sampling": {
+      "mode": "full"
+    },
+    "weight_decay": 0.0
+  }
+}

@@ -12,7 +12,7 @@
 
 set -euo pipefail
 REPO="/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement-cotangent"
-PYTHON="/networkhome/WMGDS/zhou_c/miniconda3/envs/mlr_blackwell/bin/python"
+PYTHON="/networkhome/WMGDS/zhou_c/miniconda3/envs/test/bin/python"
 PILOT_ROOT="${REPO}/runs/learned_laplacian/sofa50_v2_cotangent_lambda_pilot"
 OUTPUT="${REPO}/reports/sofa50_multitopology_rawlap500_v2/uniform_vs_cotangent_single_loss/lambda_pilot"
 SELECTED="${REPO}/configs/learned_laplacian/train_sofa50_v2_cotangent_hybrid_selected_8blackwell.json"
@@ -20,6 +20,9 @@ SELECTED="${REPO}/configs/learned_laplacian/train_sofa50_v2_cotangent_hybrid_sel
 mkdir -p "${OUTPUT}" "${REPO}/slurm_logs"
 cd "${REPO}"
 export PYTHONPATH="${REPO}/src:${REPO}/scripts"
+unset PYTHONHOME
+export PYTHONNOUSERSITE=1
+export PATH="$(dirname "${PYTHON}"):${PATH}"
 "${PYTHON}" scripts/select_sofa50_cotangent_lambda_pilot.py \
     --pilot-root "${PILOT_ROOT}" \
     --uniform-config configs/learned_laplacian/train_sofa50_v2_end_to_end_hybrid_single_loss_8blackwell.json \

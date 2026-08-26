@@ -292,6 +292,86 @@ def test_hybrid_single_loss_trains_both_heads_and_selects_validation_chamfer(
     assert int(step["nan_inf_count"]) == 0
 
 
+def test_two_complete_pretrained_branches_remain_separate_and_receive_gradients(
+    tmp_path,
+) -> None:
+    config = _multi_config()
+    config["target_mode"] = "raw_laplacian"
+    config["confidence"] = {"enabled": False}
+    config["model"]["hybrid_direct_head"] = {"enabled": False}
+    config["model"]["recovery_lambda_head"] = {"enabled": False}
+    base = multi_trainer._build_single_model(config, None, False)
+    single_parameters = sum(parameter.numel() for parameter in base.parameters())
+    b_checkpoint = tmp_path / "arm_b.pt"
+    e_checkpoint = tmp_path / "arm_e.pt"
+    torch.save({"model_state_dict": base.state_dict()}, b_checkpoint)
+    e_state = {
+        name: value.clone() for name, value in base.state_dict().items()
+    }
+    e_state["predictor.output_mlp.2.bias"] += 0.01
+    torch.save({"model_state_dict": e_state}, e_checkpoint)
+
+    config["model"]["two_branch_pretrained_hybrid"] = {
+        "enabled": True,
+        "arm_b_checkpoint": str(b_checkpoint),
+        "arm_e_checkpoint": str(e_checkpoint),
+    }
+    config["training"]["vertex_sampling"] = {"mode": "full"}
+    config["training"]["recovery_aware_geometry_loss"] = {"enabled": False}
+    config["training"]["hybrid_single_geometry_loss"] = {
+        "enabled": True,
+        "lambda": 3e-2,
+        "maximum_iterations": 256,
+        "tolerance": 1e-8,
+        "compute_dtype": "float64",
+        "runtime_diagnostics": True,
+        "validation_surface_samples": 50,
+    }
+    config["multi_object_training"].update(
+        {
+            "epochs": 1,
+            "gradient_accumulation_meshes": 1,
+            "validation_every_epochs": 1,
+            "report_every_optimizer_steps": 1,
+        }
+    )
+    model = multi_trainer._build_model(config, None, False)
+    assert model.arm_b is not model.arm_e
+    assert sum(parameter.numel() for parameter in model.parameters()) == 2 * single_parameters
+    assert torch.equal(
+        model.arm_b.predictor.output_mlp[2].bias,
+        base.predictor.output_mlp[2].bias,
+    )
+    assert torch.equal(
+        model.arm_e.predictor.output_mlp[2].bias,
+        base.predictor.output_mlp[2].bias + 0.01,
+    )
+
+    result = train_multi_object(
+        [_recovery_aware_sample("two_branch_train")],
+        [_recovery_aware_sample("two_branch_validation")],
+        config,
+        output_dir=tmp_path / "run",
+        progress=False,
+    )
+    assert sum(parameter.numel() for parameter in result.model.parameters()) == 2 * single_parameters
+    step = json.loads(
+        (tmp_path / "run" / "training_step_history.json").read_text(
+            encoding="utf-8"
+        )
+    )[-1]
+    for key in (
+        "delta_pred_gradient_norm",
+        "v_direct_gradient_norm",
+        "b_laplacian_head_gradient_norm",
+        "b_backbone_gradient_norm",
+        "e_direct_head_gradient_norm",
+        "e_backbone_gradient_norm",
+    ):
+        assert float(step[key]) > 0
+    assert int(step["nan_inf_count"]) == 0
+
+
 def test_cotangent_hybrid_single_loss_preserves_dual_gradient_contract(
     tmp_path,
 ) -> None:

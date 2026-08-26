@@ -6,6 +6,7 @@ from scipy.sparse import csr_matrix, eye, vstack
 from scipy.sparse.linalg import lsmr
 
 from mlr.learned_laplacian.differentiable_sparse_recovery import (
+    _pcg_solve,
     differentiable_regularized_sparse_recovery,
     differentiable_regularized_sparse_recovery_with_audit,
     recovery_forward_audit,
@@ -18,6 +19,35 @@ def _cycle_graph() -> tuple[torch.Tensor, torch.Tensor]:
     source = torch.tensor([1, 3, 0, 2, 1, 3, 2, 0], dtype=torch.long)
     destination = torch.tensor([0, 0, 1, 1, 2, 2, 3, 3], dtype=torch.long)
     return torch.stack((source, destination)), torch.full((4, 1), 2.0)
+
+
+def test_float32_pcg_rechecks_true_residual_before_stopping() -> None:
+    vertices = 1_000
+    source = torch.arange(vertices - 1, dtype=torch.long)
+    destination = source + 1
+    edge_index = torch.stack(
+        (
+            torch.cat((source, destination)),
+            torch.cat((destination, source)),
+        )
+    )
+    degree = torch.bincount(edge_index[1], minlength=vertices).float().unsqueeze(1)
+    generator = torch.Generator().manual_seed(4)
+    right_hand_side = torch.randn((vertices, 3), generator=generator)
+    right_hand_side[:, 1] *= 1e-3
+    right_hand_side[:, 2] *= 1e-6
+
+    _, audit = _pcg_solve(
+        right_hand_side,
+        edge_index,
+        degree,
+        1e-2,
+        maximum_iterations=256,
+        tolerance=1e-4,
+    )
+
+    assert audit.converged
+    assert audit.relative_residual <= 1e-4
 
 
 def test_uniform_laplacian_and_transpose_are_adjoint() -> None:
