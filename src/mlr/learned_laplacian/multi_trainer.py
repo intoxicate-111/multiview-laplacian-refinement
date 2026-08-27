@@ -171,6 +171,7 @@ class _RecoveryAwareGeometrySettings:
     enabled: bool
     regularization: float
     beta: float
+    prediction_loss_weight: float
     maximum_iterations: int
     tolerance: float
     runtime_diagnostics: bool
@@ -1205,7 +1206,10 @@ def train_multi_object(
                             recovery_aware,
                             regularization=recovery_regularization,
                         )
-                    objective = objective + recovery_aware.beta * refine_loss
+                    objective = (
+                        recovery_aware.prediction_loss_weight * prediction_loss
+                        + recovery_aware.beta * refine_loss
+                    )
                     refine_loss_tensors.append(refine_loss.detach())
                 if hybrid_single.enabled:
                     assert direct_prediction_fp32 is not None
@@ -3502,6 +3506,7 @@ def _recovery_aware_geometry_settings(
         enabled=bool(raw.get("enabled", False)),
         regularization=float(raw.get("lambda", 1e-2)),
         beta=float(raw.get("beta", 0.0)),
+        prediction_loss_weight=float(raw.get("prediction_loss_weight", 1.0)),
         maximum_iterations=int(raw.get("maximum_iterations", 128)),
         tolerance=float(raw.get("tolerance", 1e-5)),
         runtime_diagnostics=bool(raw.get("runtime_diagnostics", False)),
@@ -3522,6 +3527,10 @@ def _recovery_aware_geometry_settings(
         raise ValueError("hard_anchor_lambda0 cannot use adaptive lambda.")
     if settings.beta < 0:
         raise ValueError("recovery-aware geometry beta must be non-negative.")
+    if settings.prediction_loss_weight < 0:
+        raise ValueError(
+            "recovery-aware prediction_loss_weight must be non-negative."
+        )
     if settings.enabled and settings.beta <= 0:
         raise ValueError("enabled recovery-aware geometry loss requires beta > 0.")
     if settings.maximum_iterations < 1:
@@ -3984,7 +3993,10 @@ def _evaluate_dataset(
                 prediction, prepared, recovery_aware
             )
             recovered_vertex_rms = torch.sqrt(refine_loss)
-            objective = objective + recovery_aware.beta * refine_loss
+            objective = (
+                recovery_aware.prediction_loss_weight * loss
+                + recovery_aware.beta * refine_loss
+            )
         if hybrid_single.enabled:
             assert direct_prediction is not None
             refine_loss, recovered_vertices, _, v_direct = _hybrid_single_geometry_loss(

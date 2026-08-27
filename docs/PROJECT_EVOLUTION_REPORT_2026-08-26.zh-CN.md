@@ -1,6 +1,6 @@
 # Multiview Laplacian Refinement 项目转向与演化报告
 
-状态日期：**2026-08-26（Europe/London）**
+状态日期：**2026-08-27（Europe/London）**
 
 观察区间：**2026-08-04 至今**
 
@@ -34,6 +34,19 @@
 - 当前仍没有证据支持把 matched-v2 的优势直接推广到旧 native-1920 域、任意
   topology 或 Cotangent operator。
 
+### Novelty 定义
+
+> A frequency-aware, operator-guided mesh refinement framework that converts
+> multiview high-frequency visual evidence into complementary differential and
+> positional geometric constraints, and reconciles them through an explicit
+> differentiable linear geometric operator.
+
+这里的 frequency-aware 同时指输入侧的 `F-G(F)` 高频视觉残差与输出侧经过统一
+graph-frequency protocol 验证的 B/E 互补行为；operator-guided 指差分约束和位置先验
+不是由隐式 blending 合并，而是通过显式可微线性系统
+`(L_U^T L_U+lambda I)V_H=L_U^T delta_B+lambda V_E` 协调。该定义不声称网络或恢复
+显式执行 mesh eigendecomposition。
+
 ## 证据等级与仓库状态
 
 本报告按以下优先级使用证据：
@@ -43,10 +56,10 @@
 3. 当前工作树中的配置、代码和 HPC 日志；
 4. 运行中的 loss 只用于健康检查，不作为科学结论。
 
-当前 Git HEAD 的最新提交为 `9d8ffae`（2026-08-25，Cotangent pilot L40 resource
-修复）。工作树在此基础上还有大量未提交的 S1、continuous B+E、old-domain
-native-1920、机制分析和 PCG 稳定性修改。因此，“仓库已提交主线”与“当前实验
-工作树”必须区分；本报告不会把运行中或未封板结果写成最终结论。
+本次项目更新建立在 `e8b2d32`（Sofa50 hybrid training and evaluation workflows）
+之上，并补充真实 recovery-operator 频谱分析、curvature/resolution 负结果、old-domain
+Arm-B 外部对比以及显式 recovery-only loss contract。运行产物、checkpoint 和导出的
+refined meshes 仍不纳入 Git。本报告不会把运行中或未封板结果写成最终结论。
 
 ## 演化时间线
 
@@ -150,6 +163,19 @@ Arm A 的 raw EPE 更低（`0.00252641` 对 `0.00263986`），但 Arm B 的 test
 （`0.00358497` 对 `0.00395529`）。这成为项目最关键的方法学证据之一：**训练应优化
 field 的几何效用，而不是只优化 field 的逐点均值误差。**
 
+这里必须区分两个不同的 Arm-B loss contract。上述已完成的历史 Sofa50 Arm B 使用
+`L_lap + 1e-2 L_vertex`；2026-08-27 启动的 Future2000 recovery-only Arm B 则保留
+相同 predictor、raw representation、Uniform operator 与 `lambda=1e-2`，但唯一优化
+目标为
+
+```text
+L_recovery_only = mean_i ||V_recovered_i - V_clean_i||_2^2.
+```
+
+其 raw-Laplacian Huber 只作为零权重诊断量，梯度只通过 implicit sparse solve 回到
+`delta_hat`。因此，新 Future2000 objective 不能被写成历史 Sofa50 Arm-B checkpoint
+的原始 loss，也不能与 Arm-E direct-displacement MSE 混为一谈。
+
 详见 [recovery-aware 研究记录](SOFA50_RECOVERY_AWARE_STUDY.zh-CN.md) 与
 [A–E 最终对照](../reports/sofa50_multitopology_rawlap500_v2/direct_vertex_arm_e_extension/final/FINAL_REPORT.md)。
 
@@ -188,6 +214,18 @@ normal consistency 也更好。这说明 direct positional representation 是一
 它同时优于两个 standalone branch，但不是所有指标都优于 E：例如 Hybrid 的 VRMS
 和 normal consistency 仍可能介于 B/E 之间。频谱诊断表明，它主要继承 E 的 component
 translation modes，同时把 mid/high-frequency error 略降到两个分支以下。
+
+进一步直接对真实 recovery operator `A_R=L_U^T L_U` 的 100-mesh 审计给出严格刻画：
+若 `A_R V_B_dagger=L_U^T delta_B`，则
+`v_H,k=Lambda_k/(Lambda_k+lambda)v_B_dagger,k + lambda/(Lambda_k+lambda)v_E,k`
+逐 mode 精确成立。最大 normal-equation residual 为 `2.839e-12`，独立 B/E transfer
+重建 Hybrid 的最大 VRMS 为 `1.005e-11`。test 上 `Hybrid-V_B_dagger` 变化能量的
+`99.862%` 位于 `Lambda<lambda/2`；即便比较包含 `1e-2 V_input` anchor 的 archived
+Arm-B，也有 `80.932%` 位于该 E-dominant 区间，只有 `5.896%` 位于
+`Lambda>=2lambda`；反向看 `Hybrid-E`，则有 `73.240%` 位于 B-dominant 区间。
+这把原先基于 `Lsym` 的低频互补观察提升为对实际恢复算子的直接证据：E 主要修正 B
+的低响应模式，B 主要向 E 补充高响应 differential modes；但无 anchor、低模不稳定的
+`V_B_dagger` 不被当作实际模型输出。
 
 详见 [Frozen B+E 最终报告](../reports/sofa50_multitopology_rawlap500_v2/frozen_hybrid_recovery_v1/FINAL_REPORT.md)。
 
@@ -391,11 +429,30 @@ nvdiffrec、ExMesh 下结论。
 
 ### 正在进行
 
-- old-domain native-1920 Arm-B replacement：使用 current-query raw Laplacian、
-  `lambda=1e-2`、recovery-aware geometry loss 与修复后的 float32 PCG；
 - old-domain native-1920 Arm-E replacement：直接 displacement MSE，不使用 sparse
-  recovery；
-- 后续 frozen fusion、lambda selection 和 sealed test 必须等待两个 specialist 完成。
+  recovery；截至 2026-08-27 11:40 BST 为 13,200/20,000 steps，数值健康但 validation
+  MSE 已在约 `3.56e-5` 附近平台；
+- Future2000 recovery-only Arm B：4×RTX Pro 6000 Blackwell，从零训练，28×960 inputs，
+  唯一 objective 为 recovered-vertex MSE；HPC 5-step 真数据 gate 已验证
+  `objective == refine_loss`、两个 gradient diagnostics 非零、PCG failure 与 NaN 均为零；
+- old-domain continuous B+E 尚未提交。其配置生成器声明两个完整 independent
+  specialists、validation-selected lambda、float64 differentiable solve 和
+  final-Hybrid-vertex-MSE-only objective；必须等待 Arm E、specialist validation、
+  frozen-lambda selection 与 step-0 gradient preflight 全部完成。
+
+### 2026-08-27 已完成的新证据
+
+- old-domain native-1920 Arm B 已完成 validation-only selection，选中 step 18,600；
+  在获授权的 Arm-B-only 25-sample test opening 中，统一 Chamfer 为 `0.00853433`、
+  25/25 改善，优于 NDS `0.01120499`、nvdiffrec `0.01365466` 与 ExMesh
+  `0.02017062`。由于 Arm E/fusion 尚未锁定，这不是 sealed full-model final test；
+- 同 surface、四档 subdivision 的受控 resolution 实验没有发现 finer discretization
+  稳定提高 Hybrid gain：五个 shape 均不单调，slope、endpoint change 与 rank
+  association 的 bootstrap interval 均跨零；
+- recovery spectrum 与 cotangent Laplace--Beltrami frequency 只有 coarse partial
+  correspondence，不能把 `L_rw^T L_rw` eigenvalues 直接称为 intrinsic frequencies；
+- cotangent-curvature 条件分析得到反向结果：最高曲率 10% 中 Hybrid 相对 E 的局部
+  surface error 更高，因此论文不应宣称 differential branch 专门改善高曲率区域。
 
 运行中的 loss 下降只能说明训练数值健康，不能说明最终 Chamfer、curvature 或外部
 方法排名。按照当前运行纪律，除非明确要求，不应在 HPC 上并行挂大量评估任务。
@@ -414,15 +471,19 @@ tower 容量、初始化/优化路径、domain mismatch。它们不应混成一�
 
 下一阶段最有信息量的封板顺序应为：
 
-1. 完成 old-domain B/E 的 validation-only selection，冻结 checkpoint 与 SHA；
-2. 在 validation 上选择 frozen-fusion lambda，随后只运行一次 sealed 25-sample test；
-3. 用统一 evaluator 与 exact common input 对照 NDS、nvdiffrec、ExMesh 和 Previous
+1. 完成 old-domain Arm-E 训练与 validation-only selection，冻结 checkpoint 与 SHA；
+2. 在 validation 上完成 B/E specialist audit 与 frozen-fusion lambda selection，再运行
+   continuous B+E step-0 gradient preflight；
+3. 按预声明 final-Hybrid-only objective 运行 continuous B+E，并只用 validation unified
+   surface Chamfer 选择 checkpoint；
+4. 锁定所有选择后，只运行一次 sealed 25-sample final test；
+5. 用统一 evaluator 与 exact common input 对照 NDS、nvdiffrec、ExMesh 和 Previous
    Ours，同时报告 curvature/normal/topology；
-4. 完成 S1 selected checkpoint 的 matched test，再与 frozen、shared S0 做相同 paired
+6. 完成 S1 selected checkpoint 的 matched test，再与 frozen、shared S0 做相同 paired
    comparison；
-5. 只有在上述结果表明 geometry tower 或 domain matching 是稳定增益来源后，才决定
+7. 只有在上述结果表明 geometry tower 或 domain matching 是稳定增益来源后，才决定
    是否继续 continuous joint 或更大规模训练；
-6. Cotangent 若重启，应作为独立数值线性代数研究，而不是普通 operator ablation。
+8. Cotangent 若重启，应作为独立数值线性代数研究，而不是普通 operator ablation。
 
 ## 结论
 

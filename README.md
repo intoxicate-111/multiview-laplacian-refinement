@@ -26,9 +26,112 @@ View-count and query-resolution results: [Ablation report](runs/learned_laplacia
 
 28-view current-graph target/loss-space results: [H2 ablation report](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25-case visual overview](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
 
+## Method novelty
+
+> **Novelty.** A frequency-aware, operator-guided mesh refinement framework
+> that converts multiview high-frequency visual evidence into complementary
+> differential and positional geometric constraints, and reconciles them
+> through an explicit differentiable linear geometric operator.
+
+Concretely, the high-frequency visual branch exposes both encoder features
+`F` and their residual `F-G(F)` to two geometric representations. Arm B turns
+that evidence into raw differential constraints, while Arm E turns it into a
+direct positional prior. Their frozen hybrid, and the corresponding trainable
+extensions, reconcile the two through
+
+```text
+(L_U^T L_U + lambda I) V_H = L_U^T delta_B + lambda V_E.
+```
+
+Here `L_U=I-D^-1 A` is an explicit geometry operator and the solve is
+differentiable. “Frequency-aware” describes the high-frequency visual evidence
+and the measured graph-frequency behavior; it does not claim that the network
+or recovery explicitly eigendecomposes the mesh.
+
+## Frozen B/E graph-frequency analysis
+
+The selected frozen Arm B, Arm E and B+E models were evaluated on identical
+matched-v2 meshes. Errors were projected diagnostically with the symmetric
+normalised graph Laplacian
+`Lsym=I-D^-1/2 A D^-1/2` using Chebyshev--Jackson bands
+`low=[0,2/3)`, `mid=[2/3,4/3)` and `high=[4/3,2]`. The table reports absolute
+XYZ error energy; absolute energy, rather than normalised fractions alone, is
+the primary evidence.
+
+| Split | Method | Total | Low | Mid | High |
+|---|---|---:|---:|---:|---:|
+| validation | Arm B | 59.81110 | 47.81169 | 9.05632 | 2.94309 |
+| validation | Arm E | 22.56830 | 8.53185 | 9.99271 | 4.04375 |
+| validation | Frozen B+E | 30.17443 | 18.60651 | 8.72829 | 2.83963 |
+| test | Arm B | 102.25649 | 74.69651 | 22.59283 | 4.96715 |
+| test | Arm E | 55.86585 | 24.49914 | 24.49353 | 6.87319 |
+| test | Frozen B+E | 67.31840 | 40.48458 | 21.97737 | 4.85644 |
+
+The result is a qualified spectral complementarity, not a claim that every
+frequency band is independently specialised. Arm B is strongly low-frequency
+error dominated. Arm E has the lowest total and low-frequency error, but its
+absolute mid/high errors exceed both B and Hybrid. B+E places low-frequency
+error between B and E while reducing mid/high error slightly below both. On
+test, 99.11% of the absolute `Hybrid-B` change energy lies in the low band;
+the hybrid component-translation RMS (`0.0071013`) also nearly reproduces E
+(`0.0070970`) rather than B (`0.0118360`). Thus E supplies the positional and
+Laplacian-nullspace anchor, while B preserves differential structure and
+slightly improves the mid/high-frequency residual.
+
+The recovery itself also has an exact operator-spectrum characterization. Let
+`A_R=L_U^T L_U=Q Lambda Q^T`, and define `V_B_dagger` by
+`A_R V_B_dagger=L_U^T delta_B`; its per-component constant gauge is copied from
+`V_E` only to make vertex-space comparisons unambiguous. Then every recovery
+mode satisfies exactly
+
+```text
+v_H,k = Lambda_k/(Lambda_k+lambda) v_B_dagger,k
+      + lambda/(Lambda_k+lambda) v_E,k.
+```
+
+This identity is exact; only the Chebyshev--Jackson projectors used to aggregate
+its energies into bands are approximate. The archived Arm-B mesh is not
+`V_B_dagger`: it was recovered with a separate `1e-2 V_input` anchor and is
+therefore retained as a distinct empirical comparator. The actual recovery
+still evaluates the sparse matrix equation and performs no explicit
+eigendecomposition.
+
+The direct `A_R` audit passed on all 100 validation/test meshes. The maximum
+normal-equation residual was `2.839e-12`, and independently summing the B and E
+transfer contributions reproduced Hybrid with maximum vertex RMS `1.005e-11`.
+Using per-mesh `Lambda/Lambda_max` bands, the tight float64 reference energies
+are:
+
+| Split | Signal | Total | Low | Mid | High |
+|---|---|---:|---:|---:|---:|
+| validation | Archived B | 59.81110 | 51.23842 | 4.75454 | 3.81814 |
+| validation | E | 22.56830 | 11.41362 | 5.74857 | 5.40611 |
+| validation | Hybrid | 30.18638 | 21.73557 | 4.67255 | 3.77826 |
+| test | Archived B | 102.25649 | 84.72261 | 11.48790 | 6.04598 |
+| test | E | 55.86585 | 33.71023 | 13.76141 | 8.39422 |
+| test | Hybrid | 67.33614 | 49.97247 | 11.36961 | 5.99406 |
+
+Most importantly, on test `99.862%` of `Hybrid-V_B_dagger` change energy lies
+in the exact E-dominant regime `Lambda<lambda/2`. The same conclusion remains
+strong against the practical archived B: `80.932%` lies in the E-dominant
+regime, `13.173%` in transition and only `5.896%` in the B-dominant regime
+`Lambda>=2lambda`; `99.930%` is in the lowest mesh-relative third. Thus the
+real recovery operator directly confirms that E changes B primarily through
+low-`Lambda` positional/nullspace modes. Conversely, `73.240%` of
+`Hybrid-E` change energy is B-dominant and only `9.577%` is E-dominant, directly
+showing that B supplies the higher-response differential correction to E. The
+unanchored `V_B_dagger` has very large low-mode error energy and is a theoretical
+endpoint, not a competing model output.
+
+Full protocol, per-sample energies, exactness audits and plots are in the
+[exact recovery-operator report](reports/sofa50_multitopology_rawlap500_v2/recovery_operator_spectrum_v1/REPORT.md), the
+[frozen B+E report](reports/sofa50_multitopology_rawlap500_v2/frozen_hybrid_recovery_v1/FINAL_REPORT.md)
+and the
+[frozen-versus-joint mechanism report](reports/sofa50_multitopology_rawlap500_v2/frozen_vs_joint_mechanism_analysis_v1/FINAL_REPORT.md).
+
 ## Project status
 
-Status date: 2026-08-25 BST.
+Status date: 2026-08-27 BST.
 
 OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
 reconstructions and are retained only as out-of-distribution stress tests.
@@ -64,7 +167,12 @@ desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLIC
 | Recovery-aware Arms C/D | Complete | Weakening positional regularisation does not improve recovered geometry. Test Chamfer is `0.00414926` for C (`lambda=10^-3`) and `0.00653139` for D (`10^-4`), versus `0.00358497` for B (`10^-2`). Both runs use documented float64 PCG without changing their objectives. |
 | Direct-vertex Arm E | Complete | The 826,115-parameter C2F2+HF model predicts `Delta V` using only same-index vertex MSE. Test Chamfer is `0.00334039`, vertex RMS is `0.00822130`, and 45/50 inputs improve; E contains no Laplacian target, sparse solver or recovery gate. |
 | Frozen B+E hybrid recovery | Complete; read-only | With frozen B Laplacians, frozen E positions as the sole anchor and validation-selected `lambda=3e-2`, test Chamfer is `0.00302983` and 49/50 inputs improve. This motivates joint hybrid training but does not itself retrain or authorise scaling. |
-| End-to-end direct–Laplacian hybrid | Preflight passed; training running | One 892,678-parameter shared model predicts latent raw-Laplacian and direct-displacement fields. Their only supervision is final hybrid geometry after a fixed-`lambda=3e-2` differentiable solve. The float64 PCG/LSMR and two-branch gradient audit passes; job `17363` runs from scratch on 8×Blackwell. |
+| End-to-end direct–Laplacian hybrid | Complete | One 892,678-parameter shared model predicts latent raw-Laplacian and direct-displacement fields with final-hybrid-only supervision. Its matched-v2 test Chamfer is `0.00341857`, behind frozen B+E at `0.00302983`; the mechanism audit is MECH5 and does not support a universal separate-training claim. |
+| Continuous pretrained B+E on matched v2 | Complete; validation selected | Two complete independent specialists are continued jointly with final-hybrid-only supervision. Validation selected step 9,400; matched-test Chamfer improves from the geometry-equivalent step-0 `0.00302691` to `0.00288357`, while legacy/unseen OOD remain unsuccessful. |
+| Old-domain native-1920 Arm B | Training and authorised Arm-B-only comparison complete | Validation selected step 18,600. On the exact common 25-sample input and unified evaluator, Arm B reaches Chamfer `0.00853433` and improves 25/25, versus NDS `0.01120499`, nvdiffrec `0.01365466` and ExMesh `0.02017062`. This test opening is not the sealed final B/E/fusion result. |
+| Old-domain native-1920 Arm E | Training running | The direct-displacement MSE run is numerically healthy at 13,200/20,000 steps as of this update; validation MSE is plateauing near `3.56e-5`. Geometry evaluation and B+E selection remain unopened. |
+| Old-domain native-1920 continuous B+E | Staged; not submitted | The generated configuration will initialise two complete validation-selected specialists and optimise only final Hybrid vertex MSE through a float64 differentiable solve. It cannot launch until Arm E, specialist validation selection, frozen-lambda selection and step-0 gradient preflight pass. |
+| Future2000 recovery-only Arm B | Running; corrected contract | The current 4-Blackwell run uses the latest Arm-B architecture and Future2000 28-view/960 inputs, but its only optimisation objective is recovered-vertex MSE through the differentiable Laplacian solve. Raw-Laplacian Huber is retained only as a zero-weight diagnostic. The superseded two-term job was cancelled and is excluded from results. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
 | Future2000 GT-adaptive scale-up | 200k training and learned-method test complete | The fixed 200,000-step checkpoint was evaluated on 200 held-out objects × 5 variants. Unified Chamfer changes from `0.00776417` to `0.00522955`, with 959/1000 improved samples; mean normal consistency decreases from `0.924252` to `0.895907`, so the distance/normal trade-off remains explicit. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
@@ -88,6 +196,56 @@ geometry, and it is no longer the mathematical mainline described below.
 OpenMVS is additionally excluded from the target definition and from future
 model-selection or scaling decisions because its initial mesh quality is too
 poor for that role.
+
+## Loss contracts: historical specialists and current operator-only training
+
+Several experiments use the same Arm-B predictor and sparse operator but do
+not use the same optimisation objective. They must not be grouped under one
+ambiguous “Arm-B loss” label.
+
+The completed recovery-aware Sofa50 Arm B used a two-term objective:
+
+$$
+\mathcal L_{B,\mathrm{historical}}
+=\mathcal L_{\mathrm{lap}}+10^{-2}\mathcal L_{\mathrm{vertex}}.
+$$
+
+The current Future2000 recovery-only Arm B instead predicts
+`delta_hat`, solves
+
+$$
+(L^\top L+\lambda I)V_B
+=L^\top\widehat\delta+\lambda V_{\mathrm{input}},
+\qquad \lambda=10^{-2},
+$$
+
+and optimises only
+
+$$
+\boxed{
+\mathcal L_{B,\mathrm{recovery\ only}}
+=\frac{1}{N}\sum_i\lVert V_{B,i}-V_{\mathrm{clean},i}\rVert_2^2
+}.
+$$
+
+Its raw-Laplacian Huber value is computed for diagnostics with exact training
+weight zero. Gradients reach `delta_hat` only through the implicit sparse
+solve. This recovery-only Future2000 run is a new loss contract; it must not be
+described as the objective of the completed historical Sofa50 Arm-B checkpoint.
+
+Arm E has no sparse solve and uses direct-displacement MSE. Continuous B+E
+uses both complete specialists, forms
+
+$$
+V_H=(L^\top L+\lambda I)^{-1}
+\left(L^\top\widehat\delta_B
++\lambda(V_{\mathrm{input}}+\Delta V_E)\right),
+$$
+
+and likewise optimises only final vertex MSE. It has no auxiliary
+raw-Laplacian or direct-displacement loss. For continuous B+E, training uses
+final-vertex MSE while checkpoint selection uses validation-only unified
+surface Chamfer; test remains sealed until selection is locked.
 
 ## Current training method
 

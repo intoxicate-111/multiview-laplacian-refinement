@@ -241,6 +241,50 @@ def test_recovery_aware_training_reports_geometry_loss(tmp_path) -> None:
     assert int(step_record["nan_inf_count"]) == 0
 
 
+def test_recovery_only_objective_backpropagates_through_sparse_solve(tmp_path) -> None:
+    config = _recovery_aware_config()
+    config["training"]["recovery_aware_geometry_loss"].update(
+        {
+            "prediction_loss_weight": 0.0,
+            "beta": 1.0,
+        }
+    )
+    config["multi_object_training"]["report_every_optimizer_steps"] = 1
+    result = train_multi_object(
+        [_recovery_aware_sample("recovery_only_train")],
+        [_recovery_aware_sample("recovery_only_validation")],
+        config,
+        output_dir=tmp_path,
+        progress=False,
+    )
+    record = result.history[-1]
+    assert math.isclose(
+        float(record["train_objective"]),
+        float(record["train_recovery_refine_loss"]),
+        rel_tol=1e-6,
+        abs_tol=1e-10,
+    )
+    assert math.isclose(
+        float(record["validation_loss"]),
+        float(record["validation_recovery_refine_loss"]),
+        rel_tol=1e-6,
+        abs_tol=1e-10,
+    )
+    step = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert math.isclose(
+        float(step["train_objective"]),
+        float(step["train_recovery_refine_loss"]),
+        rel_tol=1e-6,
+        abs_tol=1e-10,
+    )
+    assert float(step["delta_pred_gradient_norm"]) > 0
+    assert float(step["prediction_head_gradient_norm"]) > 0
+    assert int(step["pcg_failed_solves"]) == 0
+    assert int(step["nan_inf_count"]) == 0
+
+
 def test_hybrid_single_loss_trains_both_heads_and_selects_validation_chamfer(
     tmp_path,
 ) -> None:

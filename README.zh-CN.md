@@ -26,9 +26,100 @@ View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/s
 
 28-view current-graph target/loss-space 结果：[H2 消融报告](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25 组可视化总览](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
 
+## 方法创新点
+
+> **Novelty（正式定义）.** A frequency-aware, operator-guided mesh refinement
+> framework that converts multiview high-frequency visual evidence into
+> complementary differential and positional geometric constraints, and
+> reconciles them through an explicit differentiable linear geometric
+> operator.
+
+中文表述：这是一个**频率感知、算子引导的网格细化框架**；它把多视图高频视觉证据
+转化为互补的差分几何约束与位置几何约束，再通过显式、可微的线性几何算子协调两者。
+
+具体而言，高频视觉分支同时向两种几何表示提供 encoder feature `F` 和残差
+`F-G(F)`。Arm B 将视觉证据转化为 raw differential constraints，Arm E 将其转化为
+direct positional prior。冻结 B+E 及其可训练扩展通过下式协调两者：
+
+```text
+(L_U^T L_U + lambda I) V_H = L_U^T delta_B + lambda V_E.
+```
+
+其中 `L_U=I-D^-1 A` 是显式几何算子，求解过程可微。“频率感知”指高频视觉证据和
+实测 graph-frequency 行为，并不表示网络或恢复过程显式执行 mesh 特征分解。
+
+## Frozen B/E 图频率分析
+
+选定的 frozen Arm B、Arm E 与 B+E 在完全相同的 matched-v2 meshes 上评估。误差
+诊断使用 symmetric-normalized graph Laplacian
+`Lsym=I-D^-1/2 A D^-1/2`，并以 Chebyshev--Jackson 近似划分
+`low=[0,2/3)`、`mid=[2/3,4/3)`、`high=[4/3,2]`。下表给出绝对 XYZ error
+energy；主要证据是绝对能量，而不是 normalized fraction。
+
+| Split | 方法 | Total | Low | Mid | High |
+|---|---|---:|---:|---:|---:|
+| validation | Arm B | 59.81110 | 47.81169 | 9.05632 | 2.94309 |
+| validation | Arm E | 22.56830 | 8.53185 | 9.99271 | 4.04375 |
+| validation | Frozen B+E | 30.17443 | 18.60651 | 8.72829 | 2.83963 |
+| test | Arm B | 102.25649 | 74.69651 | 22.59283 | 4.96715 |
+| test | Arm E | 55.86585 | 24.49914 | 24.49353 | 6.87319 |
+| test | Frozen B+E | 67.31840 | 40.48458 | 21.97737 | 4.85644 |
+
+这是一个有边界的频谱互补结论，并不表示每个频段都形成了独立 specialist。Arm B 的
+误差明显由低频主导；Arm E 的 total 和 low-frequency error 最低，但其绝对 mid/high
+error 均高于 B 与 Hybrid。B+E 的 low error 位于 B/E 之间，同时把 mid/high error
+略微降到两个分支以下。test 上 `Hybrid-B` 变化的绝对能量有 99.11% 位于 low band；
+Hybrid 的 component-translation RMS（`0.0071013`）也几乎复现 E（`0.0070970`），
+而不是 B（`0.0118360`）。因此 E 提供 positional/Laplacian-nullspace anchor，B 保留
+differential structure，并略微降低 mid/high-frequency residual。
+
+恢复本身还具有严格的算子频谱刻画。令
+`A_R=L_U^T L_U=Q Lambda Q^T`，并以
+`A_R V_B_dagger=L_U^T delta_B` 定义 `V_B_dagger`；仅为消除顶点空间比较中的
+歧义，其逐连通分量常数 gauge 取自 `V_E`。则每个 recovery mode 都严格满足：
+
+```text
+v_H,k = Lambda_k/(Lambda_k+lambda) v_B_dagger,k
+      + lambda/(Lambda_k+lambda) v_E,k.
+```
+
+这个等式是严格的；只有用于汇总频段能量的 Chebyshev--Jackson projector 是近似的。
+归档 Arm-B 网格并不是 `V_B_dagger`：它包含独立的 `1e-2 V_input` anchor，因此仍作为
+不同的经验比较项报告。实际恢复仍只执行稀疏矩阵方程，并不显式做 eigendecomposition。
+
+直接 `A_R` 审计的 100 个 validation/test meshes 全部通过。normal-equation residual
+最大为 `2.839e-12`；独立计算再相加 B/E transfer contribution 后，重建 Hybrid 的最大
+vertex RMS 为 `1.005e-11`。采用逐 mesh `Lambda/Lambda_max` 频段后，tight float64
+reference energy 为：
+
+| Split | Signal | Total | Low | Mid | High |
+|---|---|---:|---:|---:|---:|
+| validation | Archived B | 59.81110 | 51.23842 | 4.75454 | 3.81814 |
+| validation | E | 22.56830 | 11.41362 | 5.74857 | 5.40611 |
+| validation | Hybrid | 30.18638 | 21.73557 | 4.67255 | 3.77826 |
+| test | Archived B | 102.25649 | 84.72261 | 11.48790 | 6.04598 |
+| test | E | 55.86585 | 33.71023 | 13.76141 | 8.39422 |
+| test | Hybrid | 67.33614 | 49.97247 | 11.36961 | 5.99406 |
+
+更关键的是，test 上 `Hybrid-V_B_dagger` 变化能量的 `99.862%` 位于严格定义的
+E-dominant 区间 `Lambda<lambda/2`。对实际 archived B 比较，结论仍然很强：
+`80.932%` 位于 E-dominant、`13.173%` 位于 transition，只有 `5.896%` 位于
+B-dominant 的 `Lambda>=2lambda`；按 mesh-relative 划分，最低三分之一占
+`99.930%`。因此，真实 recovery operator 直接确认：E 主要通过低 `Lambda` 的
+positional/nullspace modes 改变 B。反过来，`Hybrid-E` 变化能量的 `73.240%` 位于
+B-dominant，只有 `9.577%` 位于 E-dominant，直接说明 B 向 E 提供响应更高的
+differential correction。无 anchor 的 `V_B_dagger` 存在巨大的低模误差能量，它是
+理论端点而不是竞争模型输出。
+
+完整逐样本 energy、exactness audit、图和 protocol 见
+[真实 recovery-operator 报告](reports/sofa50_multitopology_rawlap500_v2/recovery_operator_spectrum_v1/REPORT.md)、
+[Frozen B+E 报告](reports/sofa50_multitopology_rawlap500_v2/frozen_hybrid_recovery_v1/FINAL_REPORT.md)
+和
+[Frozen vs joint 机制报告](reports/sofa50_multitopology_rawlap500_v2/frozen_vs_joint_mechanism_analysis_v1/FINAL_REPORT.md)。
+
 ## 项目状态
 
-状态日期：2026-08-25 BST。
+状态日期：2026-08-27 BST。
 
 OpenMVS 使用政策：现有 Sofa50 OpenMVS mesh 是低质量外部重建，只保留为
 分布外压力测试；它不是 training target、pseudo-GT、模型选择端点或期望质量
@@ -63,7 +154,12 @@ ceiling。详见 [OpenMVS 输入使用政策](docs/OPENMVS_INPUT_POLICY.zh-CN.md
 | Recovery-aware Arm C/D | 已完成 | 减弱 positional regularization 未改善 recovered geometry。C（`lambda=10^-3`）与 D（`10^-4`）的 test Chamfer 分别为 `0.00414926`、`0.00653139`，均差于 B（`10^-2`）的 `0.00358497`。两组使用已记录的 float64 PCG，objective 未改变。 |
 | Direct-vertex Arm E | 已完成 | 826,115 参数 C2F2+HF 仅以 same-index vertex MSE 训练 `Delta V`。Test Chamfer 为 `0.00334039`、vertex RMS 为 `0.00822130`，45/50 inputs 改善；E 不含 Laplacian target、sparse solver 或 recovery gate。 |
 | 冻结 B+E hybrid recovery | 已完成；只读 | 使用冻结 B Laplacian、冻结 E positions 作为唯一 anchor，并用 validation 选择 `lambda=3e-2`；test Chamfer 为 `0.00302983`，49/50 inputs 改善。它支持后续联合 hybrid 训练，但本身没有重训，也不授权 scaling。 |
-| End-to-end direct–Laplacian hybrid | Preflight 通过；训练中 | 单个 892,678 参数共享模型预测 latent raw-Laplacian 与 direct-displacement fields；唯一监督是固定 `lambda=3e-2` differentiable solve 后的最终 hybrid geometry。Float64 PCG/LSMR 与双分支 gradient audit 均通过；job `17363` 正在 8×Blackwell 上从零训练。 |
+| End-to-end direct–Laplacian hybrid | 已完成 | 单个 892,678 参数共享模型以 final-hybrid-only supervision 预测 latent raw-Laplacian 与 direct-displacement fields。Matched-v2 test Chamfer 为 `0.00341857`，不及 frozen B+E 的 `0.00302983`；机制审计为 MECH5，不支持“分开训练普遍更优”的泛化结论。 |
+| Matched-v2 continuous pretrained B+E | 已完成；validation 选择 | 两个完整独立 specialist 只通过最终 Hybrid geometry 继续联合训练。Validation 选择 step 9,400；matched-test Chamfer 从 geometry-equivalent step-0 的 `0.00302691` 改善到 `0.00288357`，但 legacy/unseen OOD 仍未成功。 |
+| Old-domain native-1920 Arm B | 训练及获授权 Arm-B-only 对比已完成 | Validation 选择 step 18,600。在完全相同的 25 个 inputs 和统一 evaluator 下，Arm B 的 Chamfer 为 `0.00853433`、25/25 改善；NDS、nvdiffrec、ExMesh 分别为 `0.01120499`、`0.01365466`、`0.02017062`。这次 test opening 不是 sealed B/E/fusion 最终结果。 |
+| Old-domain native-1920 Arm E | 训练中 | 截至本次更新，direct-displacement MSE 已运行到 13,200/20,000 steps，数值健康，validation MSE 在 `3.56e-5` 附近进入平台。Geometry evaluation 与 B+E selection 尚未开启。 |
+| Old-domain native-1920 continuous B+E | 已准备；未提交 | 生成后的配置将以两个完整、validation-selected specialists 初始化，只通过 float64 differentiable solve 后的最终 Hybrid vertex MSE 优化。Arm E、specialist validation selection、frozen-lambda selection 与 step-0 gradient preflight 未全部通过前不能启动。 |
+| Future2000 recovery-only Arm B | 运行中；合同已修正 | 当前 4×Blackwell 训练使用最新 Arm-B 架构和 Future2000 28-view/960 inputs，但唯一优化目标是穿过可微 Laplacian solve 的 recovered-vertex MSE。Raw-Laplacian Huber 只保留为零权重诊断；已取消的双项 loss 作业不计入结果。 |
 | GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
 | Future2000 GT-adaptive 扩展 | 200k 训练与 learned-method test 已完成 | 固定 200,000-step checkpoint 已在 200 个 held-out objects × 5 variants 上评估。统一 Chamfer 从 `0.00776417` 降至 `0.00522955`，959/1000 samples 改善；mean normal consistency 从 `0.924252` 降至 `0.895907`，因此明确保留 distance/normal trade-off。 |
 | Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |
@@ -83,6 +179,52 @@ full-1000 same-initial external comparison 现已完成，invalid outputs 显式
 expanded/OpenMVS query graph 后未改善 geometry，因此不再作为下文数学定义的主线。
 此外，由于 initial mesh 质量过差，OpenMVS 明确排除在 target 定义、模型选择与后续
 scale-up 决策之外。
+
+## Loss contract：历史 specialist 与当前 operator-only training
+
+多个实验复用相同 Arm-B predictor 和 sparse operator，但 optimisation objective
+并不相同，不能笼统写成同一个“Arm-B loss”。
+
+已完成的 Sofa50 recovery-aware Arm B 使用双项目标：
+
+$$
+\mathcal L_{B,\mathrm{historical}}
+=\mathcal L_{\mathrm{lap}}+10^{-2}\mathcal L_{\mathrm{vertex}}.
+$$
+
+当前 Future2000 recovery-only Arm B 则预测 `delta_hat`，先求解
+
+$$
+(L^\top L+\lambda I)V_B
+=L^\top\widehat\delta+\lambda V_{\mathrm{input}},
+\qquad \lambda=10^{-2},
+$$
+
+唯一 optimisation objective 为：
+
+$$
+\boxed{
+\mathcal L_{B,\mathrm{recovery\ only}}
+=\frac{1}{N}\sum_i\lVert V_{B,i}-V_{\mathrm{clean},i}\rVert_2^2
+}.
+$$
+
+Raw-Laplacian Huber 仍可作为诊断量计算，但其 training weight 严格为零；梯度只能经由
+implicit sparse solve 回到 `delta_hat`。该 Future2000 实验是新的 loss contract，
+不能反向写成已完成历史 Sofa50 Arm-B checkpoint 的 objective。
+
+Arm E 不使用 sparse solve，只训练 direct-displacement MSE。Continuous B+E 使用两个
+完整 specialist，计算
+
+$$
+V_H=(L^\top L+\lambda I)^{-1}
+\left(L^\top\widehat\delta_B
++\lambda(V_{\mathrm{input}}+\Delta V_E)\right),
+$$
+
+同样只优化最终 vertex MSE，不加入 raw-Laplacian 或 direct-displacement auxiliary
+loss。Continuous B+E 的训练量是 final-vertex MSE，checkpoint selector 则是
+validation-only unified surface Chamfer；锁定 selection 前 test 保持 sealed。
 
 ## 当前训练方法
 
