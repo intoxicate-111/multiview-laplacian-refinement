@@ -54,6 +54,8 @@ def spec(
     device: torch.device,
     *,
     view_chunk_size: int | None = None,
+    checkpoint_name: str = "checkpoint_latest.pt",
+    expected_checkpoint_sha256: str | None = None,
 ) -> dict[str, Any]:
     source_config = _run_config(run_dir)
     config = copy.deepcopy(source_config)
@@ -61,7 +63,18 @@ def spec(
         if view_chunk_size < 1:
             raise ValueError("view_chunk_size must be positive")
         config.setdefault("image_encoder", {})["view_chunk_size"] = view_chunk_size
-    checkpoint = run_dir / "checkpoint_latest.pt"
+    checkpoint = run_dir / checkpoint_name
+    if checkpoint.name != checkpoint_name or checkpoint.parent != run_dir:
+        raise ValueError("checkpoint_name must be a plain file name")
+    checkpoint_sha256 = sha256(checkpoint)
+    if (
+        expected_checkpoint_sha256 is not None
+        and checkpoint_sha256 != expected_checkpoint_sha256
+    ):
+        raise ValueError(
+            "Checkpoint SHA-256 mismatch: "
+            f"expected {expected_checkpoint_sha256}, found {checkpoint_sha256}"
+        )
     model = _build_model(config, None, False).to(device)
     payload = load_checkpoint(checkpoint, model, map_location=device)
     model.eval()
@@ -69,17 +82,29 @@ def spec(
     expected_optimizer_steps = int(
         source_config.get("multi_object_training", {}).get("max_optimizer_steps", -1)
     )
-    actual_optimizer_steps = int(payload.get("optimizer_steps", -1))
-    if expected_optimizer_steps < 1 or actual_optimizer_steps != expected_optimizer_steps:
+    optimizer_steps_value = payload.get("optimizer_steps")
+    actual_optimizer_steps = (
+        None if optimizer_steps_value is None else int(optimizer_steps_value)
+    )
+    if checkpoint_name == "checkpoint_latest.pt" and (
+        expected_optimizer_steps < 1
+        or actual_optimizer_steps != expected_optimizer_steps
+    ):
         raise ValueError(
             "Checkpoint is not the completed configured run: "
             f"expected {expected_optimizer_steps}, found {actual_optimizer_steps}"
+        )
+    if checkpoint_name != "checkpoint_latest.pt" and expected_checkpoint_sha256 is None:
+        raise ValueError(
+            "A non-latest checkpoint requires expected_checkpoint_sha256 for a "
+            "frozen-selection audit"
         )
     return {
         "config": config,
         "source_config": source_config,
         "checkpoint": checkpoint,
-        "checkpoint_sha256": sha256(checkpoint),
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_epoch": int(payload["epoch"]),
         "optimizer_steps": actual_optimizer_steps,
         "inference_view_chunk_size": view_chunk_size,
         "model": model,

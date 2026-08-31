@@ -1,0 +1,43 @@
+{
+  "contract": "frozen_same-input_archive_reuse_no_method_rerun",
+  "manifest": "/networkhome/WMGDS/zhou_c/future2000_gt_adaptive_synthetic_current_28view_v2/manifest.json",
+  "manifest_sha256": "bb7baa2b2f34f7b2b00c176f6638e81915db13f96985820a007b55b5a764343d",
+  "comparators": [
+    {
+      "destination_method": "old_structure",
+      "source_method": "ours",
+      "source_directory": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/future2000_same_initial_full1000_20260822/results/ours",
+      "per_sample_sha256": "aa2a2a77900b6ae28bb385deabd16fcee76b3369b02745cded9ca903c3cda9db",
+      "aggregate_sha256": "4db884153dbfa005857582acedccd1d6588160667d5dce60fabef9c72f7b2775",
+      "sample_count": 1000,
+      "rerun": false
+    },
+    {
+      "destination_method": "nds",
+      "source_method": "nds",
+      "source_directory": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/future2000_same_initial_full1000_20260822/results/nds",
+      "per_sample_sha256": "98b92e3c047db627ac7a5765f81ce427854dad5caee6888a883fdf5df82a70ad",
+      "aggregate_sha256": "dcae6071caa0fd64fffebd2d3f8969619443f3e5cc6da51c6b2904c09edb47e5",
+      "sample_count": 1000,
+      "rerun": false
+    },
+    {
+      "destination_method": "nvdiffrec",
+      "source_method": "nvdiffrec",
+      "source_directory": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/future2000_same_initial_full1000_20260822/results/nvdiffrec",
+      "per_sample_sha256": "e19bd7e5c5abdf003bfa48cff619f42b75bf4683143b3f29c45e996b7dc7c496",
+      "aggregate_sha256": "cb16d3cd1cf15da76e9db247b48cca7b55dd6a1e06bea8878c16cfa01cc4a976",
+      "sample_count": 1000,
+      "rerun": false
+    },
+    {
+      "destination_method": "exmesh",
+      "source_method": "exmesh",
+      "source_directory": "/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/runs/benchmarks/future2000_same_initial_full1000_20260822/results/exmesh",
+      "per_sample_sha256": "0b326fb1e09b8e1c1ac11b62050d768a5213639479caf0b0416579b6e7c8f5d9",
+      "aggregate_sha256": "86d40ced338b325ce0a32cca231d1f3509020b70057e48d299aecb928c35e1de",
+      "sample_count": 1000,
+      "rerun": false
+    }
+  ]
+}

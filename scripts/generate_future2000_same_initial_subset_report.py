@@ -8,6 +8,7 @@ import csv
 import hashlib
 import json
 import math
+import random
 from pathlib import Path
 from statistics import fmean
 from typing import Any
@@ -17,13 +18,68 @@ DEFAULT_METHODS = ("ours", "nds", "nvdiffrec", "exmesh")
 
 PAIRED_METRICS = {
     "chamfer": ("refined_chamfer", "lower"),
-    "p2s_mean": ("refined_p2s_mean", "lower"),
     "p2s_p95": ("refined_p2s_p95", "lower"),
     "fscore": ("refined_fscore", "higher"),
     "normal_consistency": ("refined_normal_consistency", "higher"),
     "introduced_flipped_faces": ("introduced_flipped_faces", "lower"),
     "new_degenerate_faces": ("new_degenerate_faces", "lower"),
 }
+
+
+def _quantile(values: list[float], probability: float) -> float:
+    if not values:
+        raise ValueError("Cannot take a quantile of an empty list")
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * probability
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] + fraction * (ordered[upper] - ordered[lower])
+
+
+def _object_cluster_chamfer(
+    rows: list[dict[str, Any]], *, seed: int, bootstrap_samples: int = 10_000
+) -> dict[str, Any]:
+    by_object: dict[str, list[float]] = {}
+    for row in rows:
+        ours = row.get("ours")
+        external = row.get("external")
+        if ours is None or external is None:
+            continue
+        object_id = str(row["sample_id"]).rpartition("__v")[0]
+        by_object.setdefault(object_id, []).append(float(ours) - float(external))
+    object_means = [fmean(values) for _, values in sorted(by_object.items())]
+    if not object_means:
+        return {
+            "object_count": 0,
+            "ours_wins": 0,
+            "ties": 0,
+            "external_wins": 0,
+            "mean_ours_minus_external": None,
+            "bootstrap_samples": bootstrap_samples,
+            "bootstrap_seed": seed,
+            "ci95": None,
+        }
+    generator = random.Random(seed)
+    bootstrap = [
+        fmean(generator.choices(object_means, k=len(object_means)))
+        for _ in range(bootstrap_samples)
+    ]
+    return {
+        "object_count": len(object_means),
+        "ours_wins": sum(value < 0.0 for value in object_means),
+        "ties": sum(value == 0.0 for value in object_means),
+        "external_wins": sum(value > 0.0 for value in object_means),
+        "mean_ours_minus_external": fmean(object_means),
+        "bootstrap_samples": bootstrap_samples,
+        "bootstrap_seed": seed,
+        "ci95": [
+            _quantile(bootstrap, 0.025),
+            _quantile(bootstrap, 0.975),
+        ],
+    }
 
 
 def _read_rows(path: Path) -> list[dict[str, str]]:
@@ -305,6 +361,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         paired[method] = {}
         for name, (field, direction) in PAIRED_METRICS.items():
             result, rows = _paired_metric(ours, other, expected, field, direction)
+            if name == "chamfer":
+                result["object_cluster"] = _object_cluster_chamfer(
+                    rows, seed=args.metric_seed
+                )
             paired[method][name] = result
             paired_rows.extend({"external_method": method, **row} for row in rows)
     payload = {
@@ -370,8 +430,8 @@ def _markdown(payload: dict[str, Any]) -> str:
         "",
         f"Input: {payload['input_contract']}",
         "",
-        "| Method | Complete | Valid CD | Chamfer | CD gain | P2S mean | P2S p95 | F-score | Normal | Improved |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Method | Complete | Valid CD | Chamfer | CD gain | P2S p95 | F-score | Normal | Improved |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for item in payload["summaries"]:
         lines.append(
@@ -379,7 +439,6 @@ def _markdown(payload: dict[str, Any]) -> str:
             f"{item.get('valid_chamfer_samples', total)}/{total} | "
             f"{item['mean_refined_chamfer']:.9g} | "
             f"{item.get('relative_chamfer_gain', 0.0):+.2%} | "
-            f"{item['mean_refined_p2s_mean']:.9g} | "
             f"{item['mean_refined_p2s_p95']:.9g} | {item['mean_refined_fscore']:.9g} | "
             f"{item['mean_refined_normal_consistency']:.9g} | {item['improved_meshes']}/{total} |"
         )
@@ -398,6 +457,29 @@ def _markdown(payload: dict[str, Any]) -> str:
                 f"{result['external_wins']} | "
                 f"{_fmt(result['mean_ours_minus_external'])} |"
             )
+    lines.extend(
+        [
+            "",
+            "Chamfer and bidirectional P2S mean are the same quantity in this evaluator: "
+            "both average the equal-length forward and reverse point-to-surface distance "
+            "arrays. P2S mean is therefore omitted as a duplicate metric; P2S p95 remains "
+            "a distinct tail statistic.",
+            "",
+            "### Object-clustered paired Chamfer",
+            "",
+            "| External | Objects | Ours wins | Ties | External wins | Mean ours - external | Object-bootstrap 95% CI |",
+            "|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for method, values in payload["paired_ours_vs_external"].items():
+        cluster = values["chamfer"]["object_cluster"]
+        interval = cluster["ci95"]
+        ci = "n/a" if interval is None else f"[{_fmt(interval[0])}, {_fmt(interval[1])}]"
+        lines.append(
+            f"| {method} | {cluster['object_count']} | {cluster['ours_wins']} | "
+            f"{cluster['ties']} | {cluster['external_wins']} | "
+            f"{_fmt(cluster['mean_ours_minus_external'])} | {ci} |"
+        )
     lines.extend(
         [
             "",
@@ -452,8 +534,6 @@ def _markdown(payload: dict[str, Any]) -> str:
             f"({_fmt(best['mean_refined_chamfer'])}).",
             f"- Ours improves {ours_summary['improved_meshes']}/{total} inputs and "
             f"has aggregate Chamfer gain {ours_summary['relative_chamfer_gain']:+.2%}.",
-            "- NDS-28V-full improves over the original one-view-per-iteration NDS "
-            "aggregate, but remains behind Ours on paired Chamfer for 632/999 valid pairs.",
             "- Invalid outputs remain explicit and are excluded only from the affected "
             "metric denominator; no mesh cleanup or alternate evaluator was used.",
             "",
@@ -462,6 +542,17 @@ def _markdown(payload: dict[str, Any]) -> str:
             "",
         ]
     )
+    if {
+        "nds",
+        "nds_28v_full",
+    }.issubset(payload["paired_ours_vs_external"]):
+        nds28_cd = payload["paired_ours_vs_external"]["nds_28v_full"]["chamfer"]
+        lines.insert(
+            -3,
+            "- NDS-28V-full is reported separately from the original "
+            "one-view-per-iteration NDS; Ours wins paired Chamfer on "
+            f"{nds28_cd['ours_wins']}/{nds28_cd['valid_pairs']} valid pairs.",
+        )
     return "\n".join(lines)
 
 

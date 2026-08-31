@@ -1,0 +1,236 @@
+{
+  "confidence": {
+    "enabled": false,
+    "quantile_bins": 5,
+    "recovery_weight": "none"
+  },
+  "data_loading": {
+    "cuda_prefetch": true,
+    "multiprocessing_sharing_strategy": "file_system",
+    "num_workers": 0,
+    "persistent_workers": false,
+    "pin_memory": true,
+    "prefetch_factor": 2,
+    "train_views_per_sample": null,
+    "validation_views_per_sample": null
+  },
+  "dataset": {
+    "name": "Future2000GTAdaptiveExpandedCurrent28View",
+    "expected_split_counts": {
+      "train": 8000,
+      "validation": 1000,
+      "test": 1000
+    },
+    "objects": 2000,
+    "variants_per_object": 5,
+    "object_level_split": true,
+    "clean_reference_compatibility": "gt_vertices_same_topology",
+    "degradation_profile": "future2000_gt_adaptive_synthetic_current_v2"
+  },
+  "device": "cuda",
+  "experiment_metadata": {
+    "experiment": "Future2000_current28view_Arm_B_mixed_loss",
+    "arm": "B",
+    "arm_b_architecture_reference": "completed_sofa50_old_domain_native1920_arm_b_checkpoint_run_config",
+    "arm_b_reference_checkpoint_sha256": "c250afad2b63828a4b8ae3d692dca22757e6477a50d13e882461035a7a35522a",
+    "architecture_and_operator_fields_copied_exactly": [
+      "input_mode",
+      "image_encoder",
+      "model",
+      "confidence",
+      "recovery",
+      "prediction_semantics",
+      "target_mode",
+      "target_scaling",
+      "query_training",
+      "local_query_jitter",
+      "renderer_visibility"
+    ],
+    "capacity": "C2",
+    "feature_resolution": "F2",
+    "views": 28,
+    "input_resolution": 960,
+    "query_graph": "gt_adaptive_sub2_represented_vertex_area",
+    "distributed_world_size": 4,
+    "per_gpu_batch_meshes": 1,
+    "gradient_accumulation_meshes_per_rank": 2,
+    "effective_global_batch_meshes": 8,
+    "initialization": "from_scratch",
+    "loss_contract": "raw_laplacian_huber_plus_1e-2_recovered_vertex_mse_implicit_through_laplacian_solve",
+    "training_gpu_model": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "training_horizon_source": "previous_Future2000_external_comparison_training_contract",
+    "max_optimizer_steps": 200000,
+    "checkpoint_selection": "validation_objective_only",
+    "comparison_target": "Future2000_recovery_only_Arm_B_and_existing_full1000_external_archive",
+    "ground_truth_never_model_input_or_recovery_anchor": true,
+    "sealed_test_policy": "test_unavailable_to_training_and_checkpoint_selection",
+    "beta": 0.01,
+    "prediction_loss_weight": 1
+  },
+  "image_encoder": {
+    "feature_construction": {
+      "kernel_size": 5,
+      "mode": "original_plus_high_frequency",
+      "padding": "reflect",
+      "sigma": 1
+    },
+    "feature_dim": 64,
+    "first_stride": 1,
+    "gradient_checkpointing": true,
+    "normalization": {
+      "mean": [
+        0,
+        0,
+        0
+      ],
+      "std": [
+        1,
+        1,
+        1
+      ]
+    },
+    "second_stride": 1,
+    "view_chunk_size": 4
+  },
+  "input_mode": "coarse_plus_multiview",
+  "local_query_jitter": {
+    "distribution": "isotropic_gaussian_xyz_clipped_at_3sigma",
+    "enabled": false,
+    "frozen": [
+      "clean_reference",
+      "target",
+      "graph",
+      "connectivity",
+      "operator"
+    ],
+    "maximum_offset_h": 0.009,
+    "scope": "training_only",
+    "std_h": 0.003
+  },
+  "method": "future2000_current28view_arm_b_mixed_loss_200k",
+  "model": {
+    "dropout": 0,
+    "geometry_mode": "query_fourier",
+    "hidden_dim": 256,
+    "num_graph_layers": 3,
+    "position_encoding": {
+      "include_input": true,
+      "num_frequencies": 6
+    }
+  },
+  "multi_object_training": {
+    "cache_prepared_samples_on_device": false,
+    "checkpoint_epochs": [],
+    "checkpoint_every_epochs": 0,
+    "checkpoint_optimizer_steps": [
+      10000,
+      20000,
+      30000,
+      40000,
+      50000,
+      60000,
+      70000,
+      80000,
+      90000,
+      100000,
+      110000,
+      120000,
+      130000,
+      140000,
+      150000,
+      160000,
+      170000,
+      180000,
+      190000,
+      200000
+    ],
+    "early_stopping": {
+      "enabled": false,
+      "min_delta": 0.0001,
+      "patience_validations": 15
+    },
+    "epochs": 2000,
+    "gradient_accumulation_meshes": 2,
+    "max_optimizer_steps": 200000,
+    "profile_training": true,
+    "report_every_optimizer_steps": 2000,
+    "shuffle": true,
+    "validation_every_epochs": 5
+  },
+  "prediction_semantics": "current_graph_laplacian",
+  "query_training": {
+    "apply_to_validation": false,
+    "enabled": false,
+    "exact_fraction": 0.2,
+    "max_offset_h": 0.001,
+    "normal_std_h": 0.0003,
+    "tangent_std_h": 0.0003,
+    "zero_initial_laplacian": false
+  },
+  "recovery": {
+    "anchor": "lambda_times_input_vertex_l2",
+    "confidence_weighting": false,
+    "lambda": 0.01,
+    "laplacian_equations": "all_vertices",
+    "operator_type": "uniform_random_walk_current_graph",
+    "optimizer": null,
+    "robust_loss": null,
+    "solver": "regularized_sparse_least_squares",
+    "standalone_implementation": "scipy_lsmr_augmented_system",
+    "visibility_gate": false
+  },
+  "renderer_visibility": {
+    "condition": "backface_and_occlusion",
+    "depth_image_used": false,
+    "front_face_winding": "ccw",
+    "neighborhood_radius": 1,
+    "source": "precomputed_current_graph_depth_tested_face_id_buffer"
+  },
+  "seed": 7,
+  "target_definition": "delta_target_raw=L_U(current_graph)@P_proxy; P_proxy=source_gt_vertices_with_exact_same_topology",
+  "target_mode": "raw_laplacian",
+  "target_scaling": {
+    "applied_to_training_target": false,
+    "clip_max_norm": null,
+    "epsilon": 1e-12,
+    "method": "square_of_mean_incident_edge_length",
+    "source": "input_prediction_mesh_auxiliary_compatibility_fields_only"
+  },
+  "target_semantics": "same_topology_proxy_reference_native_target",
+  "training": {
+    "amp": {
+      "dtype": "float16",
+      "enabled": true
+    },
+    "gradient_clip_norm": 1,
+    "huber_delta": 0.01,
+    "learning_rate": 0.001,
+    "loss": "huber",
+    "lr_scheduler": {
+      "cooldown_validations": 1,
+      "factor": 0.5,
+      "min_lr": 0.000001,
+      "patience_validations": 10,
+      "threshold": 0.0001,
+      "threshold_mode": "abs",
+      "type": "reduce_on_plateau"
+    },
+    "prediction_loss_space": "output_representation",
+    "recovery_aware_geometry_loss": {
+      "beta": 0.01,
+      "clean_vertex_use": "training_loss_only_never_model_input",
+      "compute_dtype": "float32",
+      "differentiation": "implicit_custom_autograd",
+      "enabled": true,
+      "lambda": 0.01,
+      "maximum_iterations": 256,
+      "prediction_loss_weight": 1,
+      "runtime_diagnostics": true,
+      "tolerance": 0.0001
+    },
+    "vertex_sampling": {
+      "mode": "full"
+    },
+    "weight_decay": 0
+  }
+}

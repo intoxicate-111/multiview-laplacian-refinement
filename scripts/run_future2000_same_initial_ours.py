@@ -21,14 +21,166 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from evaluate_future2000_external_baseline import _audit_source_identity, _evaluate
+from diagnose_sofa50_exact_solve_visibility_sweep import (
+    component_labels,
+    uniform_sparse_laplacian,
+)
+from diagnose_sofa50_regularized_sparse_sweep import regularized_sparse_solve
 from mlr.data import Mesh
 from mlr.io import save_mesh
+from mlr.learned_laplacian.canonical_experiment import (
+    _exact_query_sample,
+    _load_device_item,
+)
+from mlr.learned_laplacian.canonical_pipeline import (
+    canonical_current_graph_recovery_inputs,
+)
 from mlr.learned_laplacian.multi_dataset import PreparedMeshDataset
 from mlr.learned_laplacian.synthetic_current_h2_ablation import (
-    _infer_one,
     _recover_raw_one,
 )
+from mlr.learned_laplacian.target_scaling import (
+    EDGE_SCALE_NORMALIZED_LAPLACIAN,
+    RAW_LAPLACIAN,
+    normalize_laplacian_by_edge_scale,
+    prediction_to_raw_laplacian,
+)
 from run_sofa50_same_initial_ours import spec
+
+
+def _infer_laplacian_one(
+    dataset: PreparedMeshDataset,
+    index: int,
+    model_spec: dict[str, Any],
+    device: torch.device,
+    *,
+    current_faces: torch.Tensor | np.ndarray,
+) -> dict[str, torch.Tensor | float]:
+    """Infer a canonical Laplacian arm with or without a confidence head."""
+
+    config = model_spec["config"]
+    prepared = _load_device_item(dataset, index, config, device)
+    conditioned = _exact_query_sample(prepared.sample, device)
+    with torch.no_grad(), torch.autocast(
+        device_type=device.type,
+        dtype=model_spec["amp_dtype"],
+        enabled=bool(model_spec["amp_enabled"]),
+    ):
+        model_output = model_spec["model"](conditioned)
+    prediction_output = model_output.predicted_laplacian.float().detach().cpu()
+    h = prepared.sample["local_edge_length"].float().detach().cpu()
+    valid = prepared.sample["valid_scale_mask"].bool().detach().cpu()
+    epsilon = float(config.get("target_scaling", {}).get("epsilon", 1e-12))
+    target_raw = prepared.raw_target.float().detach().cpu()
+    target_normalized = normalize_laplacian_by_edge_scale(
+        target_raw, h, eps=epsilon, valid_scale_mask=valid
+    )
+    target_mode = str(config.get("target_mode"))
+    prediction_raw = prediction_to_raw_laplacian(
+        prediction_output,
+        h,
+        input_representation=target_mode,
+        eps=epsilon,
+    )
+    if target_mode == EDGE_SCALE_NORMALIZED_LAPLACIAN:
+        prediction_normalized = prediction_output
+    elif target_mode == RAW_LAPLACIAN:
+        prediction_normalized = normalize_laplacian_by_edge_scale(
+            prediction_raw, h, eps=epsilon, valid_scale_mask=valid
+        )
+    else:
+        raise ValueError(f"Unsupported target_mode {target_mode!r}")
+
+    confidence_prediction = model_output.confidence_prediction
+    confidence = (
+        torch.ones(len(prediction_raw), dtype=torch.float32)
+        if confidence_prediction is None
+        else confidence_prediction.float().detach().cpu()
+    )
+    visibility = prepared.sample["visibility"].detach().cpu()
+    canonical = canonical_current_graph_recovery_inputs(
+        prepared.sample["vertices"].detach().cpu(),
+        current_faces,
+        prediction_normalized,
+        visibility,
+        None if confidence_prediction is None else confidence,
+        epsilon=epsilon,
+    )
+    roundtrip_error = torch.max(
+        torch.abs(canonical.delta_pred_raw.cpu() - prediction_raw)
+    ).item()
+    return {
+        "prediction_output": prediction_output,
+        "prediction_raw": prediction_raw,
+        "prediction_normalized": prediction_normalized,
+        "target_raw": target_raw,
+        "target_normalized": target_normalized,
+        "confidence": confidence,
+        "h": h,
+        "valid": valid,
+        "visibility_count": visibility.to(torch.int64).sum(dim=0),
+        "recovery_weight": canonical.weight.detach().cpu(),
+        "target_confidence": prepared.sample["target_confidence"]
+        .float()
+        .detach()
+        .cpu(),
+        "roundtrip_error": float(roundtrip_error),
+    }
+
+
+def _recover_all_vertices_one(
+    static: dict[str, Any],
+    prediction_raw: torch.Tensor,
+    output_dir: Path,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the formal all-vertex Arm-B standalone sparse recovery."""
+
+    recovery = config.get("recovery", {})
+    if not (
+        recovery.get("operator_type") == "uniform_random_walk_current_graph"
+        and recovery.get("anchor") == "lambda_times_input_vertex_l2"
+        and recovery.get("laplacian_equations") == "all_vertices"
+        and recovery.get("visibility_gate") is False
+        and recovery.get("confidence_weighting") is False
+        and recovery.get("standalone_implementation")
+        == "scipy_lsmr_augmented_system"
+    ):
+        raise RuntimeError("Unsupported formal standalone recovery contract")
+    regularization = float(recovery["lambda"])
+    initial_vertices = (
+        torch.as_tensor(static["vertices"]).detach().cpu().numpy().astype(np.float64)
+    )
+    faces = (
+        torch.as_tensor(static["faces"]).detach().cpu().numpy().astype(np.int64)
+    )
+    laplacian, laplacian_data = uniform_sparse_laplacian(
+        faces, len(initial_vertices)
+    )
+    component_count, labels = component_labels(laplacian_data)
+    recovered, audit = regularized_sparse_solve(
+        laplacian,
+        prediction_raw.detach().cpu().numpy().astype(np.float64),
+        initial_vertices,
+        labels,
+        component_count,
+        regularization,
+        atol=1e-12,
+        btol=1e-12,
+        maxiter=100_000,
+    )
+    if not bool(audit["all_converged"]):
+        raise RuntimeError("Arm-B standalone LSMR recovery did not converge")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_mesh(
+        Mesh(recovered, faces.copy()).ensure_normals(),
+        output_dir / "predicted_refined.obj",
+    )
+    np.save(output_dir / "predicted_vertices.npy", recovered)
+    (output_dir / "solver_audit.json").write_text(
+        json.dumps(audit, indent=2) + "\n", encoding="utf-8"
+    )
+    return audit
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -68,6 +220,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.run_dir.resolve(),
         device,
         view_chunk_size=args.view_chunk_size,
+        checkpoint_name=args.checkpoint_name,
+        expected_checkpoint_sha256=args.expected_checkpoint_sha256,
     )
     output = args.output_dir.resolve() / "ours"
     rows: list[dict[str, Any]] = []
@@ -82,21 +236,37 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         started = time.perf_counter()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
-        values = _infer_one(
+        values = _infer_laplacian_one(
             dataset,
             index,
             model_spec,
             device,
             current_faces=static["faces"],
         )
-        recovery, _ = _recover_raw_one(
-            static,
-            values["prediction_raw"],
-            values["prediction_normalized"],
-            values["confidence"],
-            recovery_dir,
-            model_spec["config"],
+        recovery_config = model_spec["config"].get("recovery", {})
+        formal_all_vertex_recovery = bool(
+            recovery_config.get("laplacian_equations") == "all_vertices"
+            and recovery_config.get("visibility_gate") is False
+            and recovery_config.get("confidence_weighting") is False
+            and recovery_config.get("standalone_implementation")
+            == "scipy_lsmr_augmented_system"
         )
+        if formal_all_vertex_recovery:
+            recovery_audit = _recover_all_vertices_one(
+                static,
+                values["prediction_raw"],
+                recovery_dir,
+                model_spec["config"],
+            )
+        else:
+            recovery_audit, _ = _recover_raw_one(
+                static,
+                values["prediction_raw"],
+                values["prediction_normalized"],
+                values["confidence"],
+                recovery_dir,
+                model_spec["config"],
+            )
         final_mesh = sample_dir / "refined.obj"
         shutil.copy2(recovery_dir / "predicted_refined.obj", final_mesh)
         current_mesh = Mesh(
@@ -131,8 +301,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "method_config_path": str(args.run_dir.resolve() / "run_config.json"),
             "checkpoint": str(model_spec["checkpoint"]),
             "checkpoint_sha256": model_spec["checkpoint_sha256"],
+            "checkpoint_epoch": model_spec["checkpoint_epoch"],
             "checkpoint_optimizer_steps": model_spec["optimizer_steps"],
             "inference_view_chunk_size": model_spec["inference_view_chunk_size"],
+            "formal_all_vertex_recovery": formal_all_vertex_recovery,
+            "recovery_solver_all_converged": bool(
+                recovery_audit.get("all_converged", True)
+            ),
+            "recovery_solver_runtime_seconds": recovery_audit.get(
+                "runtime_seconds"
+            ),
             **source_identity,
             "adapter_initial_mesh_sha256": source_identity["common_initial_mesh_sha256"],
             "adapter_initial_vertex_count": source_identity["initial_vertex_count"],
@@ -175,6 +353,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "completed_samples": len(rows),
         "failed_samples": 0,
         "checkpoint_optimizer_steps": model_spec["optimizer_steps"],
+        "checkpoint_epoch": model_spec["checkpoint_epoch"],
         "csv": str(csv_path),
     }
     (shard_dir / f"metadata_shard_{args.shard_index:03d}.json").write_text(
@@ -192,6 +371,8 @@ def main() -> int:
         help="Optional frozen subset; omit to evaluate the complete test split.",
     )
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--checkpoint-name", default="checkpoint_latest.pt")
+    parser.add_argument("--expected-checkpoint-sha256")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--sample-id")
     parser.add_argument("--shard-index", type=int, required=True)
