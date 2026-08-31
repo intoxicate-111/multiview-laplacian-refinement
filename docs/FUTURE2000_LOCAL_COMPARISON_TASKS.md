@@ -3,22 +3,28 @@
 These scripts run the comparison and reporting pipeline directly on the local
 machine. They contain no Slurm submission commands.
 
-Status update: 2026-08-24 BST. This local launcher is retained for
-reproducibility but is no longer the source of the primary comparison. The
-later seven-Blackwell from-scratch run completed its fixed 200,000-step
-checkpoint, and the same-initial full-1000 Ours/NDS/NDS-28V-full/nvdiffrec/
-ExMesh benchmark completed on the HPC. Ours has aggregate valid-sample Chamfer
-`0.00522955`; invalid external outputs remain explicit. Do not replace that
-frozen benchmark with the incomplete step-64k historical checkpoint or merge
-results from this local workflow into its primary table.
+Status update: 2026-08-31 BST. This local launcher is retained for
+reproducibility but is not the source of the formal comparison. The frozen
+full-1000 report now evaluates the formal mixed-loss current Arm B, the
+archived old-structure predictor and the external methods. Formal Arm B reaches
+Chamfer `0.00476456546`, improves 975/1000 meshes and beats the archived
+predictor on 882/1000 meshes and 185/200 object means. Its valid paired wins
+are 804/998 versus NDS, 829/999 versus nvdiffrec and 974/996 versus ExMesh;
+invalid external outputs remain explicit. Do not replace the
+[formal frozen report](../reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
+with the archived `0.00522955` result, the incomplete step-64k checkpoint or
+outputs from this local workflow.
 
 The older job 15791 and the local workflow remain historical diagnostic paths.
 Their partial outputs must not be merged with the completed full-1000 report.
 
 ## Before running
 
-Wait until the learned-Laplacian and direct-displacement training runs have
-finished, then download only the test data and completed run artifacts:
+The formal Arm-B/external comparison can be reproduced without waiting for the
+pending Future2000 direct-vertex Arm-E job `17800`. A future Arm-E or B+E
+comparison must remain separate until Arm E completes and is selected using
+validation only. To reproduce the existing comparison, download only the test
+data and completed frozen artifacts:
 
 ```bash
 bash scripts/local/sync_future2000_comparison_inputs.sh all
@@ -76,4 +82,7 @@ priors are reused when a local run is resumed.
 
 The final report must distinguish infrastructure/sample failures from valid
 method outputs and include a denominator for every aggregate. A partial shard
-or a run with missing methods must remain explicitly incomplete.
+or a run with missing methods must remain explicitly incomplete. Because the
+evaluator uses equal 3,000-sample forward and reverse sets, Chamfer is exactly
+the bidirectional P2S mean; report P2S p95 as the distinct tail statistic and
+do not count P2S mean as independent evidence.

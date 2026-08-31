@@ -55,38 +55,48 @@ Primary decision metrics:
 
 ## Future2000 GT-adaptive scale-up
 
-The Future2000 training path uses 2,000 objects, five deterministic current-mesh
-variants per object, 28 views, GT-adaptive subdivision and an object-level
-`8000/1000/1000` sample split. The main arm predicts the raw current-graph
-Laplacian; a dependent paired arm predicts direct vertex displacement.
+The Future2000 path uses 2,000 distinct 3D-FUTURE source objects, five frozen
+deterministic current-mesh perturbation variants per object, 28 calibrated
+960-pixel views and an object-level `8000/1000/1000` mesh split. Variants share
+their source object's RGB/camera observations but retain variant-specific
+geometry, connectivity, query graphs and visibility.
 
 Relevant entry points:
 
 - `audit_future2000_gt_adaptive_2000mesh.slurm`: contract and split audit.
-- `train_future2000_gt_adaptive_fast_io.slurm`: four-L40 node-local RGB staging
-  and resumable DDP training.
-- `smoke_future2000_gt_adaptive_2000mesh.slurm`: dependent displacement smoke.
-- `evaluate_future2000_laplacian_vs_displacement_3gpu.slurm`: sharded learned
-  comparison after both models are complete.
+- `train_future2000_current_arm_b_mixed_loss_200k_4blackwell.slurm`: formal
+  current-architecture Arm B with
+  `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`.
+- `smoke_future2000_mixed_eval_blackwell.slurm`: frozen-contract evaluation
+  smoke test.
+- `evaluate_future2000_mixed_vs_old_external_8blackwell.slurm`: full-1000
+  formal/archived/external paired evaluation.
+- `finalize_future2000_mixed_vs_old_external.slurm`: audited report finalizer.
+- `train_future2000_current_arm_e_200k_4blackwell.slurm`: from-scratch
+  direct-vertex Arm-E specialist.
 
-The 200,000-step launch overrides the development budget stored in the JSON
-configuration. Job 15794 reached step 32,000 and then failed because a
-persistent DataLoader worker exhausted the 51,200 file-descriptor limit; the
-remaining ranks later hit the NCCL watchdog. Job 15795 resumes the preserved
-checkpoint with:
+Jobs `15794` and `15795` are retained as infrastructure history: the first
+exhausted file descriptors and the second exhausted `/dev/shm`. Archived job
+`16607` later completed the old-structure checkpoint and reached Chamfer
+`0.00522955` with 959/1000 improvements, but it is not the formal
+current-architecture result.
 
-```text
-workers_per_rank=4
-persistent_workers=false
-multiprocessing_sharing_strategy=file_system
-```
+Formal evaluation jobs `17805`, `17806` and `17807` completed. The
+validation-selected epoch-195 Arm-B checkpoint reaches Chamfer `0.00476457`,
+P2S p95 `0.01462829`, F-score `0.88103565` and 975/1000 improvements. It wins
+882/1000 meshes and 185/200 object means against the archived predictor; the
+object-bootstrap CI excludes zero. External paired wins are 804/998 versus
+NDS, 829/999 versus nvdiffrec and 974/996 versus ExMesh, with invalid outputs
+kept explicit.
 
-These settings preserve parallel image loading while recreating workers at
-epoch boundaries. Job 15795 reached step 64,000, then failed because a worker
-exhausted `/dev/shm`; its checkpoint remains resumable. The paired displacement
-jobs were cancelled, and no final geometry result exists. External-method
-comparison launches are local-only; see
-`docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md`.
+At the 2026-08-31 check, direct-vertex Arm-E job `17800` is pending for
+resources. Do not claim Future2000 Arm-E or B+E results before it completes and
+its checkpoint is selected on validation only. Chamfer equals the
+bidirectional P2S mean in the current evaluator because both directions use
+equal 3,000-sample sets; retain P2S p95 but do not present P2S mean as
+independent evidence. See the
+[formal report](../../reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
+and the [local reproduction guide](../../docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md).
 
 ## Sofa50 direct-raw controlled experiments
 
@@ -130,7 +140,9 @@ integration and disables visibility, confidence, recovery Huber and Adam.
 - Evaluation, merge and matched visualisation remain dependency-gated by the
   corresponding `evaluate_*`, `merge_*` and `render_*` Slurm entry points.
 
-At the 2026-08-24 snapshot, Arm C job `17274` is at step 3,200/20,000 on eight
-RTX PRO 6000 Blackwell GPUs with zero PCG failures and zero NaN/Inf. D `17275`,
-E `17278` and downstream jobs remain dependency-queued. Do not report C/D/E as
-completed or select a representation winner from this snapshot.
+Arms C/D/E and their matched evaluation are complete. Weakening the recovery
+anchor in C/D worsens geometry; direct-vertex E reaches Chamfer `0.00334039`,
+and validation-selected frozen B+E reaches `0.00302983`. The later scalar
+vertex blend reaches `0.00318814`, so it is a strong control but does not
+explain the operator hybrid. Current consolidated results are in the
+[recent Sofa50 report](../../reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/REPORT.md).

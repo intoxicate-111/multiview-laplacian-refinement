@@ -20,6 +20,8 @@ Sofa50 更强 coarse-mesh smoothing：[v2 中文说明](docs/SOFA50_STRONG_SMOOT
 
 Future2000 本地对比任务：[本地任务说明](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 
+Future2000 formal mixed-loss 结果：[完整 2,000-object / 1,000-test-mesh 报告](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
+
 近期 commit 与实验记录：[8 月 4–15 日报告与补充记录](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
 
 View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
@@ -119,7 +121,7 @@ differential correction。无 anchor 的 `V_B_dagger` 存在巨大的低模误�
 
 ## 项目状态
 
-状态日期：2026-08-27 BST。
+状态日期：2026-08-31 BST。
 
 OpenMVS 使用政策：现有 Sofa50 OpenMVS mesh 是低质量外部重建，只保留为
 分布外压力测试；它不是 training target、pseudo-GT、模型选择端点或期望质量
@@ -156,14 +158,13 @@ ceiling。详见 [OpenMVS 输入使用政策](docs/OPENMVS_INPUT_POLICY.zh-CN.md
 | 冻结 B+E hybrid recovery | 已完成；只读 | 使用冻结 B Laplacian、冻结 E positions 作为唯一 anchor，并用 validation 选择 `lambda=3e-2`；test Chamfer 为 `0.00302983`，49/50 inputs 改善。它支持后续联合 hybrid 训练，但本身没有重训，也不授权 scaling。 |
 | End-to-end direct–Laplacian hybrid | 已完成 | 单个 892,678 参数共享模型以 final-hybrid-only supervision 预测 latent raw-Laplacian 与 direct-displacement fields。Matched-v2 test Chamfer 为 `0.00341857`，不及 frozen B+E 的 `0.00302983`；机制审计为 MECH5，不支持“分开训练普遍更优”的泛化结论。 |
 | Matched-v2 continuous pretrained B+E | 已完成；validation 选择 | 两个完整独立 specialist 只通过最终 Hybrid geometry 继续联合训练。Validation 选择 step 9,400；matched-test Chamfer 从 geometry-equivalent step-0 的 `0.00302691` 改善到 `0.00288357`，但 legacy/unseen OOD 仍未成功。 |
-| Old-domain native-1920 Arm B | 训练及获授权 Arm-B-only 对比已完成 | Validation 选择 step 18,600。在完全相同的 25 个 inputs 和统一 evaluator 下，Arm B 的 Chamfer 为 `0.00853433`、25/25 改善；NDS、nvdiffrec、ExMesh 分别为 `0.01120499`、`0.01365466`、`0.02017062`。这次 test opening 不是 sealed B/E/fusion 最终结果。 |
-| Old-domain native-1920 Arm E | 训练中 | 截至本次更新，direct-displacement MSE 已运行到 13,200/20,000 steps，数值健康，validation MSE 在 `3.56e-5` 附近进入平台。Geometry evaluation 与 B+E selection 尚未开启。 |
-| Old-domain native-1920 continuous B+E | 已准备；未提交 | 生成后的配置将以两个完整、validation-selected specialists 初始化，只通过 float64 differentiable solve 后的最终 Hybrid vertex MSE 优化。Arm E、specialist validation selection、frozen-lambda selection 与 step-0 gradient preflight 未全部通过前不能启动。 |
-| Future2000 recovery-only Arm B | 运行中；合同已修正 | 当前 4×Blackwell 训练使用最新 Arm-B 架构和 Future2000 28-view/960 inputs，但唯一优化目标是穿过可微 Laplacian solve 的 recovered-vertex MSE。Raw-Laplacian Huber 只保留为零权重诊断；已取消的双项 loss 作业不计入结果。 |
+| Old-domain native-1920 specialists 与 frozen B+E | 已完成 | Validation-selected Arm B、Arm E、post-hoc scalar blend 与 Frozen B+E 已在完全相同的 25 个 inputs 上评估；Chamfer 分别为 `0.00853777`、`0.00806580`、`0.00756219`、`0.00670460`。Frozen 改善 25/25，并以 22/25、23/25、21/25 分别胜 B、E、scalar blend；Normal 与 same-index vertex RMS 则由 scalar blend 占优，因此保留 metric trade-off。 |
+| Future2000 formal mixed-loss Arm B | 已完成 | 正式 200,000-step checkpoint 保留 `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`。在 200 个 held-out objects × 5 个冻结变体上，Chamfer 从 `0.00776417` 降至 `0.00476457`，975/1000 samples 改善；相对 archived old-structure predictor 的 paired 改善为 `0.000464982`（882/1000 meshes、185/200 object means，object-bootstrap CI 不含零）。 |
+| Future2000 direct-vertex Arm E | HPC 排队中 | From-scratch 200,000-step direct-residual specialist 为 job `17800`；2026-08-31 检查时因 Resources pending。在训练与 validation-only checkpoint selection 完成前，不声明 Arm-E 或 Future2000 B+E 结果。 |
 | GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
-| Future2000 GT-adaptive 扩展 | 200k 训练与 learned-method test 已完成 | 固定 200,000-step checkpoint 已在 200 个 held-out objects × 5 variants 上评估。统一 Chamfer 从 `0.00776417` 降至 `0.00522955`，959/1000 samples 改善；mean normal consistency 从 `0.924252` 降至 `0.895907`，因此明确保留 distance/normal trade-off。 |
+| Future2000 GT-adaptive 扩展 | Formal 200k Arm-B test 已完成 | 数据由 2,000 个不同的 3D-FUTURE source objects 构成，每个对象有 5 个冻结的确定性扰动变体，按对象划分为 `8000/1000/1000`。Formal Arm B 达到 Chamfer `0.00476457`、P2S p95 `0.01462829`、F-score `0.88103565`、975/1000 改善；normal consistency 从 `0.92425235` 降至 `0.90859736`。 |
 | Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |
-| Future2000 外部基线 | Full-1000 对比已完成，invalid metrics 显式保留 | Ours 的 aggregate valid-sample Chamfer 最低（`0.00522955`），改善 959/1000 inputs。Paired Chamfer 胜数为：对 NDS 742/998、对 NDS-28V-full 632/999、对 nvdiffrec 799/999、对 ExMesh 955/996。Input-contract audit 通过；由于 invalid outputs 与 ExMesh topology change 未被修复，strict/full metric completeness 仍为 false。 |
+| Future2000 外部基线 | Full-1000 对比已完成，invalid metrics 显式保留 | Formal Arm B 的 Chamfer 为 `0.00476457`；在 valid paired samples 上，对 NDS、nvdiffrec、ExMesh 分别胜 804/998、829/999、974/996。Input-contract audit 通过；2 个 NDS invalid metrics、1 个 nvdiffrec failure 与 4 个 ExMesh invalid/topology-changing outputs 均显式保留，因此 strict/full metric completeness 仍为 false。 |
 | 自动化测试 | 当前文档改动对应检查通过 | External adapters、same-initial aggregation、raw loss、dynamic expert/gate、image feature、native-1920 和分布式训练相关 targeted tests 通过；下文命令仍是新 checkout 的最终依据。 |
 
 已确定的 representation 主线是在 Sofa50 上建立的 synthetic-current、current-query/
@@ -171,28 +172,30 @@ current-graph、direct-raw formulation。最新受控扩展加入 direct-displac
 两个 latent branches 只通过最终 hybrid geometry 训练。全部 predicted Laplacian rows
 都会被集成；hard visibility、confidence、recovery Huber 和 Adam mesh optimization
 均关闭。Clean geometry 只用于 loss，不会输入任一 branch 或 recovery solve。已完成的
-Future2000 scale-up 使用
-960 high-frequency construction、28 views、C2F2 与固定 200,000-step checkpoint；
-full-1000 same-initial external comparison 现已完成，invalid outputs 显式保留。
+formal Future2000 Arm-B scale-up 使用 960 high-frequency construction、28 views、
+C2F2、既定 mixed objective 与固定 200,000-step checkpoint。Full-1000 same-initial
+comparison 已完成，invalid external outputs 显式保留；direct-vertex Arm E 仍在排队，
+尚无可报告结果。
 
 早期 GT-query、`h^2`-normalized formulation 仍作为历史背景保留。该路径迁移到
 expanded/OpenMVS query graph 后未改善 geometry，因此不再作为下文数学定义的主线。
 此外，由于 initial mesh 质量过差，OpenMVS 明确排除在 target 定义、模型选择与后续
 scale-up 决策之外。
 
-## Loss contract：历史 specialist 与当前 operator-only training
+## Loss contract：formal mixed Arm B 与独立 ablations
 
 多个实验复用相同 Arm-B predictor 和 sparse operator，但 optimisation objective
 并不相同，不能笼统写成同一个“Arm-B loss”。
 
-已完成的 Sofa50 recovery-aware Arm B 使用双项目标：
+已完成的 Sofa50 recovery-aware Arm B 与 formal Future2000 Arm B 使用相同双项目标：
 
 $$
-\mathcal L_{B,\mathrm{historical}}
+\mathcal L_{B,\mathrm{formal}}
 =\mathcal L_{\mathrm{lap}}+10^{-2}\mathcal L_{\mathrm{vertex}}.
 $$
 
-当前 Future2000 recovery-only Arm B 则预测 `delta_hat`，先求解
+其中 `L_lap` 是 raw-Laplacian Huber，`L_vertex` 是通过以下 differentiable solve
+得到的 recovered-vertex MSE：
 
 $$
 (L^\top L+\lambda I)V_B
@@ -200,18 +203,9 @@ $$
 \qquad \lambda=10^{-2},
 $$
 
-唯一 optimisation objective 为：
-
-$$
-\boxed{
-\mathcal L_{B,\mathrm{recovery\ only}}
-=\frac{1}{N}\sum_i\lVert V_{B,i}-V_{\mathrm{clean},i}\rVert_2^2
-}.
-$$
-
-Raw-Laplacian Huber 仍可作为诊断量计算，但其 training weight 严格为零；梯度只能经由
-implicit sparse solve 回到 `delta_hat`。该 Future2000 实验是新的 loss contract，
-不能反向写成已完成历史 Sofa50 Arm-B checkpoint 的 objective。
+Pure recovered-vertex objective 只保留为独立 ablation。它在 matched-v2 上降低
+same-index vertex RMS，却恶化 Chamfer 与 raw EPE，且 frozen E 无法挽救。因此不能把
+它写成 formal Future2000 checkpoint 的 objective。
 
 Arm E 不使用 sparse solve，只训练 direct-displacement MSE。Continuous B+E 使用两个
 完整 specialist，计算
@@ -1062,38 +1056,41 @@ GPU-hours），而 960 为 2 GPUs × 3.98 h（`7.95` GPU-hours）。
 
 ### Future2000 GT-adaptive 扩展实验
 
-扩展实验包含 2,000 个上游 meshes，每个物体生成 5 个确定性 current-mesh
-variants，按物体执行 80/10/10 split（`8000/1000/1000` samples），使用 28 个标定
-views、GT-adaptive subdivision、C2F2、original-plus-HF image features 和
-current-graph direct-raw target。Job 16607 使用全新初始化，在 7 张 NVIDIA RTX PRO
-6000 Blackwell Server Edition 上执行 200,000 个 global optimizer steps，global
-batch 为 7。
+扩展实验包含 2,000 个不同的 3D-FUTURE source objects。每个对象生成 5 个冻结的
+确定性 current-mesh 扰动变体，共 10,000 个 meshes，按对象执行 80/10/10 split
+（`8000/1000/1000`）。同一对象的 5 个变体共享相同的 28 个标定 960-pixel RGB
+observations，但 current vertices、connectivity、query graph 与 visibility 均按变体
+重新确定。
 
-| Step | Rolling train loss | Validation loss |
-|---:|---:|---:|
-| 20,000 | 5.30099e-6 | 4.99851e-6 |
-| 30,000 | 4.82400e-6 | **4.19731e-6** |
-| 40,000 | 4.62000e-6 | **3.88000e-6** |
-| 50,000 | 4.26000e-6 | 4.23000e-6 |
-| 60,000 | 4.19000e-6 | 5.27000e-6 |
-| 64,000 | **3.99000e-6** | — |
-| 132,000 | 2.10e-6 | — |
-| 188,000 | **1.72e-6** | 最近完成的 step 182,880 附近为 2.87e-6 |
+归档 job `16607` 给出 old-structure full-scale 结果（Chamfer `0.00522955`，
+959/1000 改善）。它与失败的 jobs `15794`、`15795` 一起保留为基础设施历史，但不再
+代表 formal current-architecture 结果。Formal Arm B 保留既定 mixed objective
+`L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`，使用 validation-selected
+epoch-195 checkpoint（SHA-256
+`fa934cd44c4009dd392c415fe2c5f731c8cf1b78cda6a31fab199d4c15510b82`）。
 
-历史 job 15794 在 32,000 step 因文件描述符耗尽停止。替代 job 15795 使用
-`file_system` sharing strategy 和 non-persistent workers 恢复，到 step 64,000 后因
-DataLoader worker 耗尽 `/dev/shm` 失败（`Bus error` / `No space left on device`）。
-这些 run 只保留为基础设施历史。Job 16607 不复用上述 checkpoint：RGB 被 stage 到
-node-local storage，workers 关闭，overwrite/resume guards 强制执行 from-scratch
-contract。该 job 已完成固定 200,000-step checkpoint。完整 1,000-sample learned-
-method evaluation 将 unified Chamfer 从 `0.00776417` 降至 `0.00522955`，959/1000
-samples 改善。
+| Full 1,000-mesh test system | Chamfer ↓ | P2S p95 ↓ | F-score ↑ | Normal ↑ | 改善数 |
+|---|---:|---:|---:|---:|---:|
+| Initial mesh | 0.00776417127 | — | — | 0.924252350 | — |
+| Archived old-structure Ours | 0.00522954770 | — | — | 0.895907 | 959/1000 |
+| **Formal mixed-loss Arm B** | **0.00476456546** | **0.0146282911** | **0.881035649** | **0.908597358** | **975/1000** |
 
-Same-initial external comparison 也已完成。Ours 的 aggregate valid-sample Chamfer
-最低；paired 胜数为：对 NDS 742/998、对 NDS-28V-full 632/999、对 nvdiffrec
-799/999、对 ExMesh 955/996。Input contract 通过，但 strict/full metric completeness
-仍为 false：invalid method outputs 与 ExMesh connectivity change 显式保留，未被修复
-或静默填补。
+Formal Arm B 相对 initial mesh 将 Chamfer 降低 `38.63%`，相对 archived predictor
+再降低 `8.89%`。Formal-minus-archived paired difference 为 `-0.000464982242`；
+formal 在 882/1000 meshes 与 185/200 object means 上获胜，10,000 次 object
+bootstrap CI 为 `[-0.000580558,-0.000314545]`。Normal 仍低于 initial mesh，因此
+distance/normal trade-off 被明确保留。
+
+对 external methods，formal Arm B 在 valid pairs 上分别以 804/998、829/999、
+974/996 胜 NDS、nvdiffrec、ExMesh。2 个 NDS metrics invalid、1 个 nvdiffrec sample
+failed、4 个 ExMesh 结果 invalid 或改变 topology，均显式保留。由于 evaluator 的正反
+方向各使用相同数量的 3,000 个 samples，Chamfer 与 bidirectional P2S mean 定义上完全
+相同，不能把重复的 P2S mean 当作独立证据；P2S p95 仍是不同统计量。
+
+截至 2026-08-31，direct-vertex Arm-E 200,000-step job `17800` 因 HPC Resources
+pending；尚不声明 Future2000 Arm-E 或 B+E metric。冻结合同、paired samples、invalid
+output audit 与 provenance 见
+[formal Future2000 report](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)。
 
 ### Sofa50 同初始网格外部对比
 
@@ -1105,8 +1102,8 @@ common evaluator 使用。四种方法均完成 `25/25`，input identity audit �
 同时出现 `0.00391323` 和 `0.01707047` 两个分数，该表因此失效。修正报告对 common
 initial 与全部 final mesh 使用同一个 deterministic 3,000-surface-point evaluator
 （seed 7）重算；native 数值仅保留为 provenance，`contract_audit=true`。详见双语
-[事故报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md)。生成的最终报告
-保留在被忽略的本地 `reports/` 目录中，不随源码仓库分发。
+[事故报告](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.zh-CN.md)，以及已跟踪的
+[近期 Sofa50 汇总报告](reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/REPORT.md)。
 
 | 方法 | Unified final Chamfer ↓ | Improvement | 改善数 | Normal ↑ |
 |---|---:|---:|---:|---:|

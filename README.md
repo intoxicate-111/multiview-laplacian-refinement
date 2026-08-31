@@ -20,6 +20,8 @@ Sofa50 stronger coarse-mesh smoothing: [v2 contract](docs/SOFA50_STRONG_SMOOTHIN
 
 Future2000 local comparisons: [Local task guide](docs/FUTURE2000_LOCAL_COMPARISON_TASKS.md)
 
+Future2000 formal mixed-loss result: [Full 2,000-object / 1,000-test-mesh report](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
+
 Recent commit and experiment record: [4–15 August report and addendum](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
 
 View-count and query-resolution results: [Ablation report](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
@@ -131,7 +133,7 @@ and the
 
 ## Project status
 
-Status date: 2026-08-27 BST.
+Status date: 2026-08-31 BST.
 
 OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
 reconstructions and are retained only as out-of-distribution stress tests.
@@ -169,14 +171,13 @@ desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLIC
 | Frozen B+E hybrid recovery | Complete; read-only | With frozen B Laplacians, frozen E positions as the sole anchor and validation-selected `lambda=3e-2`, test Chamfer is `0.00302983` and 49/50 inputs improve. This motivates joint hybrid training but does not itself retrain or authorise scaling. |
 | End-to-end direct–Laplacian hybrid | Complete | One 892,678-parameter shared model predicts latent raw-Laplacian and direct-displacement fields with final-hybrid-only supervision. Its matched-v2 test Chamfer is `0.00341857`, behind frozen B+E at `0.00302983`; the mechanism audit is MECH5 and does not support a universal separate-training claim. |
 | Continuous pretrained B+E on matched v2 | Complete; validation selected | Two complete independent specialists are continued jointly with final-hybrid-only supervision. Validation selected step 9,400; matched-test Chamfer improves from the geometry-equivalent step-0 `0.00302691` to `0.00288357`, while legacy/unseen OOD remain unsuccessful. |
-| Old-domain native-1920 Arm B | Training and authorised Arm-B-only comparison complete | Validation selected step 18,600. On the exact common 25-sample input and unified evaluator, Arm B reaches Chamfer `0.00853433` and improves 25/25, versus NDS `0.01120499`, nvdiffrec `0.01365466` and ExMesh `0.02017062`. This test opening is not the sealed final B/E/fusion result. |
-| Old-domain native-1920 Arm E | Training running | The direct-displacement MSE run is numerically healthy at 13,200/20,000 steps as of this update; validation MSE is plateauing near `3.56e-5`. Geometry evaluation and B+E selection remain unopened. |
-| Old-domain native-1920 continuous B+E | Staged; not submitted | The generated configuration will initialise two complete validation-selected specialists and optimise only final Hybrid vertex MSE through a float64 differentiable solve. It cannot launch until Arm E, specialist validation selection, frozen-lambda selection and step-0 gradient preflight pass. |
-| Future2000 recovery-only Arm B | Running; corrected contract | The current 4-Blackwell run uses the latest Arm-B architecture and Future2000 28-view/960 inputs, but its only optimisation objective is recovered-vertex MSE through the differentiable Laplacian solve. Raw-Laplacian Huber is retained only as a zero-weight diagnostic. The superseded two-term job was cancelled and is excluded from results. |
+| Old-domain native-1920 specialists and frozen B+E | Complete | Validation-selected Arm B, Arm E, a post-hoc scalar blend and Frozen B+E were evaluated on the exact common 25-sample input. Their Chamfers are `0.00853777`, `0.00806580`, `0.00756219` and `0.00670460`; Frozen improves all 25 meshes and wins 22/25 versus B, 23/25 versus E and 21/25 versus the scalar blend. Normal and same-index vertex RMS favour the scalar blend, so the metric trade-off remains explicit. |
+| Future2000 formal mixed-loss Arm B | Complete | The formal 200,000-step checkpoint retains `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`. On 200 held-out objects × 5 frozen variants, Chamfer falls from `0.00776417` to `0.00476457`, 975/1000 samples improve, and the paired improvement over the archived old-structure predictor is `0.000464982` (882/1000 meshes; 185/200 object means; object-bootstrap CI excludes zero). |
+| Future2000 direct-vertex Arm E | Queued on HPC | The from-scratch 200,000-step direct-residual specialist is job `17800`; at the 2026-08-31 check it is pending for resources. No Arm-E or Future2000 B+E result is claimed before that run and its validation-only checkpoint selection are complete. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
-| Future2000 GT-adaptive scale-up | 200k training and learned-method test complete | The fixed 200,000-step checkpoint was evaluated on 200 held-out objects × 5 variants. Unified Chamfer changes from `0.00776417` to `0.00522955`, with 959/1000 improved samples; mean normal consistency decreases from `0.924252` to `0.895907`, so the distance/normal trade-off remains explicit. |
+| Future2000 GT-adaptive scale-up | Formal 200k Arm-B test complete | The dataset contains 2,000 distinct 3D-FUTURE source objects, each with five frozen deterministic perturbation variants (`8000/1000/1000` by object split). Formal Arm B reaches Chamfer `0.00476457`, P2S p95 `0.01462829`, F-score `0.88103565` and 975/1000 improvements; normal consistency decreases from `0.92425235` to `0.90859736`. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
-| Future2000 external baselines | Full-1000 comparison complete with explicit invalid metrics | Ours has the lowest aggregate valid-sample Chamfer (`0.00522955`) and improves 959/1000 inputs. Paired Chamfer wins are 742/998 vs NDS, 632/999 vs NDS-28V-full, 799/999 vs nvdiffrec and 955/996 vs ExMesh. Input-contract audit passes; strict/full metric completeness remains false because invalid outputs and ExMesh topology changes are preserved rather than repaired. |
+| Future2000 external baselines | Full-1000 comparison complete with explicit invalid metrics | Formal Arm B has Chamfer `0.00476457`. On valid paired samples it wins 804/998 versus NDS, 829/999 versus nvdiffrec and 974/996 versus ExMesh. The input-contract audit passes; strict/full metric completeness remains false because 2 NDS invalid metrics, 1 nvdiffrec failure and 4 ExMesh invalid/topology-changing outputs are preserved rather than repaired. |
 | Automated tests | Passing for the documented changes | Targeted external-adapter, same-initial aggregation, raw-loss, dynamic-expert/gate, image-feature, native-1920 and distributed-training tests pass; the verification commands below remain the source of truth for a fresh checkout. |
 
 The established representation is the synthetic-current, current-query/current-
@@ -185,10 +186,11 @@ direct-displacement head and trains both latent branches only through the final
 hybrid geometry. Every predicted Laplacian row is integrated; hard visibility,
 confidence, recovery Huber and Adam mesh optimisation are disabled. Clean
 geometry is loss-only and is never passed to either branch or the solve. The
-completed Future2000
-scale-up uses the 960 high-frequency construction, 28 views, C2F2 and a fixed
-200,000-step checkpoint; its full-1000 same-initial external comparison is now
-complete, with invalid method outputs retained explicitly.
+completed formal Future2000 Arm-B scale-up uses the 960 high-frequency
+construction, 28 views, C2F2, the established mixed objective and a fixed
+200,000-step checkpoint. Its full-1000 same-initial comparison is complete,
+with invalid external outputs retained explicitly; direct-vertex Arm E remains
+queued and has no reported result.
 
 The earlier GT-query, `h^2`-normalised formulation remains useful historical
 context. Its transfer to expanded and OpenMVS query graphs did not improve
@@ -197,21 +199,22 @@ OpenMVS is additionally excluded from the target definition and from future
 model-selection or scaling decisions because its initial mesh quality is too
 poor for that role.
 
-## Loss contracts: historical specialists and current operator-only training
+## Loss contracts: formal mixed Arm B and separate ablations
 
 Several experiments use the same Arm-B predictor and sparse operator but do
 not use the same optimisation objective. They must not be grouped under one
 ambiguous “Arm-B loss” label.
 
-The completed recovery-aware Sofa50 Arm B used a two-term objective:
+The completed recovery-aware Sofa50 Arm B and the formal Future2000 Arm B use
+the same two-term objective:
 
 $$
-\mathcal L_{B,\mathrm{historical}}
+\mathcal L_{B,\mathrm{formal}}
 =\mathcal L_{\mathrm{lap}}+10^{-2}\mathcal L_{\mathrm{vertex}}.
 $$
 
-The current Future2000 recovery-only Arm B instead predicts
-`delta_hat`, solves
+Here `L_lap` is raw-Laplacian Huber and `L_vertex` is recovered-vertex MSE
+through the differentiable solve
 
 $$
 (L^\top L+\lambda I)V_B
@@ -219,19 +222,10 @@ $$
 \qquad \lambda=10^{-2},
 $$
 
-and optimises only
-
-$$
-\boxed{
-\mathcal L_{B,\mathrm{recovery\ only}}
-=\frac{1}{N}\sum_i\lVert V_{B,i}-V_{\mathrm{clean},i}\rVert_2^2
-}.
-$$
-
-Its raw-Laplacian Huber value is computed for diagnostics with exact training
-weight zero. Gradients reach `delta_hat` only through the implicit sparse
-solve. This recovery-only Future2000 run is a new loss contract; it must not be
-described as the objective of the completed historical Sofa50 Arm-B checkpoint.
+The pure recovered-vertex objective is retained only as a separate ablation.
+On matched-v2 it lowers same-index vertex RMS but worsens Chamfer and raw EPE,
+and frozen E does not rescue it. It must not be described as the objective of
+the formal Future2000 checkpoint.
 
 Arm E has no sparse solve and uses direct-displacement MSE. Continuous B+E
 uses both complete specialists, forms
@@ -1147,42 +1141,46 @@ GPU-hours) for 960.
 
 ### Future2000 GT-adaptive scale-up
 
-The scale-up uses 2,000 upstream meshes, five deterministic current-mesh
-variants per object, an object-level 80/10/10 split (`8000/1000/1000` samples),
-28 calibrated views, GT-adaptive subdivision, C2F2, original-plus-HF image
-features and the current-graph direct-raw target. Job 16607 starts from a fresh
-initialization and runs 200,000 global optimiser steps on seven NVIDIA RTX PRO
-6000 Blackwell Server Edition GPUs with global batch 7.
+The scale-up contains 2,000 distinct 3D-FUTURE source objects. Each object has
+five frozen deterministic current-mesh perturbation variants, giving 10,000
+meshes and an object-level 80/10/10 split (`8000/1000/1000`). All variants use
+the same 28 calibrated 960-pixel observations for their source object, while
+their current vertices, connectivity, query graph and visibility are variant
+specific.
 
-| Step | Rolling train loss | Validation loss |
-|---:|---:|---:|
-| 20,000 | 5.30099e-6 | 4.99851e-6 |
-| 30,000 | 4.82400e-6 | **4.19731e-6** |
-| 40,000 | 4.62000e-6 | **3.88000e-6** |
-| 50,000 | 4.26000e-6 | 4.23000e-6 |
-| 60,000 | 4.19000e-6 | 5.27000e-6 |
-| 64,000 | **3.99000e-6** | — |
-| 132,000 | 2.10e-6 | — |
-| 188,000 | **1.72e-6** | 2.87e-6 at the latest completed validation near step 182,880 |
+The archived job `16607` established the old-structure full-scale result
+(`0.00522955` Chamfer, 959/1000 improved). It remains useful infrastructure
+history, alongside failed jobs `15794` and `15795`, but it is not the formal
+current-architecture result. The formal Arm B retains the established mixed
+objective `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex` and uses the
+validation-selected epoch-195 checkpoint (SHA-256
+`fa934cd44c4009dd392c415fe2c5f731c8cf1b78cda6a31fab199d4c15510b82`).
 
-Historical job 15794 stopped at step 32,000 after a DataLoader worker exhausted 51,200
-file descriptors; the other DDP ranks then reached the 30-minute NCCL watchdog
-timeout. Replacement job 15795 resumed the intact checkpoint with PyTorch's
-`file_system` sharing strategy and non-persistent workers, reached step 64,000,
-then failed when a DataLoader worker exhausted `/dev/shm` (`Bus error` and `No
-space left on device`). These runs are retained as infrastructure history only.
-Job 16607 does not reuse either checkpoint: RGB files are staged to node-local
-storage, workers are disabled, and overwrite/resume guards enforce the
-from-scratch contract. It completed the fixed 200,000-step checkpoint. The
-full 1,000-sample learned-method evaluation changes unified Chamfer from
-`0.00776417` to `0.00522955`, with 959/1000 samples improved.
+| Full 1,000-mesh test system | Chamfer ↓ | P2S p95 ↓ | F-score ↑ | Normal ↑ | Improved |
+|---|---:|---:|---:|---:|---:|
+| Initial mesh | 0.00776417127 | — | — | 0.924252350 | — |
+| Archived old-structure Ours | 0.00522954770 | — | — | 0.895907 | 959/1000 |
+| **Formal mixed-loss Arm B** | **0.00476456546** | **0.0146282911** | **0.881035649** | **0.908597358** | **975/1000** |
 
-The same-initial external comparison is also complete. Ours has the lowest
-aggregate valid-sample Chamfer; paired wins are 742/998 against NDS, 632/999
-against NDS-28V-full, 799/999 against nvdiffrec and 955/996 against ExMesh.
-The input contract passes, while strict/full metric completeness stays false:
-invalid method outputs and ExMesh connectivity changes remain explicit and are
-not repaired or silently imputed.
+Formal Arm B lowers Chamfer by `38.63%` from the initial mesh and by `8.89%`
+relative to the archived predictor. The paired formal-minus-archived
+difference is `-0.000464982242`; formal wins 882/1000 meshes and 185/200 object
+means, with the 10,000-resample object bootstrap CI
+`[-0.000580558,-0.000314545]`. The normal score remains below the initial
+mesh, so the distance/normal trade-off is reported rather than hidden.
+
+Against external methods, formal Arm B wins 804/998 valid pairs versus NDS,
+829/999 versus nvdiffrec and 974/996 versus ExMesh. Two NDS metrics are
+invalid, one nvdiffrec sample failed, and four ExMesh results have invalid
+metrics or changed topology; these are retained explicitly. Chamfer is exactly
+the bidirectional point-to-surface mean in this evaluator because the forward
+and reverse directions use equal 3,000-sample sets, so a duplicate P2S-mean
+column is not treated as independent evidence. P2S p95 remains distinct.
+
+The direct-vertex Arm-E 200,000-step job `17800` is pending for HPC resources
+as of 2026-08-31; no Future2000 Arm-E or B+E metric is yet claimed. See the
+[formal Future2000 report](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
+for the frozen contract, paired samples, invalid-output audit and provenance.
 
 ### Sofa50 same-initial external comparison
 
@@ -1197,8 +1195,9 @@ shared initial mesh consequently appeared as both `0.00391323` and
 common initial and every final mesh using one deterministic 3,000-surface-point
 evaluator (seed 7). Native numbers are provenance-only and
 `contract_audit=true`. See the bilingual [incident report](docs/CHAMFER_EVALUATION_INCIDENT_2026-08-21.md)
-for the corrected protocol. The generated final report remains a local artifact
-under the ignored `reports/` tree and is not distributed with the source repository.
+for the corrected protocol and the tracked
+[recent consolidated Sofa50 report](reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/REPORT.md)
+for the current old-domain specialists, scalar control and Frozen B+E result.
 
 | Method | Unified final Chamfer ↓ | Improvement | Improved | Normal ↑ |
 |---|---:|---:|---:|---:|
