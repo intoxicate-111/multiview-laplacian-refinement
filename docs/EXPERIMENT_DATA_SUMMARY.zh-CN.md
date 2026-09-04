@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-09-04 08:14 BST，Europe/London。
+状态日期：2026-09-04 09:18 BST，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -364,7 +364,7 @@ CD separation（`-0.00001703`，mesh/object CI 均跨零）。Sparse positional 
 
 ## Future2000 GT-adaptive 扩展实验
 
-状态更新：2026-09-04 08:14 BST。数据集包含 2,000 个不同的 3D-FUTURE source objects，
+状态更新：2026-09-04 09:18 BST。数据集包含 2,000 个不同的 3D-FUTURE source objects，
 每个对象有 5 个冻结的确定性 current-mesh 扰动变体。Object-level split 为 8,000
 train、1,000 validation、1,000 test meshes。同一对象的变体共享其 28 个标定
 960-pixel RGB observations，但 current geometry、connectivity、query graph 与
@@ -484,7 +484,7 @@ mesh 统一重算。Native metrics 只作 provenance。详见双语
 | 17805/17806/17807 | Future2000 formal smoke/evaluation/finalizer | 已完成 | Mixed-loss Arm-B full-1000 audit 完成；Chamfer `0.00476457`，975/1000 改善。 |
 | 17800/17883 | 已替代的 Future2000 Arm-E launches | 已取消/替代 | 未启动的 4-GPU job 被 2-GPU global-batch-8 run 替代，后者再于 epoch boundary 恢复；两者都不是最终完成 allocation。 |
 | 17888 | Future2000 direct-vertex Arm E，200k | 已完成 | 4×Blackwell epoch-boundary resume 保持 global batch 8；2026-09-04 以 `0:0` 完成，elapsed `2-16:05:51`；validation 选择 epoch 160。 |
-| 18673/18677/18678/18679 | Future2000 frozen B+E validation/锁参/test/report | 2026-09-04 08:14 运行中/依赖门控 | 快照时 `18673` 的 8 个 validation shards 中 3 个运行、5 个等待资源；test `18678` 必须等待 `18677` 锁参成功，report `18679` 必须等待 test 成功。 |
+| 18673/18677/18678/18679 | Future2000 frozen B+E validation/锁参/test/report | 2026-09-04 09:18 运行中/依赖门控 | `18673` 保留 8 个确定性 validation shards，但设置 `ArrayTaskThrottle=4`；快照时 4 个运行、4 个等待。依赖 test `18678` 使用相同 4-GPU 上限，必须等待 `18677` 锁参成功；report `18679` 必须等待 test 成功。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 

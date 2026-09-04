@@ -2,12 +2,13 @@
 
 Report date: **2026-08-31**.
 
-Status addendum, **2026-09-04 08:14 BST**: the replacement Arm-E training job
+Status addendum, **2026-09-04 09:18 BST**: the replacement Arm-E training job
 `17888` completed all 200,000 steps with exit `0:0`; validation selected epoch
 160 and checkpoint SHA-256
 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`.
 Frozen B+E validation array `18673` is now running, followed by dependency-gated
 lambda lock `18677`, sealed test `18678` and comprehensive report `18679`.
+Both GPU arrays are capped at four concurrent one-GPU tasks.
 No Arm-E/B+E test metric is claimed in this historical Arm-B report; the
 original 2026-08-31 snapshot text below is retained as execution provenance.
 

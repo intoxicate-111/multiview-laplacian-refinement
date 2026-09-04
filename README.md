@@ -144,7 +144,7 @@ and the
 
 ## Project status
 
-Status date: 2026-09-04 08:14 BST.
+Status date: 2026-09-04 09:18 BST.
 
 OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
 reconstructions and are retained only as out-of-distribution stress tests.
@@ -188,7 +188,7 @@ desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLIC
 | Old-domain native-1920 specialists and frozen B+E | Complete | Validation-selected Arm B, Arm E, a post-hoc scalar blend and Frozen B+E were evaluated on the exact common 25-sample input. Their Chamfers are `0.00853777`, `0.00806580`, `0.00756219` and `0.00670460`; Frozen improves all 25 meshes and wins 22/25 versus B, 23/25 versus E and 21/25 versus the scalar blend. Normal and same-index vertex RMS favour the scalar blend, so the metric trade-off remains explicit. |
 | Future2000 formal mixed-loss Arm B | Complete | The formal 200,000-step checkpoint retains `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`. On 200 held-out objects × 5 frozen variants, Chamfer falls from `0.00776417` to `0.00476457`, 975/1000 samples improve, and the paired improvement over the archived old-structure predictor is `0.000464982` (882/1000 meshes; 185/200 object means; object-bootstrap CI excludes zero). |
 | Future2000 direct-vertex Arm E | Complete | Job `17888` completed 200,000 steps on 2026-09-04 (`0:0`, elapsed `2-16:05:51`). The validation-selected epoch-160 checkpoint SHA-256 is `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`. Test metrics remain sealed until fusion lambda is locked. |
-| Future2000 frozen B+E comparison | Validation running; test dependency-gated | Validation array `18673` is sweeping the declared lambda grid on all 1,000 validation variants. Job `18677` will lock mean-CD lambda, test array `18678` will then evaluate Arm-E/B+E once, and report job `18679` will compare against Arm-B, old structure, NDS, nvdiffrec and ExMesh. No Future2000 Arm-E/B+E test metric is yet claimed. |
+| Future2000 frozen B+E comparison | Validation running; test dependency-gated | Validation array `18673` is sweeping the declared lambda grid on all 1,000 validation variants using eight deterministic shards capped at four concurrent one-GPU tasks. Job `18677` will lock mean-CD lambda, test array `18678` has the same four-GPU cap and will then evaluate Arm-E/B+E once, and report job `18679` will compare against Arm-B, old structure, NDS, nvdiffrec and ExMesh. No Future2000 Arm-E/B+E test metric is yet claimed. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
 | Future2000 GT-adaptive scale-up | Formal 200k Arm-B test complete | The dataset contains 2,000 distinct 3D-FUTURE source objects, each with five frozen deterministic perturbation variants (`8000/1000/1000` by object split). Formal Arm B reaches Chamfer `0.00476457`, P2S p95 `0.01462829`, F-score `0.88103565` and 975/1000 improvements; normal consistency decreases from `0.92425235` to `0.90859736`. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |

@@ -130,7 +130,7 @@ differential correction。无 anchor 的 `V_B_dagger` 存在巨大的低模误�
 
 ## 项目状态
 
-状态日期：2026-09-04 08:14 BST。
+状态日期：2026-09-04 09:18 BST。
 
 OpenMVS 使用政策：现有 Sofa50 OpenMVS mesh 是低质量外部重建，只保留为
 分布外压力测试；它不是 training target、pseudo-GT、模型选择端点或期望质量
@@ -173,7 +173,7 @@ ceiling。详见 [OpenMVS 输入使用政策](docs/OPENMVS_INPUT_POLICY.zh-CN.md
 | Old-domain native-1920 specialists 与 frozen B+E | 已完成 | Validation-selected Arm B、Arm E、post-hoc scalar blend 与 Frozen B+E 已在完全相同的 25 个 inputs 上评估；Chamfer 分别为 `0.00853777`、`0.00806580`、`0.00756219`、`0.00670460`。Frozen 改善 25/25，并以 22/25、23/25、21/25 分别胜 B、E、scalar blend；Normal 与 same-index vertex RMS 则由 scalar blend 占优，因此保留 metric trade-off。 |
 | Future2000 formal mixed-loss Arm B | 已完成 | 正式 200,000-step checkpoint 保留 `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`。在 200 个 held-out objects × 5 个冻结变体上，Chamfer 从 `0.00776417` 降至 `0.00476457`，975/1000 samples 改善；相对 archived old-structure predictor 的 paired 改善为 `0.000464982`（882/1000 meshes、185/200 object means，object-bootstrap CI 不含零）。 |
 | Future2000 direct-vertex Arm E | 已完成 | Job `17888` 于 2026-09-04 完成 200,000 steps（`0:0`，elapsed `2-16:05:51`）。Validation-selected epoch-160 checkpoint SHA-256 为 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`；fusion lambda 锁定前 test metrics 仍保持封存。 |
-| Future2000 frozen B+E 对比 | Validation 运行中；test 由依赖门控 | Validation array `18673` 正在全部 1,000 validation variants 上扫描预声明 lambda grid；`18677` 将按 mean CD 锁参，`18678` 随后一次性评估 Arm-E/B+E test，`18679` 再与 Arm-B、old structure、NDS、nvdiffrec、ExMesh 生成综合报告。目前不声明 Future2000 Arm-E/B+E test metric。 |
+| Future2000 frozen B+E 对比 | Validation 运行中；test 由依赖门控 | Validation array `18673` 使用 8 个确定性 shards 扫描全部 1,000 validation variants，但最多只并发 4 个单 GPU tasks；`18677` 将按 mean CD 锁参，采用相同 4-GPU 上限的 `18678` 随后一次性评估 Arm-E/B+E test，`18679` 再与 Arm-B、old structure、NDS、nvdiffrec、ExMesh 生成综合报告。目前不声明 Future2000 Arm-E/B+E test metric。 |
 | GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
 | Future2000 GT-adaptive 扩展 | Formal 200k Arm-B test 已完成 | 数据由 2,000 个不同的 3D-FUTURE source objects 构成，每个对象有 5 个冻结的确定性扰动变体，按对象划分为 `8000/1000/1000`。Formal Arm B 达到 Chamfer `0.00476457`、P2S p95 `0.01462829`、F-score `0.88103565`、975/1000 改善；normal consistency 从 `0.92425235` 降至 `0.90859736`。 |
 | Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |

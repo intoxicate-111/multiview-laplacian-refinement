@@ -112,9 +112,11 @@ epoch 160 (checkpoint SHA-256
 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`).
 
 The frozen B+E comparison is dependency-gated as `18673` validation sweep →
-`18677` lambda lock → `18678` test → `18679` report. At the 2026-09-04 08:14
-snapshot, three validation shards are running and five are waiting for gpu-04
-resources; test has not been opened. Do not claim Future2000 Arm-E or B+E test
+`18677` lambda lock → `18678` test → `18679` report. Both GPU arrays retain
+eight deterministic shards but use `ArrayTaskThrottle=4`, so the chain consumes
+at most four GPUs concurrently. At the 2026-09-04 09:18 snapshot, four
+validation shards are running and four are waiting; test has not been opened.
+Do not claim Future2000 Arm-E or B+E test
 results before the chain completes. Chamfer equals the
 bidirectional P2S mean in the current evaluator because both directions use
 equal 3,000-sample sets; retain P2S p95 but do not present P2S mean as

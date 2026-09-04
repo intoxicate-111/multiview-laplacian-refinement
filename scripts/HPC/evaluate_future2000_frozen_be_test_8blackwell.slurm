@@ -8,7 +8,8 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=0-06:00:00
-#SBATCH --array=0-7%8
+#SBATCH --array=0-7%4
+# Eight deterministic shards; at most four one-GPU tasks run concurrently.
 #SBATCH --output=/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/slurm_logs/%x_%A_%a.out
 #SBATCH --error=/networkhome/WMGDS/zhou_c/multiview-laplacian-refinement/slurm_logs/%x_%A_%a.err
 

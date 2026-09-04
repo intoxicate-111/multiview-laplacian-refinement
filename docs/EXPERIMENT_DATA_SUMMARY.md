@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-09-04 08:14 BST, Europe/London.
+Status date: 2026-09-04 09:18 BST, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -403,7 +403,7 @@ operator composition.
 
 ## Future2000 GT-adaptive scale-up
 
-Status updated 2026-09-04 08:14 BST. The dataset contains 2,000 distinct 3D-FUTURE
+Status updated 2026-09-04 09:18 BST. The dataset contains 2,000 distinct 3D-FUTURE
 source objects and five frozen deterministic current-mesh perturbation variants
 per object. Object-level splits contain 8,000 train, 1,000 validation and 1,000
 test meshes. Each object's variants share its 28 calibrated 960-pixel RGB
@@ -531,7 +531,7 @@ directly with the canonical Sofa50 results.
 | 17805/17806/17807 | Future2000 formal smoke/evaluation/finalizer | Completed | Mixed-loss Arm-B full-1000 audit complete; Chamfer `0.00476457`, 975/1000 improved. |
 | 17800/17883 | Superseded Future2000 Arm-E launches | Cancelled/superseded | The never-started 4-GPU job was replaced by a 2-GPU global-batch-8 run, which was later resumed at an epoch boundary. Neither ID is the final completed allocation. |
 | 17888 | Future2000 direct-vertex Arm E, 200k | Completed | Four-Blackwell epoch-boundary resume preserving global batch 8; completed `0:0` on 2026-09-04 after `2-16:05:51`; validation selected epoch 160. |
-| 18673/18677/18678/18679 | Future2000 frozen B+E validation/lock/test/report | Running/dependency-gated at 2026-09-04 08:14 | `18673` is the 8-shard validation sweep (3 running, 5 resource-pending at snapshot); test `18678` cannot start before validation lock `18677`, and report `18679` requires successful test completion. |
+| 18673/18677/18678/18679 | Future2000 frozen B+E validation/lock/test/report | Running/dependency-gated at 2026-09-04 09:18 | `18673` uses eight deterministic validation shards with `ArrayTaskThrottle=4` (4 running, 4 waiting at snapshot); dependent test `18678` has the same four-GPU cap, cannot start before lock job `18677`, and report `18679` requires successful test completion. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model
