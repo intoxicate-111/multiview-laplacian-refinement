@@ -14,6 +14,7 @@ from mlr.learned_laplacian.controlled_displacement import (
     recover_direct_displacement,
 )
 from mlr.learned_laplacian.multi_trainer import (
+    _area_weighted_oriented_face_normal_loss,
     _direct_vertex_residual_mse,
     _prepare_object_static,
     train_multi_object,
@@ -98,6 +99,34 @@ def test_direct_vertex_loss_matches_sum_of_xyz_squared_error() -> None:
         _direct_vertex_residual_mse(prediction, target),
         torch.tensor((14.0 + 5.0) / 2.0),
     )
+
+
+def test_oriented_face_normal_loss_is_area_weighted_and_differentiable() -> None:
+    clean = torch.tensor(
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        dtype=torch.float64,
+    )
+    faces = torch.tensor([[0, 1, 2]], dtype=torch.long)
+    identical = clean.clone().requires_grad_(True)
+    identical_loss = _area_weighted_oriented_face_normal_loss(
+        identical, clean, faces
+    )
+    assert float(identical_loss) == pytest.approx(0.0, abs=1e-10)
+
+    perturbed = clean.clone()
+    perturbed[2, 2] = 0.75
+    perturbed.requires_grad_(True)
+    loss = _area_weighted_oriented_face_normal_loss(perturbed, clean, faces)
+    loss.backward()
+    assert 0.0 < float(loss) < 2.0
+    assert perturbed.grad is not None
+    assert bool(torch.isfinite(perturbed.grad).all())
+    assert float(torch.linalg.vector_norm(perturbed.grad)) > 0.0
+
+    flipped = clean[[0, 2, 1]].clone()
+    assert float(
+        _area_weighted_oriented_face_normal_loss(flipped, clean, faces)
+    ) == pytest.approx(2.0, abs=1e-10)
 
 
 def test_preparation_uses_displacement_label_without_gt_model_input() -> None:

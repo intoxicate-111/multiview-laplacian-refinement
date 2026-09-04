@@ -74,6 +74,20 @@ Relevant entry points:
 - `finalize_future2000_mixed_vs_old_external.slurm`: audited report finalizer.
 - `train_future2000_current_arm_e_200k_4blackwell.slurm`: from-scratch
   direct-vertex Arm-E specialist.
+- `train_future2000_current_arm_e_200k_2blackwell_gb8.slurm`: two-Blackwell
+  launch of the same Arm-E specialist with per-rank accumulation four and
+  effective global batch eight. A later epoch-boundary resume may use four or
+  eight Blackwell GPUs with accumulation two or one, respectively, while
+  retaining global batch eight.
+- `evaluate_future2000_frozen_be_validation_8blackwell.slurm`: eight-shard
+  validation-only frozen Arm-B/Arm-E fusion sweep.
+- `select_future2000_frozen_be_lambda.slurm`: CPU audit/merge that locks lambda
+  by validation mean Chamfer and writes `lambda_lock.json`.
+- `evaluate_future2000_frozen_be_test_8blackwell.slurm`: locked-lambda test
+  evaluation; it refuses to run without the audited validation lock.
+- `finalize_future2000_frozen_be_report.slurm`: merges Arm-E/Hybrid results
+  with the frozen Arm-B, old-structure, NDS, nvdiffrec and ExMesh rows and
+  writes the comprehensive report.
 
 Jobs `15794` and `15795` are retained as infrastructure history: the first
 exhausted file descriptors and the second exhausted `/dev/shm`. Archived job
@@ -89,9 +103,19 @@ object-bootstrap CI excludes zero. External paired wins are 804/998 versus
 NDS, 829/999 versus nvdiffrec and 974/996 versus ExMesh, with invalid outputs
 kept explicit.
 
-At the 2026-08-31 check, direct-vertex Arm-E job `17800` is pending for
-resources. Do not claim Future2000 Arm-E or B+E results before it completes and
-its checkpoint is selected on validation only. Chamfer equals the
+On 2026-09-01, the never-started four-GPU Arm-E job `17800` was cancelled and
+replaced by job `17883` on two RTX PRO 6000 Blackwell GPUs. The run was later
+resumed at an epoch boundary as four-GPU job `17888`, using per-rank
+accumulation two and preserving effective global batch eight. Job `17888`
+completed all 200,000 steps on 2026-09-04 with exit `0:0`; validation selected
+epoch 160 (checkpoint SHA-256
+`5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`).
+
+The frozen B+E comparison is dependency-gated as `18673` validation sweep →
+`18677` lambda lock → `18678` test → `18679` report. At the 2026-09-04 08:14
+snapshot, three validation shards are running and five are waiting for gpu-04
+resources; test has not been opened. Do not claim Future2000 Arm-E or B+E test
+results before the chain completes. Chamfer equals the
 bidirectional P2S mean in the current evaluator because both directions use
 equal 3,000-sample sets; retain P2S p95 but do not present P2S mean as
 independent evidence. See the

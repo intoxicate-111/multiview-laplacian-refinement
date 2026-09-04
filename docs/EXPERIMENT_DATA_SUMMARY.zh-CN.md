@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-08-31 BST，Europe/London。
+状态日期：2026-09-04 08:14 BST，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -49,7 +49,7 @@ quantity；它不会对当前 target 做除法、clip 或 denormalization。`h^2
 | Synthetic current-query，native 1920 | 与 960 相同的 250 IDs 和 200/25/25 split | 28 / 1920 | 数据、HF 训练与评估均完成 | HPC：`sofa50_synthetic_current_28view_native1920_v1` |
 | Sofa50 多拓扑 raw-Laplacian v1 | 50 个对象、每个 10 个 variants；400/50/50 | 28 / 960 | 历史弱 smoothing 数据集已完成 | HPC：`Sofa50MultiTopologyRawLap500_v1` |
 | Sofa50 多拓扑 raw-Laplacian v2 | 与 v1 相同对象、variants 和 split | 28 / 960 | 500/500 审计通过；2×L40 20k 训练和统一 v1-v2 test/recovery 已完成 | HPC：`Sofa50MultiTopologyRawLap500_v2` |
-| Future2000 GT-adaptive expanded current | 2,000 个不同对象，每个 5 个冻结变体；按对象划分 8000/1000/1000 | 28 / 960 | Formal mixed-loss Arm-B full-1000 test 已完成；direct-vertex Arm E 排队中 | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Future2000 GT-adaptive expanded current | 2,000 个不同对象，每个 5 个冻结变体；按对象划分 8000/1000/1000 | 28 / 960 | Formal Arm-B test 与 200k Arm-E 训练已完成；frozen B+E validation-only lambda sweep 运行中 | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query 压力测试集 | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成；仅诊断，不作为目标 | HPC：`openmvs_texture_test_v6_48view` |
 | Thingi10K50 开发集 | 50 个对象；40/5/5 | 960 和 1920 变体 | 仅开发与 smoke run | 本地 `thingi10k50` 运行目录 |
 
@@ -352,9 +352,19 @@ study 已完成：减弱 C/D recovery anchor 会恶化 geometry，direct-vertex 
 `0.00334039`；Frozen B+E 达到 `0.00302983`，后续 scalar-fusion control 为
 `0.00318814`，说明 operator hybrid 不能由单个全局 vertex average 解释。
 
+三个 formulation stress tests 进一步收窄了该解释。Direct-Lap A+E 在
+`lambda=0.03`（CD `0.00298590` 对 B+E `0.00302983`）与 `lambda=0.01`
+（`0.00314166` 对 `0.00319840`）下的 paired surface-distance 均无显著区分，两个
+CD CI 都含零。B_P 训练中改变 recovery-loss anchor，也没有相对 B_0 形成 same-anchor
+CD separation（`-0.00001703`，mesh/object CI 均跨零）。Sparse positional 实验则给出
+平滑 density curve：fixed-lambda test CD 从 0% 的 `0.0330216` 单调降到 100% 的
+`0.00302983`，Song-scale 2% 仍比 dense 高 `243.70%`，paired 为 0/50 胜。综合来看，
+证据支持 dense learned anchoring 的实测优势，但不支持 recovery-aware Arm-B training
+是 operator composition 必要条件的主张。
+
 ## Future2000 GT-adaptive 扩展实验
 
-状态更新：2026-08-31 BST。数据集包含 2,000 个不同的 3D-FUTURE source objects，
+状态更新：2026-09-04 08:14 BST。数据集包含 2,000 个不同的 3D-FUTURE source objects，
 每个对象有 5 个冻结的确定性 current-mesh 扰动变体。Object-level split 为 8,000
 train、1,000 validation、1,000 test meshes。同一对象的变体共享其 28 个标定
 960-pixel RGB observations，但 current geometry、connectivity、query graph 与
@@ -381,8 +391,13 @@ object-mean 胜 185/200；object-bootstrap 95% CI 为
 804/998、829/999、974/996。2 个 NDS metrics invalid、1 个 nvdiffrec sample failed、
 4 个 ExMesh outputs invalid 或改变 topology。由于正反方向使用相同数量的 3,000 个
 samples，Chamfer 与 bidirectional P2S mean 在此定义上完全相同；P2S p95 不重复。
-截至 2026-08-31，direct-vertex Arm-E job `17800` 因 Resources pending，因此不报告
-Future2000 Arm-E 或 B+E 结果。完整 provenance 见
+替代后的 direct-vertex Arm-E job `17888` 已于 2026-09-04 完成全部 200,000 steps，
+exit `0:0`、elapsed `2-16:05:51`。Validation 选择 epoch 160；checkpoint SHA-256 为
+`5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`。
+Frozen B+E 对比严格分成两阶段：array `18673` 正在全部 1,000 validation meshes 上运行
+预声明 lambda grid，`18677` 将按 mean CD 锁参，`18678` 随后只打开一次 test，`18679`
+再生成 baseline comparison 报告。依赖完成前不报告 Future2000 Arm-E/B+E test 结果。
+Formal Arm-B 完整 provenance 见
 [formal report](../reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)。
 
 ## Sofa50 同初始网格外部 benchmark
@@ -467,7 +482,9 @@ mesh 统一重算。Native metrics 只作 provenance。详见双语
 | 17274/17275/17278 | Sofa50 Arms C/D/E | 已完成 | Matched-v2 C/D/E 结果已完成；E 的 Chamfer 为 `0.00334039`。 |
 | 17513/17515 | Old-domain native-1920 Arm B/E | 已完成 | Validation-selected specialists 完成；test Chamfer 分别为 `0.00853777`、`0.00806580`。 |
 | 17805/17806/17807 | Future2000 formal smoke/evaluation/finalizer | 已完成 | Mixed-loss Arm-B full-1000 audit 完成；Chamfer `0.00476457`，975/1000 改善。 |
-| 17800 | Future2000 direct-vertex Arm E，200k | 2026-08-31 检查时 Resources pending | From-scratch 4×Blackwell job；pending 期间不声明结果。 |
+| 17800/17883 | 已替代的 Future2000 Arm-E launches | 已取消/替代 | 未启动的 4-GPU job 被 2-GPU global-batch-8 run 替代，后者再于 epoch boundary 恢复；两者都不是最终完成 allocation。 |
+| 17888 | Future2000 direct-vertex Arm E，200k | 已完成 | 4×Blackwell epoch-boundary resume 保持 global batch 8；2026-09-04 以 `0:0` 完成，elapsed `2-16:05:51`；validation 选择 epoch 160。 |
+| 18673/18677/18678/18679 | Future2000 frozen B+E validation/锁参/test/report | 2026-09-04 08:14 运行中/依赖门控 | 快照时 `18673` 的 8 个 validation shards 中 3 个运行、5 个等待资源；test `18678` 必须等待 `18677` 锁参成功，report `18679` 必须等待 test 成功。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 

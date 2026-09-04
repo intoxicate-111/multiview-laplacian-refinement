@@ -210,6 +210,34 @@ def test_recovery_aware_clean_vertices_are_loss_side_only() -> None:
     assert not any("clean" in key or key.startswith("gt_") for key in prepared.sample)
 
 
+def test_cached_frozen_anchor_changes_only_recovery_and_stays_detached() -> None:
+    sample = _recovery_aware_sample("frozen_anchor")
+    frozen_anchor = sample["vertices"].clone()
+    frozen_anchor[:, 2] += 0.25
+    frozen_anchor.requires_grad_(True)
+    sample["recovery_anchor_vertices"] = frozen_anchor
+    config = _recovery_aware_config()
+    config["training"]["recovery_aware_geometry_loss"]["anchor_mode"] = (
+        "cached_frozen_vertices"
+    )
+    prepared = _prepare_object_static(sample, config)
+    settings = multi_trainer._recovery_aware_geometry_settings(config)
+    prediction = prepared.training_target.clone().requires_grad_(True)
+
+    loss, recovered = multi_trainer._recovery_refine_loss(
+        prediction, prepared, settings
+    )
+    loss.backward()
+
+    assert recovered.shape == sample["vertices"].shape
+    assert prediction.grad is not None
+    assert float(torch.linalg.vector_norm(prediction.grad)) > 0
+    assert frozen_anchor.grad is None
+    assert "recovery_anchor_vertices" not in prepared.sample
+    assert prepared.recovery_anchor_vertices is not None
+    assert not prepared.recovery_anchor_vertices.requires_grad
+
+
 def test_recovery_aware_training_reports_geometry_loss(tmp_path) -> None:
     config = _recovery_aware_config()
     config["multi_object_training"]["report_every_optimizer_steps"] = 1
@@ -239,6 +267,42 @@ def test_recovery_aware_training_reports_geometry_loss(tmp_path) -> None:
     assert float(step_record["delta_pred_gradient_norm"]) > 0
     assert float(step_record["prediction_head_gradient_norm"]) > 0
     assert int(step_record["nan_inf_count"]) == 0
+
+
+def test_oriented_normal_recovery_objective_trains_and_selects_validation(tmp_path) -> None:
+    config = _recovery_aware_config()
+    config["training"]["recovery_aware_geometry_loss"].update(
+        {
+            "primary_supervision": "oriented_face_normals",
+            "normal_epsilon": 1e-12,
+            "beta": 0.01,
+        }
+    )
+    config["multi_object_training"]["report_every_optimizer_steps"] = 1
+    result = train_multi_object(
+        [_recovery_aware_sample("normal_train")],
+        [_recovery_aware_sample("normal_validation")],
+        config,
+        output_dir=tmp_path,
+        progress=False,
+    )
+    record = result.history[-1]
+    assert math.isfinite(float(record["train_operator_normal_loss"]))
+    assert math.isfinite(float(record["validation_operator_normal_loss"]))
+    assert math.isclose(
+        float(record["validation_loss"]),
+        float(record["validation_operator_normal_loss"])
+        + 0.01 * float(record["validation_recovery_refine_loss"]),
+        rel_tol=1e-5,
+        abs_tol=1e-8,
+    )
+    step = json.loads(
+        (tmp_path / "training_step_history.json").read_text(encoding="utf-8")
+    )[-1]
+    assert math.isfinite(float(step["train_operator_normal_loss"]))
+    assert float(step["delta_pred_gradient_norm"]) > 0
+    assert float(step["prediction_head_gradient_norm"]) > 0
+    assert int(step["nan_inf_count"]) == 0
 
 
 def test_recovery_only_objective_backpropagates_through_sparse_solve(tmp_path) -> None:

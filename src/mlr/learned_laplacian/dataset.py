@@ -215,6 +215,14 @@ def validate_sample(sample: Mapping[str, Any]) -> dict[str, Any]:
             result[name] = result[name].to(dtype=torch.bool)
     if query_is_exact is not None:
         result["query_is_exact"] = query_is_exact.to(dtype=torch.bool)
+    recovery_anchor = result.get("recovery_anchor_vertices")
+    if recovery_anchor is not None:
+        if not isinstance(recovery_anchor, torch.Tensor):
+            raise TypeError("recovery_anchor_vertices must be a torch.Tensor.")
+        if tuple(recovery_anchor.shape) != tuple(vertices.shape):
+            raise ValueError("recovery_anchor_vertices must have shape [N, 3].")
+        if not torch.isfinite(recovery_anchor).all():
+            raise ValueError("recovery_anchor_vertices contains NaN or infinite values.")
     return _ensure_target_scaling_fields(result)
 
 

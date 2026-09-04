@@ -42,6 +42,7 @@ def main() -> int:
     )
     parser.add_argument("--lambda-value", required=True, type=float)
     parser.add_argument("--beta", type=float, default=0.0)
+    parser.add_argument("--prediction-loss-weight", type=float, default=1.0)
     parser.add_argument("--max-optimizer-steps", type=int, default=20000)
     parser.add_argument("--run-kind", choices=("final", "beta_pilot"), default="final")
     parser.add_argument("--distributed-world-size", type=int, default=2)
@@ -53,6 +54,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.lambda_value <= 0:
         raise ValueError("lambda must be positive")
+    if args.prediction_loss_weight < 0:
+        raise ValueError("prediction loss weight must be non-negative")
     if args.arm == "A" and args.beta != 0:
         raise ValueError("Arm A beta must be zero")
     if args.arm in {"B", "C", "D", "E", "F"} and args.beta <= 0:
@@ -80,6 +83,7 @@ def main() -> int:
         "enabled": args.arm in {"B", "C", "D", "E", "F"},
         "lambda": args.lambda_value,
         "beta": args.beta,
+        "prediction_loss_weight": args.prediction_loss_weight,
         "maximum_iterations": 2048 if args.arm in {"C", "D", "E", "F"} else 256,
         "tolerance": 1e-4,
         "compute_dtype": (
@@ -122,6 +126,7 @@ def main() -> int:
         "arm": args.arm,
         "run_kind": args.run_kind,
         "beta": args.beta,
+        "prediction_loss_weight": args.prediction_loss_weight,
         "lambda": args.lambda_value,
         "initialization": args.initialization,
         "capacity": "C2",
@@ -133,7 +138,14 @@ def main() -> int:
         "gradient_accumulation_meshes_per_rank": accumulation_per_rank,
         "effective_global_batch_meshes": args.effective_global_batch,
         "training_gpu_model": args.training_gpu_model,
-        "training_huber_is_laplacian_regression_only": True,
+        "training_huber_is_laplacian_regression_only": (
+            args.prediction_loss_weight > 0
+        ),
+        "training_objective": (
+            "recovered_vertex_mse_only"
+            if args.prediction_loss_weight == 0 and args.beta == 1
+            else "weighted_raw_laplacian_huber_plus_recovered_vertex_mse"
+        ),
         "no_huber_in_recovery": True,
         "no_visibility_confidence_or_adam_recovery": True,
         "pcg_numerical_execution_difference": (

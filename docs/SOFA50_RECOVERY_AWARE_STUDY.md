@@ -1,6 +1,6 @@
 # Sofa50 v2 recovery-aware training study
 
-Status date: 2026-08-24 BST.
+Status date: 2026-09-04 BST.
 
 This document records the current matched-domain study on
 `Sofa50MultiTopologyRawLap500_v2`. It supersedes the historical
@@ -111,21 +111,22 @@ moved from two L40s to eight RTX PRO 6000 Blackwell GPUs at epoch boundaries.
 The effective global batch, optimiser-step budget and executable mathematical
 contract remained fixed.
 
-## Running lambda extension: Arms C and D
+## Completed lambda extension: Arms C and D
 
 Arms C and D preserve Arm B and change only the differentiable/evaluation
 regularisation:
 
-| Arm | `lambda` | `beta` | Status at 2026-08-24 snapshot |
-|---|---:|---:|---|
-| C | `10^-3` | `10^-2` | Job `17274` running on 8 Blackwell GPUs; step 3,200/20,000, zero failed solves and zero NaN/Inf. |
-| D | `10^-4` | `10^-2` | Job `17275` queued after C. |
+| Arm | `lambda` | `beta` | Test Chamfer | Result |
+|---|---:|---:|---:|---|
+| B | `10^-2` | `10^-2` | **0.00358497** | Selected recovery-aware reference. |
+| C | `10^-3` | `10^-2` | 0.00414926 | Weaker anchor worsens geometry. |
+| D | `10^-4` | `10^-2` | 0.00653139 | Further weakening worsens geometry again. |
 
 The PCG tolerance remains `10^-4`. Preflight showed float32 stagnation at the
 smaller lambdas, so C/D use float64 PCG with at most 2,048 iterations. This is
 a documented numerical execution change; neither lambda nor the objective was
-silently modified. No C/D scientific conclusion is valid until the dependent
-validation/test evaluation and report merge complete.
+silently modified. The completed comparison does not support weakening the
+positional regularisation below `10^-2`.
 
 ## Direct-vertex control: Arm E
 
@@ -157,11 +158,28 @@ $$
 
 Variables: `Delta V*` is the exact same-index clean displacement and `L_E` is
 the mean squared 3D displacement error. GT vertices are loss-only. The
-implementation audit passes on all 500 prepared samples. Job `17278` is queued
-after D; evaluation `17279`, A-E merge `17280` and matched visualisation
-`17281` are dependency-gated. H1 (vertex loss alone) versus H2 (differential
-representation plus structured integration) remains undecided until those
-jobs finish.
+implementation audit passes on all 500 prepared samples. The completed test
+result is Chamfer `0.00334039`, same-index vertex RMS `0.00822130` and 45/50
+improved meshes. Frozen B+E with validation-selected `lambda=0.03` reaches
+Chamfer `0.00302983` and 49/50 improvements, although Arm E remains better in
+same-index vertex RMS.
+
+## Completed formulation stress tests
+
+- Direct-Lap A+E reaches CD `0.00298590` at `lambda=0.03`, versus B+E
+  `0.00302983`; its paired CD mesh/object confidence intervals both include
+  zero. At `lambda=0.01`, the corresponding values are `0.00314166` and
+  `0.00319840`, again with both CIs including zero. Recovery-aware Arm-B
+  training is therefore not shown to be necessary for operator composition.
+- Anchor-conditioned B_P does not separate from B_0 under the same V_P anchor:
+  CD difference `-0.00001703`, with mesh and object CIs crossing zero. The
+  significant interaction records anchor-specific adaptation, not an
+  established final same-anchor gain.
+- The positional-density curve is smooth and monotone. Fixed-lambda test CD
+  falls from `0.0330216` at 0% to `0.00302983` at 100%; the 2% Song-scale
+  condition is `243.70%` above dense and loses 0/50. Dense B+E is therefore
+  well explained as densified learned anchoring, while low-density constraints
+  are insufficient to reproduce its absolute quality.
 
 ## Decision boundary
 
@@ -169,7 +187,9 @@ jobs finish.
   report Arm E as raw Laplacian EPE.
 - Select among recovery-aware Laplacian arms by validation recovered geometry,
   then freeze selection before test interpretation.
-- Compare Arm E to Arm B and to the validation-selected best of B/C/D with
-  paired Chamfer, vertex RMS, P2S p95, F-score, normal and flips.
-- Do not start 2,000-mesh `strong_smooth_v2` scaling from these intermediate
-  results.
+- Compare Arm E, Direct-Lap A+E and recovery-aware B+E with paired Chamfer,
+  vertex RMS, P2S p95, F-score, normal and flips; do not infer necessity from
+  a numerically lower aggregate without confidence intervals.
+- Describe dense B+E as learned dense positional/differential operator
+  composition or densified learned anchoring, not as a formulation without a
+  sparse-constraint predecessor.

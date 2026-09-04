@@ -211,6 +211,12 @@ def evaluate_arm(args: argparse.Namespace) -> None:
     output = args.output_dir.resolve()
     device = torch.device(args.device)
     spec = _load_spec(run, device)
+    if args.view_chunk_size is not None:
+        if args.view_chunk_size < 1:
+            raise ValueError("--view-chunk-size must be positive")
+        if not hasattr(spec["model"], "image_view_chunk_size"):
+            raise RuntimeError("Model does not expose image-view chunking")
+        spec["model"].image_view_chunk_size = int(args.view_chunk_size)
     lambda_selection = _read(args.lambda_selection.resolve())
     beta_selection = _read(args.beta_selection.resolve())
     if not lambda_selection["contract_audit"]["passed"] or not beta_selection["contract_audit"]["passed"]:
@@ -311,6 +317,7 @@ def evaluate_arm(args: argparse.Namespace) -> None:
             "arm": arm, "run": str(run), "checkpoint": spec["checkpoint"],
             "checkpoint_sha256": spec["checkpoint_sha256"],
             "parameter_count": spec["parameter_count"], "config": spec["config"],
+            "execution_view_chunk_size": args.view_chunk_size,
             "training_metrics": spec["metrics"],
             "training_runtime_diagnostics": _runtime_diagnostic_summary(run),
             "rows": rows,
@@ -812,6 +819,11 @@ def main() -> int:
     parser.add_argument("--include-lambda-extension", action="store_true")
     parser.add_argument("--include-fixed-lambda-sweep", action="store_true")
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--view-chunk-size",
+        type=int,
+        help="Execution-only image-view chunking for memory-safe evaluation.",
+    )
     parser.add_argument("--merge-only", action="store_true")
     args = parser.parse_args()
     if args.merge_only:

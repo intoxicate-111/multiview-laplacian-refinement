@@ -22,15 +22,17 @@ Future2000 local comparisons: [Local task guide](docs/FUTURE2000_LOCAL_COMPARISO
 
 Future2000 formal mixed-loss result: [Full 2,000-object / 1,000-test-mesh report](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
 
+Current Sofa50 formulation stress tests: [consolidated report](reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/REPORT.md)
+
 Recent commit and experiment record: [4–15 August report and addendum](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
 
 View-count and query-resolution results: [Ablation report](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
 28-view current-graph target/loss-space results: [H2 ablation report](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25-case visual overview](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
 
-## Method novelty
+## Scoped method contribution
 
-> **Novelty.** A frequency-aware, operator-guided mesh refinement framework
+> **Contribution.** A frequency-aware, operator-guided mesh refinement framework
 > that converts multiview high-frequency visual evidence into complementary
 > differential and positional geometric constraints, and reconciles them
 > through an explicit differentiable linear geometric operator.
@@ -49,6 +51,15 @@ Here `L_U=I-D^-1 A` is an explicit geometry operator and the solve is
 differentiable. “Frequency-aware” describes the high-frequency visual evidence
 and the measured graph-frequency behavior; it does not claim that the network
 or recovery explicitly eigendecomposes the mesh.
+
+The current evidence does not establish that recovery-aware Arm-B training is
+necessary for this composition. A matched direct-Laplacian Arm-A field fused
+with the same Arm-E anchor is statistically indistinguishable from B+E in
+surface distance at both `lambda=0.03` and `lambda=0.01`, while dense B+E is the
+smooth 100% endpoint of a positional-constraint density family. The defensible
+contribution is therefore the learned dense positional/differential operator
+composition and its measured trade-offs, not a claim that the formulation or
+Arm-B training principle has no predecessor.
 
 ## Frozen B/E graph-frequency analysis
 
@@ -133,7 +144,7 @@ and the
 
 ## Project status
 
-Status date: 2026-08-31 BST.
+Status date: 2026-09-04 08:14 BST.
 
 OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
 reconstructions and are retained only as out-of-distribution stress tests.
@@ -169,11 +180,15 @@ desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLIC
 | Recovery-aware Arms C/D | Complete | Weakening positional regularisation does not improve recovered geometry. Test Chamfer is `0.00414926` for C (`lambda=10^-3`) and `0.00653139` for D (`10^-4`), versus `0.00358497` for B (`10^-2`). Both runs use documented float64 PCG without changing their objectives. |
 | Direct-vertex Arm E | Complete | The 826,115-parameter C2F2+HF model predicts `Delta V` using only same-index vertex MSE. Test Chamfer is `0.00334039`, vertex RMS is `0.00822130`, and 45/50 inputs improve; E contains no Laplacian target, sparse solver or recovery gate. |
 | Frozen B+E hybrid recovery | Complete; read-only | With frozen B Laplacians, frozen E positions as the sole anchor and validation-selected `lambda=3e-2`, test Chamfer is `0.00302983` and 49/50 inputs improve. This motivates joint hybrid training but does not itself retrain or authorise scaling. |
+| Direct-Lap A+E matched control | Complete | At `lambda=0.03`, A+E CD is `0.00298590` versus B+E `0.00302983`; at `lambda=0.01`, it is `0.00314166` versus `0.00319840`. Both paired CD confidence intervals include zero. This control does not support a claim that Arm-B recovery-aware training is necessary for operator composition. |
+| Arm-B anchor-conditioning ablation | Complete | Training B_P through an Arm-E anchor gives no same-anchor CD separation from B_0: B_P@V_P minus B_0@V_P is `-0.00001703`, with mesh and object CIs crossing zero. The interaction is significant, but it does not establish a final same-anchor gain. |
+| Sparse positional-density ablation | Complete; read-only | Dense B+E is the endpoint of a smooth densified-anchor family. Fixed-lambda test CD decreases monotonically from `0.0330216` at 0% to `0.00302983` at 100%; Song-scale 2% remains `243.70%` above dense and loses 0/50 paired meshes. |
 | End-to-end direct–Laplacian hybrid | Complete | One 892,678-parameter shared model predicts latent raw-Laplacian and direct-displacement fields with final-hybrid-only supervision. Its matched-v2 test Chamfer is `0.00341857`, behind frozen B+E at `0.00302983`; the mechanism audit is MECH5 and does not support a universal separate-training claim. |
 | Continuous pretrained B+E on matched v2 | Complete; validation selected | Two complete independent specialists are continued jointly with final-hybrid-only supervision. Validation selected step 9,400; matched-test Chamfer improves from the geometry-equivalent step-0 `0.00302691` to `0.00288357`, while legacy/unseen OOD remain unsuccessful. |
 | Old-domain native-1920 specialists and frozen B+E | Complete | Validation-selected Arm B, Arm E, a post-hoc scalar blend and Frozen B+E were evaluated on the exact common 25-sample input. Their Chamfers are `0.00853777`, `0.00806580`, `0.00756219` and `0.00670460`; Frozen improves all 25 meshes and wins 22/25 versus B, 23/25 versus E and 21/25 versus the scalar blend. Normal and same-index vertex RMS favour the scalar blend, so the metric trade-off remains explicit. |
 | Future2000 formal mixed-loss Arm B | Complete | The formal 200,000-step checkpoint retains `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`. On 200 held-out objects × 5 frozen variants, Chamfer falls from `0.00776417` to `0.00476457`, 975/1000 samples improve, and the paired improvement over the archived old-structure predictor is `0.000464982` (882/1000 meshes; 185/200 object means; object-bootstrap CI excludes zero). |
-| Future2000 direct-vertex Arm E | Queued on HPC | The from-scratch 200,000-step direct-residual specialist is job `17800`; at the 2026-08-31 check it is pending for resources. No Arm-E or Future2000 B+E result is claimed before that run and its validation-only checkpoint selection are complete. |
+| Future2000 direct-vertex Arm E | Complete | Job `17888` completed 200,000 steps on 2026-09-04 (`0:0`, elapsed `2-16:05:51`). The validation-selected epoch-160 checkpoint SHA-256 is `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`. Test metrics remain sealed until fusion lambda is locked. |
+| Future2000 frozen B+E comparison | Validation running; test dependency-gated | Validation array `18673` is sweeping the declared lambda grid on all 1,000 validation variants. Job `18677` will lock mean-CD lambda, test array `18678` will then evaluate Arm-E/B+E once, and report job `18679` will compare against Arm-B, old structure, NDS, nvdiffrec and ExMesh. No Future2000 Arm-E/B+E test metric is yet claimed. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
 | Future2000 GT-adaptive scale-up | Formal 200k Arm-B test complete | The dataset contains 2,000 distinct 3D-FUTURE source objects, each with five frozen deterministic perturbation variants (`8000/1000/1000` by object split). Formal Arm B reaches Chamfer `0.00476457`, P2S p95 `0.01462829`, F-score `0.88103565` and 975/1000 improvements; normal consistency decreases from `0.92425235` to `0.90859736`. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
@@ -189,8 +204,9 @@ geometry is loss-only and is never passed to either branch or the solve. The
 completed formal Future2000 Arm-B scale-up uses the 960 high-frequency
 construction, 28 views, C2F2, the established mixed objective and a fixed
 200,000-step checkpoint. Its full-1000 same-initial comparison is complete,
-with invalid external outputs retained explicitly; direct-vertex Arm E remains
-queued and has no reported result.
+with invalid external outputs retained explicitly. Direct-vertex Arm E has now
+completed, and the validation-only B+E lambda sweep is running; the test split
+remains dependency-gated until the lock is written.
 
 The earlier GT-query, `h^2`-normalised formulation remains useful historical
 context. Its transfer to expanded and OpenMVS query graphs did not improve
@@ -1177,8 +1193,11 @@ the bidirectional point-to-surface mean in this evaluator because the forward
 and reverse directions use equal 3,000-sample sets, so a duplicate P2S-mean
 column is not treated as independent evidence. P2S p95 remains distinct.
 
-The direct-vertex Arm-E 200,000-step job `17800` is pending for HPC resources
-as of 2026-08-31; no Future2000 Arm-E or B+E metric is yet claimed. See the
+The replacement direct-vertex Arm-E job `17888` completed all 200,000 steps on
+2026-09-04. Validation array `18673` is selecting the frozen B+E lambda without
+opening test; jobs `18677`, `18678` and `18679` lock lambda, evaluate test and
+generate the comprehensive report through `afterok` dependencies. No
+Future2000 Arm-E or B+E test metric is yet claimed. See the
 [formal Future2000 report](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
 for the frozen contract, paired samples, invalid-output audit and provenance.
 

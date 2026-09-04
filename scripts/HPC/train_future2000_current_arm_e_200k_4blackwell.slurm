@@ -110,7 +110,8 @@ test -f "${SMOKE_ROOT}/run/metrics.json"
 import json, math, sys
 metrics = json.load(open(sys.argv[1]))
 assert int(metrics["optimizer_steps"]) == 5
-assert math.isfinite(float(metrics["train_loss"]))
+assert math.isfinite(float(metrics["final_train_loss"]))
+assert math.isfinite(float(metrics["final_validation_loss"]))
 ' "${SMOKE_ROOT}/run/metrics.json"
 
 {

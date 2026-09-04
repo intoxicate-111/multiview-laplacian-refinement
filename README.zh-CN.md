@@ -22,15 +22,17 @@ Future2000 本地对比任务：[本地任务说明](docs/FUTURE2000_LOCAL_COMPA
 
 Future2000 formal mixed-loss 结果：[完整 2,000-object / 1,000-test-mesh 报告](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
 
+当前 Sofa50 formulation 压力测试：[综合报告](reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/REPORT.md)
+
 近期 commit 与实验记录：[8 月 4–15 日报告与补充记录](docs/RECENT_COMMIT_AND_EXPERIMENT_REPORT_2026-08-04_2026-08-14.zh-CN.md)
 
 View-count 与 query-resolution 结果：[消融报告](runs/learned_laplacian/sofa50_c2f2_view_query_resolution_ablation_20k_seed7/analysis/REPORT.md)
 
 28-view current-graph target/loss-space 结果：[H2 消融报告](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/REPORT.md) | [25 组可视化总览](runs/learned_laplacian/sofa50_synthetic_current_28view_h2_normalization_ablation_20k_seed7/analysis/comparison_images/B_direct_raw_laplacian/overview_25.png)
 
-## 方法创新点
+## 方法贡献的适用范围
 
-> **Novelty（正式定义）.** A frequency-aware, operator-guided mesh refinement
+> **Contribution（正式定义）.** A frequency-aware, operator-guided mesh refinement
 > framework that converts multiview high-frequency visual evidence into
 > complementary differential and positional geometric constraints, and
 > reconciles them through an explicit differentiable linear geometric
@@ -49,6 +51,13 @@ direct positional prior。冻结 B+E 及其可训练扩展通过下式协调两�
 
 其中 `L_U=I-D^-1 A` 是显式几何算子，求解过程可微。“频率感知”指高频视觉证据和
 实测 graph-frequency 行为，并不表示网络或恢复过程显式执行 mesh 特征分解。
+
+当前证据不能证明 recovery-aware Arm-B training 是该组合所必需的。使用相同 Arm-E
+anchor 的 matched direct-Laplacian Arm-A，在 `lambda=0.03` 与 `lambda=0.01` 下与
+B+E 的 surface-distance 差异均无统计区分；dense B+E 同时是 positional-constraint
+density family 平滑变化的 100% endpoint。因此可辩护的贡献应限定为 learned dense
+positional/differential operator composition 及其实测 trade-off，而不是声称该公式
+或 Arm-B training principle 没有前身。
 
 ## Frozen B/E 图频率分析
 
@@ -121,7 +130,7 @@ differential correction。无 anchor 的 `V_B_dagger` 存在巨大的低模误�
 
 ## 项目状态
 
-状态日期：2026-08-31 BST。
+状态日期：2026-09-04 08:14 BST。
 
 OpenMVS 使用政策：现有 Sofa50 OpenMVS mesh 是低质量外部重建，只保留为
 分布外压力测试；它不是 training target、pseudo-GT、模型选择端点或期望质量
@@ -156,11 +165,15 @@ ceiling。详见 [OpenMVS 输入使用政策](docs/OPENMVS_INPUT_POLICY.zh-CN.md
 | Recovery-aware Arm C/D | 已完成 | 减弱 positional regularization 未改善 recovered geometry。C（`lambda=10^-3`）与 D（`10^-4`）的 test Chamfer 分别为 `0.00414926`、`0.00653139`，均差于 B（`10^-2`）的 `0.00358497`。两组使用已记录的 float64 PCG，objective 未改变。 |
 | Direct-vertex Arm E | 已完成 | 826,115 参数 C2F2+HF 仅以 same-index vertex MSE 训练 `Delta V`。Test Chamfer 为 `0.00334039`、vertex RMS 为 `0.00822130`，45/50 inputs 改善；E 不含 Laplacian target、sparse solver 或 recovery gate。 |
 | 冻结 B+E hybrid recovery | 已完成；只读 | 使用冻结 B Laplacian、冻结 E positions 作为唯一 anchor，并用 validation 选择 `lambda=3e-2`；test Chamfer 为 `0.00302983`，49/50 inputs 改善。它支持后续联合 hybrid 训练，但本身没有重训，也不授权 scaling。 |
+| Direct-Lap A+E matched 对照 | 已完成 | `lambda=0.03` 时 A+E CD 为 `0.00298590`、B+E 为 `0.00302983`；`lambda=0.01` 时分别为 `0.00314166` 与 `0.00319840`。两组 paired CD CI 均含零，不能据此声称 Arm-B recovery-aware training 是 operator composition 的必要条件。 |
+| Arm-B anchor-conditioning 消融 | 已完成 | B_P@V_P 相对 B_0@V_P 的 CD 差为 `-0.00001703`，mesh/object CI 均跨零；interaction 虽显著，但没有形成 final same-anchor gain 证据。 |
+| Sparse positional-density 消融 | 已完成；只读 | Dense B+E 是平滑 densified-anchor family 的 endpoint。Fixed-lambda test CD 从 0% 的 `0.0330216` 单调降到 100% 的 `0.00302983`；Song-scale 2% 仍比 dense 高 `243.70%`，paired 结果为 0/50 胜。 |
 | End-to-end direct–Laplacian hybrid | 已完成 | 单个 892,678 参数共享模型以 final-hybrid-only supervision 预测 latent raw-Laplacian 与 direct-displacement fields。Matched-v2 test Chamfer 为 `0.00341857`，不及 frozen B+E 的 `0.00302983`；机制审计为 MECH5，不支持“分开训练普遍更优”的泛化结论。 |
 | Matched-v2 continuous pretrained B+E | 已完成；validation 选择 | 两个完整独立 specialist 只通过最终 Hybrid geometry 继续联合训练。Validation 选择 step 9,400；matched-test Chamfer 从 geometry-equivalent step-0 的 `0.00302691` 改善到 `0.00288357`，但 legacy/unseen OOD 仍未成功。 |
 | Old-domain native-1920 specialists 与 frozen B+E | 已完成 | Validation-selected Arm B、Arm E、post-hoc scalar blend 与 Frozen B+E 已在完全相同的 25 个 inputs 上评估；Chamfer 分别为 `0.00853777`、`0.00806580`、`0.00756219`、`0.00670460`。Frozen 改善 25/25，并以 22/25、23/25、21/25 分别胜 B、E、scalar blend；Normal 与 same-index vertex RMS 则由 scalar blend 占优，因此保留 metric trade-off。 |
 | Future2000 formal mixed-loss Arm B | 已完成 | 正式 200,000-step checkpoint 保留 `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`。在 200 个 held-out objects × 5 个冻结变体上，Chamfer 从 `0.00776417` 降至 `0.00476457`，975/1000 samples 改善；相对 archived old-structure predictor 的 paired 改善为 `0.000464982`（882/1000 meshes、185/200 object means，object-bootstrap CI 不含零）。 |
-| Future2000 direct-vertex Arm E | HPC 排队中 | From-scratch 200,000-step direct-residual specialist 为 job `17800`；2026-08-31 检查时因 Resources pending。在训练与 validation-only checkpoint selection 完成前，不声明 Arm-E 或 Future2000 B+E 结果。 |
+| Future2000 direct-vertex Arm E | 已完成 | Job `17888` 于 2026-09-04 完成 200,000 steps（`0:0`，elapsed `2-16:05:51`）。Validation-selected epoch-160 checkpoint SHA-256 为 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`；fusion lambda 锁定前 test metrics 仍保持封存。 |
+| Future2000 frozen B+E 对比 | Validation 运行中；test 由依赖门控 | Validation array `18673` 正在全部 1,000 validation variants 上扫描预声明 lambda grid；`18677` 将按 mean CD 锁参，`18678` 随后一次性评估 Arm-E/B+E test，`18679` 再与 Arm-B、old structure、NDS、nvdiffrec、ExMesh 生成综合报告。目前不声明 Future2000 Arm-E/B+E test metric。 |
 | GT-query direct-raw zero-shot transfer | 已完成 | 去掉 `h^2` normalization 相对历史 GT-query arm 明显改善，但 current-mesh recovery 仅达到 Chamfer `0.00400486`、`4/25`，仍低于 supervised current-query HF 的 `0.00377832`、`20/25`。 |
 | Future2000 GT-adaptive 扩展 | Formal 200k Arm-B test 已完成 | 数据由 2,000 个不同的 3D-FUTURE source objects 构成，每个对象有 5 个冻结的确定性扰动变体，按对象划分为 `8000/1000/1000`。Formal Arm B 达到 Chamfer `0.00476457`、P2S p95 `0.01462829`、F-score `0.88103565`、975/1000 改善；normal consistency 从 `0.92425235` 降至 `0.90859736`。 |
 | Sofa50 同初始网格外部 benchmark | 已完成并修正 evaluator | Ours、NDS、nvdiffrec 和 ExMesh 均从相同 current mesh/observations 完成 25/25。Native-metric 聚合问题已通过对全部归档 mesh 使用同一 deterministic evaluator 修复；`contract_audit=true`。 |
@@ -174,8 +187,8 @@ current-graph、direct-raw formulation。最新受控扩展加入 direct-displac
 均关闭。Clean geometry 只用于 loss，不会输入任一 branch 或 recovery solve。已完成的
 formal Future2000 Arm-B scale-up 使用 960 high-frequency construction、28 views、
 C2F2、既定 mixed objective 与固定 200,000-step checkpoint。Full-1000 same-initial
-comparison 已完成，invalid external outputs 显式保留；direct-vertex Arm E 仍在排队，
-尚无可报告结果。
+comparison 已完成，invalid external outputs 显式保留。Direct-vertex Arm E 已完成，
+B+E validation-only lambda sweep 正在运行；lambda lock 写入前 test 仍由依赖门控。
 
 早期 GT-query、`h^2`-normalized formulation 仍作为历史背景保留。该路径迁移到
 expanded/OpenMVS query graph 后未改善 geometry，因此不再作为下文数学定义的主线。
@@ -1087,8 +1100,10 @@ failed、4 个 ExMesh 结果 invalid 或改变 topology，均显式保留。由�
 方向各使用相同数量的 3,000 个 samples，Chamfer 与 bidirectional P2S mean 定义上完全
 相同，不能把重复的 P2S mean 当作独立证据；P2S p95 仍是不同统计量。
 
-截至 2026-08-31，direct-vertex Arm-E 200,000-step job `17800` 因 HPC Resources
-pending；尚不声明 Future2000 Arm-E 或 B+E metric。冻结合同、paired samples、invalid
+替代后的 direct-vertex Arm-E job `17888` 已于 2026-09-04 完成全部 200,000 steps。
+Validation array `18673` 正在不打开 test 的条件下选择 frozen B+E lambda；jobs
+`18677`、`18678`、`18679` 通过 `afterok` 依次锁参、评估 test、生成综合报告。目前
+尚不声明 Future2000 Arm-E 或 B+E test metric。冻结合同、paired samples、invalid
 output audit 与 provenance 见
 [formal Future2000 report](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)。
 

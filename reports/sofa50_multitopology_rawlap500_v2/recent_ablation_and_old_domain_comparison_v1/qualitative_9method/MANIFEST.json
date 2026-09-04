@@ -1,0 +1,195 @@
+{
+  "status": "completed",
+  "mesh_root": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2",
+  "layout": "1x8",
+  "method_order": [
+    "GT",
+    "Previous Ours",
+    "NDS",
+    "nvdiffrec",
+    "ExMesh",
+    "Arm B",
+    "Arm E",
+    "Frozen B+E"
+  ],
+  "renderer": "mlr.synthetic OpenGL/EGL lit renderer; MSAA4",
+  "output_color_mode": "transparent RGBA master plus flattened RGB white-background paper export",
+  "material": "shared procedural brown linen; identical image-space weave for every method",
+  "shared_camera_and_material_within_each_panel": true,
+  "records": [
+    {
+      "sample_id": "43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01",
+      "emphasis": "Reference-matched full front view",
+      "output": "reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/qualitative_9method/43bd0910_v01_front_8method_transparent.png",
+      "paper_white_output": "reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/qualitative_9method/43bd0910_v01_front_8method_paper_white.png",
+      "reference_image": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/QQ_1787904603868.png",
+      "reference_aspect_ratio": 1.8312056737588653,
+      "tile_size": [
+        720,
+        393
+      ],
+      "layout": "1x8",
+      "transparent_background": true,
+      "paper_white_background_exported": true,
+      "material": "shared procedural brown linen; identical image-space weave for every method",
+      "global_content_header": false,
+      "method_labels": "centered below each mesh",
+      "fixed_camera_for_all_methods": true,
+      "camera": {
+        "azimuth_degrees": 90.0,
+        "elevation_degrees": -90.0,
+        "fov_degrees": 36.0,
+        "reference_image": "QQ_1787904603868.png",
+        "reference_aspect_ratio": 1.8312056737588653,
+        "target": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "camera_center": [
+          1.3987029325010938e-32,
+          -3.730471902689903,
+          2.284255237469163e-16
+        ],
+        "distance": 3.730471902689903
+      },
+      "methods": [
+        {
+          "label": "GT",
+          "directory": "gt",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/gt/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "fcdcdc370ca49d4350adcdc1155a39a6dc1b90739a9a6ddcffd492d7b6de9a4a"
+        },
+        {
+          "label": "Previous Ours",
+          "directory": "previous_ours",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/previous_ours/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "f63b2058c676a62aef95e3edf2c9b2db7428f8a7a13d14d6433b923679dba861"
+        },
+        {
+          "label": "NDS",
+          "directory": "nds",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/nds/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "8800b2afd16aacb5fe99a7ce65d02980ef55b0a3238bf1a742ceb6e4997d9b36"
+        },
+        {
+          "label": "nvdiffrec",
+          "directory": "nvdiffrec",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/nvdiffrec/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "18579abfdd34a4d73560698307fe94c20c0aee03b9bce9197fa587c33076118d"
+        },
+        {
+          "label": "ExMesh",
+          "directory": "exmesh",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/exmesh/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "2eddf9a49750d7edad0faeec7e57998f65e6f07d7a1cf05c2ff1f5ca8e2ebeb2"
+        },
+        {
+          "label": "Arm B",
+          "directory": "arm_b",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/arm_b/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "a9c843e1fe6457a81c4fc502ca3fc1faf732a8c3de71038131635ce7c176c9b3"
+        },
+        {
+          "label": "Arm E",
+          "directory": "arm_e",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/arm_e/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "a3d0ec8b2983d1f386fe994cf286775f1aed5472d00dd3bbd2352eb4ceef55a2"
+        },
+        {
+          "label": "Frozen B+E",
+          "directory": "frozen_b_e",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/frozen_b_e/43bd0910-1dd1-4b1e-9ba2-e9801e6b5761__v01.obj",
+          "sha256": "375b7f618668f21d856b91bb39638e9954811029eca17af85e20c5df7a6b151c"
+        }
+      ]
+    },
+    {
+      "sample_id": "5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02",
+      "emphasis": "Reference-matched low-left oblique view",
+      "output": "reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/qualitative_9method/5c226f2b_v02_oblique_8method_transparent.png",
+      "paper_white_output": "reports/sofa50_multitopology_rawlap500_v2/recent_ablation_and_old_domain_comparison_v1/qualitative_9method/5c226f2b_v02_oblique_8method_paper_white.png",
+      "reference_image": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/QQ_1787904538059.png",
+      "reference_aspect_ratio": 1.1190926275992439,
+      "tile_size": [
+        720,
+        643
+      ],
+      "layout": "1x8",
+      "transparent_background": true,
+      "paper_white_background_exported": true,
+      "material": "shared procedural brown linen; identical image-space weave for every method",
+      "global_content_header": false,
+      "method_labels": "centered below each mesh",
+      "fixed_camera_for_all_methods": true,
+      "camera": {
+        "azimuth_degrees": 135.0,
+        "elevation_degrees": -20.0,
+        "fov_degrees": 44.0,
+        "reference_image": "QQ_1787904538059.png",
+        "reference_aspect_ratio": 1.1190926275992439,
+        "target": [
+          0.0,
+          -0.01677168012,
+          0.0
+        ],
+        "camera_center": [
+          -1.695878840278227,
+          -0.8896941795300577,
+          1.6958788402782272
+        ],
+        "distance": 2.552254644776487
+      },
+      "methods": [
+        {
+          "label": "GT",
+          "directory": "gt",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/gt/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "78c6632844cb907c350acb04974976e3f0f1344871c25679fc1689c30855808b"
+        },
+        {
+          "label": "Previous Ours",
+          "directory": "previous_ours",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/previous_ours/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "06e1b1f144e145a7aa3350728770a283cf17fbc481847adddd41dc28645ad9c6"
+        },
+        {
+          "label": "NDS",
+          "directory": "nds",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/nds/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "a2087ebb561c68821f1f597c32da0099c6e668d6852db5af34a254bfa95bc793"
+        },
+        {
+          "label": "nvdiffrec",
+          "directory": "nvdiffrec",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/nvdiffrec/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "0d05f41c1d1b990e0858521d05dfb608da29d3422e39fc890c4f354ffc0d5fdc"
+        },
+        {
+          "label": "ExMesh",
+          "directory": "exmesh",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/exmesh/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "d290ff8a9183a74c09eb7b20290420a72fb0e3cb6061587561f720ac33490878"
+        },
+        {
+          "label": "Arm B",
+          "directory": "arm_b",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/arm_b/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "e46e0b85b004209286247909c1ce8e521b5da7f9e94c61d4bb54a267310bb172"
+        },
+        {
+          "label": "Arm E",
+          "directory": "arm_e",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/arm_e/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "498440538bd36986d2aa24cc152616cabfaabbf67db40691bda480fc7d3ac36a"
+        },
+        {
+          "label": "Frozen B+E",
+          "directory": "frozen_b_e",
+          "mesh": "/home/zhou_c_WMGDS.WMG.WARWICK.AC.UK/results/2/frozen_b_e/5c226f2b-aad3-4371-a3f9-ea2ee9a63327__v02.obj",
+          "sha256": "981ff4eda35f81ce0b64ca9349160f8c8d2ba56c1cdb002f45725ea427c55196"
+        }
+      ]
+    }
+  ]
+}

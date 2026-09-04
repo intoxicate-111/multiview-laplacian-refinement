@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-08-31 BST, Europe/London.
+Status date: 2026-09-04 08:14 BST, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -54,7 +54,7 @@ historical comparisons and diagnostics.
 | Synthetic current-query, native 1920 | Same 250 IDs and 200/25/25 split as 960 | 28 / 1920 | Complete; HF training/evaluation complete | HPC: `sofa50_synthetic_current_28view_native1920_v1` |
 | Sofa50 multi-topology raw-Laplacian v1 | 50 objects, 10 variants each; 400/50/50 | 28 / 960 | Complete historical mild-smoothing dataset | HPC: `Sofa50MultiTopologyRawLap500_v1` |
 | Sofa50 multi-topology raw-Laplacian v2 | Same objects, variants and split as v1 | 28 / 960 | 500/500 audited; 2×L40 20k training and unified v1-v2 test/recovery complete | HPC: `Sofa50MultiTopologyRawLap500_v2` |
-| Future2000 GT-adaptive expanded current | 2,000 distinct objects, 5 frozen variants each; 8000/1000/1000 variants by object split | 28 / 960 | Formal mixed-loss Arm-B full-1000 test complete; direct-vertex Arm E queued | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Future2000 GT-adaptive expanded current | 2,000 distinct objects, 5 frozen variants each; 8000/1000/1000 variants by object split | 28 / 960 | Formal Arm-B test and 200k Arm-E training complete; validation-only frozen B+E lambda sweep running | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query stress set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete; diagnostic only, not a target | HPC: `openmvs_texture_test_v6_48view` |
 | Thingi10K50 development set | 50 objects; 40/5/5 | 960 and 1920 variants | Development and smoke runs only | Local `thingi10k50` run directories |
 
@@ -388,9 +388,22 @@ geometry, while direct-vertex E reaches Chamfer `0.00334039`. Frozen B+E reaches
 `0.00302983`; the later scalar-fusion control reaches `0.00318814`, confirming
 that the operator hybrid is not explained by a single global vertex average.
 
+Three formulation stress tests now narrow that interpretation. Direct-Lap
+A+E is not meaningfully separated from B+E in paired surface distance at
+either `lambda=0.03` (CD `0.00298590` versus `0.00302983`) or `lambda=0.01`
+(`0.00314166` versus `0.00319840`); both CD confidence intervals include zero.
+Changing the recovery-loss anchor during B_P training gives no same-anchor CD
+separation from B_0 (`-0.00001703`, mesh/object CIs cross zero). Finally, the
+sparse positional experiment shows a smooth density curve: fixed-lambda test
+CD falls monotonically from `0.0330216` at 0% to `0.00302983` at 100%, while
+the Song-scale 2% condition remains `243.70%` above dense and loses 0/50.
+Together these results support dense learned anchoring as the measured
+advantage, but not a claim that recovery-aware Arm-B training is necessary for
+operator composition.
+
 ## Future2000 GT-adaptive scale-up
 
-Status updated 2026-08-31 BST. The dataset contains 2,000 distinct 3D-FUTURE
+Status updated 2026-09-04 08:14 BST. The dataset contains 2,000 distinct 3D-FUTURE
 source objects and five frozen deterministic current-mesh perturbation variants
 per object. Object-level splits contain 8,000 train, 1,000 validation and 1,000
 test meshes. Each object's variants share its 28 calibrated 960-pixel RGB
@@ -419,8 +432,15 @@ nvdiffrec and 974/996 against ExMesh. Two NDS metrics are invalid, one
 nvdiffrec sample failed and four ExMesh outputs have invalid metrics or changed
 topology. Chamfer equals the bidirectional P2S mean by definition here because
 both directions use equal 3,000-sample sets; P2S p95 remains non-duplicate.
-Direct-vertex Arm-E job `17800` is pending for resources as of 2026-08-31, so
-no Future2000 Arm-E or B+E result is reported. Full provenance is in the
+The replacement direct-vertex Arm-E job `17888` completed all 200,000 steps on
+2026-09-04 with exit `0:0` and elapsed `2-16:05:51`. Validation selected epoch
+160; checkpoint SHA-256 is
+`5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`.
+The frozen B+E comparison is deliberately two-stage: array `18673` is running
+the declared lambda grid on all 1,000 validation meshes, `18677` will lock the
+mean-CD lambda, `18678` will then open test once, and `18679` will generate the
+baseline comparison report. No Future2000 Arm-E or B+E test result is reported
+before those dependencies complete. Full Arm-B provenance is in the
 [formal report](../reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md).
 
 ## Sofa50 controlled same-initial external benchmark
@@ -509,7 +529,9 @@ directly with the canonical Sofa50 results.
 | 17274/17275/17278 | Sofa50 Arms C/D/E | Completed | Matched-v2 C/D/E results are complete; E reaches Chamfer `0.00334039`. |
 | 17513/17515 | Old-domain native-1920 Arm B/E | Completed | Validation-selected specialists completed; test Chamfers are `0.00853777` and `0.00806580`. |
 | 17805/17806/17807 | Future2000 formal smoke/evaluation/finalizer | Completed | Mixed-loss Arm-B full-1000 audit complete; Chamfer `0.00476457`, 975/1000 improved. |
-| 17800 | Future2000 direct-vertex Arm E, 200k | Pending resources at 2026-08-31 check | From-scratch 4×Blackwell job; no result is claimed while pending. |
+| 17800/17883 | Superseded Future2000 Arm-E launches | Cancelled/superseded | The never-started 4-GPU job was replaced by a 2-GPU global-batch-8 run, which was later resumed at an epoch boundary. Neither ID is the final completed allocation. |
+| 17888 | Future2000 direct-vertex Arm E, 200k | Completed | Four-Blackwell epoch-boundary resume preserving global batch 8; completed `0:0` on 2026-09-04 after `2-16:05:51`; validation selected epoch 160. |
+| 18673/18677/18678/18679 | Future2000 frozen B+E validation/lock/test/report | Running/dependency-gated at 2026-09-04 08:14 | `18673` is the 8-shard validation sweep (3 running, 5 resource-pending at snapshot); test `18678` cannot start before validation lock `18677`, and report `18679` requires successful test completion. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model

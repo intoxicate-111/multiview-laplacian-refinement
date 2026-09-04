@@ -3,7 +3,7 @@
 These scripts run the comparison and reporting pipeline directly on the local
 machine. They contain no Slurm submission commands.
 
-Status update: 2026-08-31 BST. This local launcher is retained for
+Status update: 2026-09-04 08:14 BST. This local launcher is retained for
 reproducibility but is not the source of the formal comparison. The frozen
 full-1000 report now evaluates the formal mixed-loss current Arm B, the
 archived old-structure predictor and the external methods. Formal Arm B reaches
@@ -20,10 +20,15 @@ Their partial outputs must not be merged with the completed full-1000 report.
 
 ## Before running
 
-The formal Arm-B/external comparison can be reproduced without waiting for the
-pending Future2000 direct-vertex Arm-E job `17800`. A future Arm-E or B+E
-comparison must remain separate until Arm E completes and is selected using
-validation only. To reproduce the existing comparison, download only the test
+The formal Arm-B/external comparison remains independently reproducible. The
+replacement Future2000 direct-vertex Arm-E job `17888` has now completed all
+200,000 steps, and validation selected epoch 160 (checkpoint SHA-256
+`5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`).
+The new frozen B+E evaluation remains separate and uses an HPC-only sealed
+sequence: job `18673` sweeps lambda on validation, `18677` locks it, `18678`
+opens test once, and `18679` writes the comprehensive baseline report. At the
+status timestamp the validation sweep is running and no Arm-E/B+E test metric
+is claimed. To reproduce the existing Arm-B comparison, download only the test
 data and completed frozen artifacts:
 
 ```bash

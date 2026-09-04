@@ -87,6 +87,8 @@ from .vertex_sampling import sample_training_vertices, vertex_sampling_settings
 OUTPUT_REPRESENTATION_LOSS = "output_representation"
 RAW_LAPLACIAN_LOSS = "raw_laplacian"
 PREDICTION_LOSS_SPACES = {OUTPUT_REPRESENTATION_LOSS, RAW_LAPLACIAN_LOSS}
+RECOVERY_PRIMARY_SUPERVISION = {"prediction_space", "oriented_face_normals"}
+RECOVERY_ANCHOR_MODES = {"initial_vertices", "cached_frozen_vertices"}
 MULTIPROCESSING_SHARING_STRATEGIES = {"file_descriptor", "file_system"}
 
 
@@ -145,6 +147,7 @@ class _PreparedObject:
     # Loss-side only. This tensor is deliberately never inserted into ``sample``,
     # which is the only mapping passed to the predictor.
     clean_vertices: torch.Tensor | None = None
+    recovery_anchor_vertices: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -178,6 +181,9 @@ class _RecoveryAwareGeometrySettings:
     compute_dtype: str
     adaptive_lambda: bool
     solver_mode: str
+    primary_supervision: str
+    normal_epsilon: float
+    anchor_mode: str
 
 
 @dataclass(frozen=True)
@@ -233,6 +239,7 @@ class _MaterializedPreparedDataset(Dataset[dict[str, Any]]):
             "training_target": prepared.training_target,
             "raw_target": prepared.raw_target,
             "clean_vertices": prepared.clean_vertices,
+            "recovery_anchor_vertices": prepared.recovery_anchor_vertices,
             "clipped_target_vertices": prepared.clipped_target_vertices,
             "face_count": prepared.face_count,
             "image_decode_resize_seconds": prepared.image_decode_resize_seconds,
@@ -1200,11 +1207,23 @@ def train_multi_object(
                             (~torch.isfinite(recovered_vertices.detach())).sum().item()
                         )
                     else:
-                        refine_loss, _ = _recovery_refine_loss(
+                        refine_loss, recovered_vertices = _recovery_refine_loss(
                             prediction_fp32,
                             prepared,
                             recovery_aware,
                             regularization=recovery_regularization,
+                        )
+                    if recovery_aware.primary_supervision == "oriented_face_normals":
+                        clean_vertices = prepared.clean_vertices
+                        if clean_vertices is None:
+                            raise RuntimeError(
+                                "Oriented face-normal supervision requires clean vertices."
+                            )
+                        prediction_loss = _area_weighted_oriented_face_normal_loss(
+                            recovered_vertices,
+                            clean_vertices,
+                            prepared.sample["faces"],
+                            epsilon=recovery_aware.normal_epsilon,
                         )
                     objective = (
                         recovery_aware.prediction_loss_weight * prediction_loss
@@ -1625,6 +1644,12 @@ def train_multi_object(
                     "optimizer_steps_in_interval": report_step_count,
                     "progress_percent": progress_percent,
                     "train_loss": rolling_train_loss,
+                    "train_operator_normal_loss": (
+                        rolling_train_loss
+                        if recovery_aware.primary_supervision
+                        == "oriented_face_normals"
+                        else None
+                    ),
                     "train_objective": rolling_objective,
                     "train_confidence_loss": rolling_confidence_loss,
                     "train_recovery_refine_loss": rolling_refine_loss,
@@ -1895,6 +1920,7 @@ def train_multi_object(
         )
         validation_loss = None
         validation_laplacian_loss = None
+        validation_operator_normal_loss = None
         validation_refine_loss = None
         validation_recovered_vertex_rms = None
         validation_hybrid_chamfer = None
@@ -1925,6 +1951,9 @@ def train_multi_object(
             )
             validation_laplacian_loss = _mean_metric(
                 validation_epoch_metrics, "laplacian_loss"
+            )
+            validation_operator_normal_loss = _mean_metric(
+                validation_epoch_metrics, "operator_normal_loss"
             )
             validation_refine_loss = _mean_metric(
                 validation_epoch_metrics, "recovery_refine_loss"
@@ -2039,12 +2068,18 @@ def train_multi_object(
             "epoch": epoch,
             "train_loss": train_loss,
             "train_normalized_laplacian_loss": train_loss,
+            "train_operator_normal_loss": (
+                train_loss
+                if recovery_aware.primary_supervision == "oriented_face_normals"
+                else None
+            ),
             "train_objective": train_objective,
             "train_confidence_loss": train_confidence_loss,
             "train_recovery_refine_loss": train_refine_loss,
             "train_mean_confidence": train_mean_confidence,
             "validation_loss": validation_loss,
             "validation_normalized_laplacian_loss": validation_laplacian_loss,
+            "validation_operator_normal_loss": validation_operator_normal_loss,
             "validation_recovery_refine_loss": validation_refine_loss,
             "validation_recovered_vertex_rms": validation_recovered_vertex_rms,
             "validation_hybrid_chamfer": validation_hybrid_chamfer,
@@ -2784,6 +2819,20 @@ def _prepare_object_static(
         static_sample["hard_anchor_indices"] = deterministic_component_anchor_indices(
             static_sample["edge_index"], int(static_sample["vertices"].shape[0])
         )
+    recovery_anchor_vertices = None
+    if (
+        recovery_aware.enabled
+        and recovery_aware.anchor_mode == "cached_frozen_vertices"
+    ):
+        anchor = static_sample.get("recovery_anchor_vertices")
+        if not isinstance(anchor, torch.Tensor) or tuple(anchor.shape) != tuple(
+            static_sample["vertices"].shape
+        ):
+            raise ValueError(
+                "cached_frozen_vertices recovery requires a same-index "
+                "recovery_anchor_vertices tensor."
+            )
+        recovery_anchor_vertices = anchor.detach()
     if (
         hybrid_single.enabled
         and hybrid_single.operator == "symmetric_cotangent_stiffness"
@@ -2846,10 +2895,14 @@ def _prepare_object_static(
         keep_image_payload=keep_image_payload,
         keep_projection=keep_projection,
     )
-    if hybrid_single.enabled:
-        # Required only by the validation unified-v2 Chamfer selector.  Clean
-        # faces are not retained because the equality contract was checked
-        # above and the shared input faces are sufficient for evaluation.
+    if hybrid_single.enabled or (
+        recovery_aware.enabled
+        and recovery_aware.primary_supervision == "oriented_face_normals"
+    ):
+        # Hybrid validation and Arm-F loss need the shared current connectivity.
+        # The equality contract above has already proved that these ordered
+        # face triplets also define the clean reference; no second GT topology
+        # is exposed to the predictor.
         static_sample["faces"] = clean_faces
     return _PreparedObject(
         sample=static_sample,
@@ -2859,6 +2912,7 @@ def _prepare_object_static(
         face_count=face_count,
         used_view_count=int(static_sample["num_views"]),
         clean_vertices=clean_vertices,
+        recovery_anchor_vertices=recovery_anchor_vertices,
     )
 
 
@@ -3019,6 +3073,11 @@ def _move_prepared_object_to_device(
         if prepared.clean_vertices is None
         else prepared.clean_vertices.to(device, non_blocking=non_blocking)
     )
+    moved_recovery_anchor_vertices = (
+        None
+        if prepared.recovery_anchor_vertices is None
+        else prepared.recovery_anchor_vertices.to(device, non_blocking=non_blocking)
+    )
     return _PreparedObject(
         sample=moved_sample,
         training_target=moved_target,
@@ -3029,6 +3088,7 @@ def _move_prepared_object_to_device(
         decoded_image_bytes=prepared.decoded_image_bytes,
         used_view_count=prepared.used_view_count,
         clean_vertices=moved_clean_vertices,
+        recovery_anchor_vertices=moved_recovery_anchor_vertices,
     )
 
 
@@ -3106,6 +3166,9 @@ def _record_prepared_stream(
 
     _record_value_stream(prepared.sample, stream)
     _record_value_stream(prepared.training_target, stream)
+    _record_value_stream(prepared.raw_target, stream)
+    _record_value_stream(prepared.clean_vertices, stream)
+    _record_value_stream(prepared.recovery_anchor_vertices, stream)
 
 
 def _record_value_stream(value: Any, stream: torch.cuda.Stream) -> None:
@@ -3154,6 +3217,7 @@ def _materialize_prepared_images(
         decoded_image_bytes=images.numel() * images.element_size(),
         used_view_count=int(images.shape[0]),
         clean_vertices=prepared.clean_vertices,
+        recovery_anchor_vertices=prepared.recovery_anchor_vertices,
     )
 
 
@@ -3194,6 +3258,7 @@ def _select_prepared_views(
         decoded_image_bytes=prepared.decoded_image_bytes,
         used_view_count=int(views_per_sample),
         clean_vertices=prepared.clean_vertices,
+        recovery_anchor_vertices=prepared.recovery_anchor_vertices,
     )
 
 
@@ -3216,6 +3281,7 @@ def _replace_prepared(
             prepared.used_view_count if used_view_count is None else used_view_count
         ),
         clean_vertices=prepared.clean_vertices,
+        recovery_anchor_vertices=prepared.recovery_anchor_vertices,
     )
 
 
@@ -3246,6 +3312,11 @@ def _prepared_from_loader_item(item: Any) -> _PreparedObject:
             if isinstance(item.get("clean_vertices"), torch.Tensor)
             else None
         ),
+        recovery_anchor_vertices=(
+            item.get("recovery_anchor_vertices")
+            if isinstance(item.get("recovery_anchor_vertices"), torch.Tensor)
+            else None
+        ),
     )
 
 
@@ -3271,6 +3342,7 @@ def _build_prepared_loader(
             face_count=item.face_count,
             used_view_count=item.used_view_count,
             clean_vertices=item.clean_vertices,
+            recovery_anchor_vertices=item.recovery_anchor_vertices,
         )
         for item in items
     )
@@ -3513,6 +3585,9 @@ def _recovery_aware_geometry_settings(
         compute_dtype=str(raw.get("compute_dtype", "float32")),
         adaptive_lambda=bool(raw.get("adaptive_lambda", False)),
         solver_mode=str(raw.get("solver", "regularized_sparse")),
+        primary_supervision=str(raw.get("primary_supervision", "prediction_space")),
+        normal_epsilon=float(raw.get("normal_epsilon", 1e-12)),
+        anchor_mode=str(raw.get("anchor_mode", "initial_vertices")),
     )
     if settings.solver_mode not in {"regularized_sparse", "hard_anchor_lambda0"}:
         raise ValueError(
@@ -3539,6 +3614,23 @@ def _recovery_aware_geometry_settings(
         raise ValueError("recovery-aware tolerance must be positive.")
     if settings.compute_dtype not in {"float32", "float64"}:
         raise ValueError("recovery-aware compute_dtype must be float32 or float64.")
+    if settings.primary_supervision not in RECOVERY_PRIMARY_SUPERVISION:
+        raise ValueError(
+            "recovery-aware primary_supervision must be prediction_space or "
+            "oriented_face_normals."
+        )
+    if settings.normal_epsilon <= 0:
+        raise ValueError("recovery-aware normal_epsilon must be positive.")
+    if settings.anchor_mode not in RECOVERY_ANCHOR_MODES:
+        raise ValueError(
+            "recovery-aware anchor_mode must be initial_vertices or "
+            "cached_frozen_vertices."
+        )
+    if (
+        settings.solver_mode == "hard_anchor_lambda0"
+        and settings.anchor_mode != "initial_vertices"
+    ):
+        raise ValueError("hard_anchor_lambda0 only supports initial_vertices.")
     return settings
 
 
@@ -3681,9 +3773,10 @@ def _recovery_refine_loss(
             tolerance=settings.tolerance,
         )
     else:
+        anchor = _recovery_anchor(prepared, settings, solve_dtype)
         recovered = differentiable_regularized_sparse_recovery(
             prediction.to(dtype=solve_dtype),
-            sample["vertices"].to(dtype=solve_dtype),
+            anchor,
             sample["edge_index"],
             sample["vertex_degree"].to(dtype=solve_dtype),
             regularization=(
@@ -3726,9 +3819,10 @@ def _recovery_refine_loss_with_audit(
             tolerance=settings.tolerance,
         )
     else:
+        anchor = _recovery_anchor(prepared, settings, solve_dtype)
         recovered, audit = differentiable_regularized_sparse_recovery_with_audit(
             prediction.to(dtype=solve_dtype),
-            sample["vertices"].to(dtype=solve_dtype),
+            anchor,
             sample["edge_index"],
             sample["vertex_degree"].to(dtype=solve_dtype),
             regularization=(
@@ -3744,6 +3838,80 @@ def _recovery_refine_loss_with_audit(
         .mean()
     )
     return refine_loss, recovered, audit
+
+
+def _recovery_anchor(
+    prepared: _PreparedObject,
+    settings: _RecoveryAwareGeometrySettings,
+    solve_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return the loss-side recovery anchor without exposing it to the predictor."""
+
+    sample = prepared.sample
+    if settings.anchor_mode == "initial_vertices":
+        return sample["vertices"].to(dtype=solve_dtype)
+    anchor = prepared.recovery_anchor_vertices
+    if not isinstance(anchor, torch.Tensor):
+        raise RuntimeError(
+            "cached_frozen_vertices recovery requires recovery_anchor_vertices."
+        )
+    if tuple(anchor.shape) != tuple(sample["vertices"].shape):
+        raise RuntimeError("Frozen recovery anchor shape differs from input vertices.")
+    # The frozen positional prediction is loss-side data.  Detaching here is a
+    # second guard in addition to the on-disk cache and frozen-model audit.
+    return anchor.detach().to(dtype=solve_dtype)
+
+
+def _area_weighted_oriented_face_normal_loss(
+    predicted_vertices: torch.Tensor,
+    clean_vertices: torch.Tensor,
+    faces: torch.Tensor,
+    *,
+    epsilon: float = 1e-12,
+) -> torch.Tensor:
+    """GT-area-weighted, orientation-sensitive face-normal cosine loss."""
+    if predicted_vertices.ndim != 2 or predicted_vertices.shape[1] != 3:
+        raise ValueError("predicted_vertices must have shape [N, 3].")
+    if clean_vertices.shape != predicted_vertices.shape:
+        raise ValueError("clean and predicted vertices must have identical shape.")
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("faces must have shape [F, 3].")
+    if faces.numel() == 0:
+        raise ValueError("face-normal supervision requires at least one face.")
+    if epsilon <= 0:
+        raise ValueError("normal epsilon must be positive.")
+    face_index = faces.to(device=predicted_vertices.device, dtype=torch.long)
+    if int(face_index.min()) < 0 or int(face_index.max()) >= predicted_vertices.shape[0]:
+        raise ValueError("faces contain an out-of-range vertex index.")
+
+    predicted_triangles = predicted_vertices[face_index]
+    clean = clean_vertices.to(
+        device=predicted_vertices.device, dtype=predicted_vertices.dtype
+    )
+    clean_triangles = clean[face_index]
+    predicted_cross = torch.cross(
+        predicted_triangles[:, 1] - predicted_triangles[:, 0],
+        predicted_triangles[:, 2] - predicted_triangles[:, 0],
+        dim=-1,
+    )
+    clean_cross = torch.cross(
+        clean_triangles[:, 1] - clean_triangles[:, 0],
+        clean_triangles[:, 2] - clean_triangles[:, 0],
+        dim=-1,
+    )
+    predicted_normals = predicted_cross / (
+        torch.linalg.vector_norm(predicted_cross, dim=-1, keepdim=True) + epsilon
+    )
+    clean_cross_norm = torch.linalg.vector_norm(clean_cross, dim=-1, keepdim=True)
+    clean_normals = clean_cross / (clean_cross_norm + epsilon)
+    # The loss weights are fixed GT areas; predicted areas never enter them.
+    gt_area = (0.5 * clean_cross_norm.squeeze(-1)).detach()
+    area_sum = gt_area.sum()
+    if not bool(torch.isfinite(area_sum)) or float(area_sum) <= 0:
+        raise ValueError("clean mesh has non-finite or zero total triangle area.")
+    weights = gt_area / area_sum
+    oriented_cosine = (predicted_normals * clean_normals).sum(dim=-1)
+    return (weights * (1.0 - oriented_cosine)).sum()
 
 
 def _with_query_augmentation(
@@ -3781,6 +3949,7 @@ def _with_query_augmentation(
         decoded_image_bytes=prepared.decoded_image_bytes,
         used_view_count=prepared.used_view_count,
         clean_vertices=prepared.clean_vertices,
+        recovery_anchor_vertices=prepared.recovery_anchor_vertices,
     )
 
 
@@ -3805,6 +3974,7 @@ def _with_local_query_jitter(
         decoded_image_bytes=prepared.decoded_image_bytes,
         used_view_count=prepared.used_view_count,
         clean_vertices=prepared.clean_vertices,
+        recovery_anchor_vertices=prepared.recovery_anchor_vertices,
     )
 def _query_subset_losses(
     prediction: torch.Tensor,
@@ -3983,16 +4153,31 @@ def _evaluate_dataset(
                 prepared.sample["target_confidence"].float(),
                 **loss_kwargs,
             )
+        prediction_space_loss = loss
         refine_loss = None
+        operator_normal_loss = None
         recovered_vertex_rms = None
         recovered_vertices = None
         hybrid_geometry = None
         objective = loss
         if recovery_aware.enabled:
-            refine_loss, _ = _recovery_refine_loss(
+            refine_loss, recovered_vertices = _recovery_refine_loss(
                 prediction, prepared, recovery_aware
             )
             recovered_vertex_rms = torch.sqrt(refine_loss)
+            if recovery_aware.primary_supervision == "oriented_face_normals":
+                clean_vertices = prepared.clean_vertices
+                if clean_vertices is None:
+                    raise RuntimeError(
+                        "Oriented face-normal validation requires clean vertices."
+                    )
+                operator_normal_loss = _area_weighted_oriented_face_normal_loss(
+                    recovered_vertices,
+                    clean_vertices,
+                    prepared.sample["faces"],
+                    epsilon=recovery_aware.normal_epsilon,
+                )
+                loss = operator_normal_loss
             objective = (
                 recovery_aware.prediction_loss_weight * loss
                 + recovery_aware.beta * refine_loss
@@ -4022,7 +4207,7 @@ def _evaluate_dataset(
                 fscore_threshold=0.01,
             )
         loss_value = float(objective.item())
-        laplacian_loss_value = float(loss.item())
+        laplacian_loss_value = float(prediction_space_loss.item())
         exact_loss, perturbed_loss = _query_subset_losses(
             loss_prediction,
             loss_target,
@@ -4074,6 +4259,11 @@ def _evaluate_dataset(
             "laplacian_loss": laplacian_loss_value,
             "recovery_refine_loss": (
                 None if refine_loss is None else float(refine_loss.item())
+            ),
+            "operator_normal_loss": (
+                None
+                if operator_normal_loss is None
+                else float(operator_normal_loss.item())
             ),
             "recovered_vertex_rms": (
                 None

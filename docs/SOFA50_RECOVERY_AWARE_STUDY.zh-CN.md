@@ -1,6 +1,6 @@
 # Sofa50 v2 recovery-aware 训练研究
 
-状态日期：2026-08-24 BST。
+状态日期：2026-09-04 BST。
 
 本文记录 `Sofa50MultiTopologyRawLap500_v2` 上当前 matched-domain 研究。它把
 全方程 regularized sparse integration 作为当前实验 recovery 主线；历史
@@ -102,19 +102,20 @@ Strict hardware/sharding contract 为 false，因为已完成 A/B 都在 epoch b
 2×L40 转到 8×RTX PRO 6000 Blackwell；effective global batch、optimizer-step budget
 与 executable mathematical contract 保持不变。
 
-## 运行中的 lambda extension：Arm C 与 Arm D
+## 已完成的 lambda extension：Arm C 与 Arm D
 
 C/D 保持 Arm B 不变，只修改 differentiable/evaluation regularization：
 
-| Arm | `lambda` | `beta` | 2026-08-24 状态快照 |
-|---|---:|---:|---|
-| C | `10^-3` | `10^-2` | Job `17274` 在 8×Blackwell 上运行；step 3,200/20,000，failed solves 与 NaN/Inf 均为 0。 |
-| D | `10^-4` | `10^-2` | Job `17275` 依赖 C 排队。 |
+| Arm | `lambda` | `beta` | Test Chamfer | 结果 |
+|---|---:|---:|---:|---|
+| B | `10^-2` | `10^-2` | **0.00358497** | 选定 recovery-aware reference。 |
+| C | `10^-3` | `10^-2` | 0.00414926 | 减弱 anchor 后 geometry 变差。 |
+| D | `10^-4` | `10^-2` | 0.00653139 | 进一步减弱后继续变差。 |
 
 PCG tolerance 仍为 `10^-4`。Preflight 发现较小 lambda 下 float32 stagnation，因此
 C/D 使用 float64 PCG、最多 2,048 iterations。这是已记录的 numerical execution
-change；lambda 和 objective 均未被静默修改。Dependent validation/test evaluation 与
-report merge 完成前，不得给出 C/D 科学结论。
+change；lambda 和 objective 均未被静默修改。已完成对比不支持把 positional
+regularization 降到 `10^-2` 以下。
 
 ## Direct-vertex 对照：Arm E
 
@@ -145,16 +146,31 @@ $$
 
 变量说明：`Delta V*` 是 exact same-index clean displacement，`L_E` 是 mean squared
 3D displacement error；GT vertices 仅用于 loss。500 个 prepared samples 的
-implementation audit 已通过。Job `17278` 在 D 后排队，evaluation `17279`、A-E
-merge `17280` 与 matched visualization `17281` 均由 dependency gate 控制。在这些
-任务完成前，H1（vertex loss 足以解释提升）与 H2（differential representation +
-structured integration 提供额外 inductive bias）仍未判定。
+implementation audit 已通过。最终 test Chamfer 为 `0.00334039`、same-index vertex
+RMS 为 `0.00822130`，改善 45/50 meshes。Frozen B+E 使用 validation-selected
+`lambda=0.03` 后达到 Chamfer `0.00302983` 与 49/50 改善，但 Arm E 的 same-index
+vertex RMS 仍更低。
+
+## 已完成的 formulation stress tests
+
+- `lambda=0.03` 时 Direct-Lap A+E CD 为 `0.00298590`，B+E 为 `0.00302983`；paired
+  CD 的 mesh/object CI 均含零。`lambda=0.01` 时对应为 `0.00314166` 与
+  `0.00319840`，两个 CI 同样含零。因此没有证据证明 recovery-aware Arm-B training
+  是 operator composition 的必要条件。
+- 相同 V_P anchor 下，anchor-conditioned B_P 与 B_0 没有分离：CD 差
+  `-0.00001703`，mesh/object CI 均跨零。显著 interaction 只说明 anchor-specific
+  adaptation，不能替代 final same-anchor gain 证据。
+- Positional-density curve 平滑且单调：fixed-lambda test CD 从 0% 的 `0.0330216`
+  降到 100% 的 `0.00302983`；Song-scale 2% 比 dense 高 `243.70%`，paired 为 0/50
+  胜。因此 dense B+E 可解释为 densified learned anchoring，但低密度 constraints
+  不足以复现其绝对质量。
 
 ## 判定边界
 
 - Raw EPE/RMS/tail 只用于预测 Laplacian 的 A-D，Arm E 不报告 raw Laplacian EPE。
 - Recovery-aware Laplacian arm 必须按 validation recovered geometry 选择，再冻结后
   解释 test。
-- Arm E 必须分别与 B、以及 validation-selected B/C/D 最优组做 paired Chamfer、
-  vertex RMS、P2S p95、F-score、normal 和 flips 对比。
-- 不得根据中间结果自动启动 2,000-mesh `strong_smooth_v2` scaling。
+- Arm E、Direct-Lap A+E 与 recovery-aware B+E 必须用 paired Chamfer、vertex RMS、
+  P2S p95、F-score、normal、flips 对比；不能从略低的 aggregate 数值直接推导必要性。
+- Dense B+E 应描述为 learned dense positional/differential operator composition 或
+  densified learned anchoring，不能描述成没有 sparse-constraint 前身的 formulation。
