@@ -111,13 +111,15 @@ completed all 200,000 steps on 2026-09-04 with exit `0:0`; validation selected
 epoch 160 (checkpoint SHA-256
 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`).
 
-The frozen B+E comparison is dependency-gated as `18673` validation sweep →
-`18677` lambda lock → `18678` test → `18679` report. Both GPU arrays retain
-eight deterministic shards but use `ArrayTaskThrottle=4`, so the chain consumes
-at most four GPUs concurrently. At the 2026-09-04 09:18 snapshot, four
-validation shards are running and four are waiting; test has not been opened.
-Do not claim Future2000 Arm-E or B+E test
-results before the chain completes. Chamfer equals the
+The frozen B+E comparison completed its validation stage as `18673` validation
+sweep → `18677` lambda lock. The lock selected `lambda=0.1` at validation mean
+CD `0.00295644415` without test access. Test shards 0–3 completed under `18678`;
+after the remaining tasks stalled at the dynamically reduced array throttle,
+only shards 4–7 were resubmitted as `18780` with `ArrayTaskThrottle=4`. Report
+job `18679` now depends on `18780_*`. This recovery preserves the completed
+shards, the one frozen test opening and the maximum four-GPU allocation. Do not
+claim aggregate Future2000 Arm-E or B+E test results before the chain completes.
+Chamfer equals the
 bidirectional P2S mean in the current evaluator because both directions use
 equal 3,000-sample sets; retain P2S p95 but do not present P2S mean as
 independent evidence. See the

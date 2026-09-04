@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-状态日期：2026-09-04 09:18 BST，Europe/London。
+状态日期：2026-09-04 12:07 BST，Europe/London。
 
 本文档汇总当前本地工作区和 HPC 中已有的实验数据。标记为“运行中快照”的数值不是最终结果。只有目标、loss、数据划分和评估路径一致的实验，其训练 loss 才可直接比较。
 
@@ -49,7 +49,7 @@ quantity；它不会对当前 target 做除法、clip 或 denormalization。`h^2
 | Synthetic current-query，native 1920 | 与 960 相同的 250 IDs 和 200/25/25 split | 28 / 1920 | 数据、HF 训练与评估均完成 | HPC：`sofa50_synthetic_current_28view_native1920_v1` |
 | Sofa50 多拓扑 raw-Laplacian v1 | 50 个对象、每个 10 个 variants；400/50/50 | 28 / 960 | 历史弱 smoothing 数据集已完成 | HPC：`Sofa50MultiTopologyRawLap500_v1` |
 | Sofa50 多拓扑 raw-Laplacian v2 | 与 v1 相同对象、variants 和 split | 28 / 960 | 500/500 审计通过；2×L40 20k 训练和统一 v1-v2 test/recovery 已完成 | HPC：`Sofa50MultiTopologyRawLap500_v2` |
-| Future2000 GT-adaptive expanded current | 2,000 个不同对象，每个 5 个冻结变体；按对象划分 8000/1000/1000 | 28 / 960 | Formal Arm-B test 与 200k Arm-E 训练已完成；frozen B+E validation-only lambda sweep 运行中 | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Future2000 GT-adaptive expanded current | 2,000 个不同对象，每个 5 个冻结变体；按对象划分 8000/1000/1000 | 28 / 960 | Formal Arm-B test 与 200k Arm-E 训练已完成；frozen B+E validation 已锁定 `lambda=0.1`，sealed test shards 4–7 由替代 array `18780` 因 Priority 排队 | HPC：`future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query 压力测试集 | 48 个 coarse mesh 可用；2 个缺失 | 预测使用 canonical 14 个 RGB 视图 | 完成；仅诊断，不作为目标 | HPC：`openmvs_texture_test_v6_48view` |
 | Thingi10K50 开发集 | 50 个对象；40/5/5 | 960 和 1920 变体 | 仅开发与 smoke run | 本地 `thingi10k50` 运行目录 |
 
@@ -364,7 +364,7 @@ CD separation（`-0.00001703`，mesh/object CI 均跨零）。Sparse positional 
 
 ## Future2000 GT-adaptive 扩展实验
 
-状态更新：2026-09-04 09:18 BST。数据集包含 2,000 个不同的 3D-FUTURE source objects，
+状态更新：2026-09-04 12:07 BST。数据集包含 2,000 个不同的 3D-FUTURE source objects，
 每个对象有 5 个冻结的确定性 current-mesh 扰动变体。Object-level split 为 8,000
 train、1,000 validation、1,000 test meshes。同一对象的变体共享其 28 个标定
 960-pixel RGB observations，但 current geometry、connectivity、query graph 与
@@ -394,9 +394,12 @@ samples，Chamfer 与 bidirectional P2S mean 在此定义上完全相同；P2S p
 替代后的 direct-vertex Arm-E job `17888` 已于 2026-09-04 完成全部 200,000 steps，
 exit `0:0`、elapsed `2-16:05:51`。Validation 选择 epoch 160；checkpoint SHA-256 为
 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`。
-Frozen B+E 对比严格分成两阶段：array `18673` 正在全部 1,000 validation meshes 上运行
-预声明 lambda grid，`18677` 将按 mean CD 锁参，`18678` 随后只打开一次 test，`18679`
-再生成 baseline comparison 报告。依赖完成前不报告 Future2000 Arm-E/B+E test 结果。
+Frozen B+E 对比严格分成两阶段。Array `18673` 已在全部 1,000 validation meshes 上
+完成预声明 lambda grid，`18677` 在未访问 test 的情况下按 validation mean CD
+`0.00295644415` 锁定 `lambda=0.1`。Test shards 0–3 已由 `18678` 完成；其余任务在动态
+降低 array throttle 后停滞，因此仅将未完成的 shards 4–7 以四卡上限 array `18780`
+重投一次。Report `18679` 现依赖 `18780_*` 成功完成。全部完成前不报告聚合的
+Future2000 Arm-E/B+E test 结果。
 Formal Arm-B 完整 provenance 见
 [formal report](../reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)。
 
@@ -484,7 +487,7 @@ mesh 统一重算。Native metrics 只作 provenance。详见双语
 | 17805/17806/17807 | Future2000 formal smoke/evaluation/finalizer | 已完成 | Mixed-loss Arm-B full-1000 audit 完成；Chamfer `0.00476457`，975/1000 改善。 |
 | 17800/17883 | 已替代的 Future2000 Arm-E launches | 已取消/替代 | 未启动的 4-GPU job 被 2-GPU global-batch-8 run 替代，后者再于 epoch boundary 恢复；两者都不是最终完成 allocation。 |
 | 17888 | Future2000 direct-vertex Arm E，200k | 已完成 | 4×Blackwell epoch-boundary resume 保持 global batch 8；2026-09-04 以 `0:0` 完成，elapsed `2-16:05:51`；validation 选择 epoch 160。 |
-| 18673/18677/18678/18679 | Future2000 frozen B+E validation/锁参/test/report | 2026-09-04 09:18 运行中/依赖门控 | `18673` 保留 8 个确定性 validation shards，但设置 `ArrayTaskThrottle=4`；快照时 4 个运行、4 个等待。依赖 test `18678` 使用相同 4-GPU 上限，必须等待 `18677` 锁参成功；report `18679` 必须等待 test 成功。 |
+| 18673/18677/18678/18780/18679 | Future2000 frozen B+E validation/锁参/test/report | Validation 与锁参完成；2026-09-04 12:07 sealed test 恢复任务因 Priority 排队 | `18673` 的 8 个确定性 validation shards 已完成，`18677` 仅用 validation 锁定 `lambda=0.1`。Test shards 0–3 已在 `18678` 完成；只将未完成的 shards 4–7 以 `ArrayTaskThrottle=4` 重投为 `18780`。Report `18679` 依赖 `18780_*` 成功完成。 |
 
 Jobs 15631 和 15632 在 B 的预算从 50,000 修改为 20,000 steps 后，于执行前取消。两项运行时间均为 0，未产生模型或对比结果。
 

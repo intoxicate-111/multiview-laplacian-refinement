@@ -2,7 +2,7 @@
 
 [English](EXPERIMENT_DATA_SUMMARY.md) | [简体中文](EXPERIMENT_DATA_SUMMARY.zh-CN.md)
 
-Status date: 2026-09-04 09:18 BST, Europe/London.
+Status date: 2026-09-04 12:07 BST, Europe/London.
 
 This document indexes the experiment data currently available in the local
 workspace and on the HPC. A value marked `running snapshot` is not a final
@@ -54,7 +54,7 @@ historical comparisons and diagnostics.
 | Synthetic current-query, native 1920 | Same 250 IDs and 200/25/25 split as 960 | 28 / 1920 | Complete; HF training/evaluation complete | HPC: `sofa50_synthetic_current_28view_native1920_v1` |
 | Sofa50 multi-topology raw-Laplacian v1 | 50 objects, 10 variants each; 400/50/50 | 28 / 960 | Complete historical mild-smoothing dataset | HPC: `Sofa50MultiTopologyRawLap500_v1` |
 | Sofa50 multi-topology raw-Laplacian v2 | Same objects, variants and split as v1 | 28 / 960 | 500/500 audited; 2×L40 20k training and unified v1-v2 test/recovery complete | HPC: `Sofa50MultiTopologyRawLap500_v2` |
-| Future2000 GT-adaptive expanded current | 2,000 distinct objects, 5 frozen variants each; 8000/1000/1000 variants by object split | 28 / 960 | Formal Arm-B test and 200k Arm-E training complete; validation-only frozen B+E lambda sweep running | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
+| Future2000 GT-adaptive expanded current | 2,000 distinct objects, 5 frozen variants each; 8000/1000/1000 variants by object split | 28 / 960 | Formal Arm-B test and 200k Arm-E training complete; frozen B+E validation lock complete (`lambda=0.1`), sealed test shards 4–7 priority-queued as replacement array `18780` | HPC: `future2000_gt_adaptive_synthetic_current_28view_v2` |
 | OpenMVS coarse-query stress set | 48 available coarse meshes; 2 missing | Prediction uses the canonical 14 RGB views | Complete; diagnostic only, not a target | HPC: `openmvs_texture_test_v6_48view` |
 | Thingi10K50 development set | 50 objects; 40/5/5 | 960 and 1920 variants | Development and smoke runs only | Local `thingi10k50` run directories |
 
@@ -403,7 +403,7 @@ operator composition.
 
 ## Future2000 GT-adaptive scale-up
 
-Status updated 2026-09-04 09:18 BST. The dataset contains 2,000 distinct 3D-FUTURE
+Status updated 2026-09-04 12:07 BST. The dataset contains 2,000 distinct 3D-FUTURE
 source objects and five frozen deterministic current-mesh perturbation variants
 per object. Object-level splits contain 8,000 train, 1,000 validation and 1,000
 test meshes. Each object's variants share its 28 calibrated 960-pixel RGB
@@ -436,11 +436,14 @@ The replacement direct-vertex Arm-E job `17888` completed all 200,000 steps on
 2026-09-04 with exit `0:0` and elapsed `2-16:05:51`. Validation selected epoch
 160; checkpoint SHA-256 is
 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`.
-The frozen B+E comparison is deliberately two-stage: array `18673` is running
-the declared lambda grid on all 1,000 validation meshes, `18677` will lock the
-mean-CD lambda, `18678` will then open test once, and `18679` will generate the
-baseline comparison report. No Future2000 Arm-E or B+E test result is reported
-before those dependencies complete. Full Arm-B provenance is in the
+The frozen B+E comparison is deliberately two-stage. Array `18673` completed
+the declared lambda grid on all 1,000 validation meshes, and `18677` selected
+`lambda=0.1` at validation mean CD `0.00295644415` without test access. Test
+shards 0–3 completed under `18678`; after its remaining tasks stalled at the
+dynamically reduced array throttle, shards 4–7 were resubmitted exactly once as
+four-GPU-capped array `18780`. Report `18679` now depends on `18780_*`. No
+aggregate Future2000 Arm-E or B+E test result is reported before completion.
+Full Arm-B provenance is in the
 [formal report](../reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md).
 
 ## Sofa50 controlled same-initial external benchmark
@@ -531,7 +534,7 @@ directly with the canonical Sofa50 results.
 | 17805/17806/17807 | Future2000 formal smoke/evaluation/finalizer | Completed | Mixed-loss Arm-B full-1000 audit complete; Chamfer `0.00476457`, 975/1000 improved. |
 | 17800/17883 | Superseded Future2000 Arm-E launches | Cancelled/superseded | The never-started 4-GPU job was replaced by a 2-GPU global-batch-8 run, which was later resumed at an epoch boundary. Neither ID is the final completed allocation. |
 | 17888 | Future2000 direct-vertex Arm E, 200k | Completed | Four-Blackwell epoch-boundary resume preserving global batch 8; completed `0:0` on 2026-09-04 after `2-16:05:51`; validation selected epoch 160. |
-| 18673/18677/18678/18679 | Future2000 frozen B+E validation/lock/test/report | Running/dependency-gated at 2026-09-04 09:18 | `18673` uses eight deterministic validation shards with `ArrayTaskThrottle=4` (4 running, 4 waiting at snapshot); dependent test `18678` has the same four-GPU cap, cannot start before lock job `18677`, and report `18679` requires successful test completion. |
+| 18673/18677/18678/18780/18679 | Future2000 frozen B+E validation/lock/test/report | Validation and lock complete; sealed test recovery priority-queued at 2026-09-04 12:07 | `18673` completed eight deterministic validation shards and `18677` locked `lambda=0.1` from validation only. Test shards 0–3 completed under `18678`; only unfinished shards 4–7 were resubmitted as `18780` with `ArrayTaskThrottle=4` and are pending for `Priority`. Report `18679` depends on successful completion of `18780_*`. |
 
 Jobs 15631 and 15632 were cancelled before execution after the B budget changed
 from 50,000 to 20,000 steps. Both recorded zero runtime and produced no model

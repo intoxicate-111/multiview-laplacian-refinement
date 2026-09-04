@@ -144,7 +144,7 @@ and the
 
 ## Project status
 
-Status date: 2026-09-04 09:18 BST.
+Status date: 2026-09-04 12:07 BST.
 
 OpenMVS policy: the existing Sofa50 OpenMVS meshes are low-quality external
 reconstructions and are retained only as out-of-distribution stress tests.
@@ -187,8 +187,8 @@ desired quality ceiling. See [the OpenMVS input policy](docs/OPENMVS_INPUT_POLIC
 | Continuous pretrained B+E on matched v2 | Complete; validation selected | Two complete independent specialists are continued jointly with final-hybrid-only supervision. Validation selected step 9,400; matched-test Chamfer improves from the geometry-equivalent step-0 `0.00302691` to `0.00288357`, while legacy/unseen OOD remain unsuccessful. |
 | Old-domain native-1920 specialists and frozen B+E | Complete | Validation-selected Arm B, Arm E, a post-hoc scalar blend and Frozen B+E were evaluated on the exact common 25-sample input. Their Chamfers are `0.00853777`, `0.00806580`, `0.00756219` and `0.00670460`; Frozen improves all 25 meshes and wins 22/25 versus B, 23/25 versus E and 21/25 versus the scalar blend. Normal and same-index vertex RMS favour the scalar blend, so the metric trade-off remains explicit. |
 | Future2000 formal mixed-loss Arm B | Complete | The formal 200,000-step checkpoint retains `L_raw-Laplacian-Huber + 10^-2 L_recovered-vertex`. On 200 held-out objects × 5 frozen variants, Chamfer falls from `0.00776417` to `0.00476457`, 975/1000 samples improve, and the paired improvement over the archived old-structure predictor is `0.000464982` (882/1000 meshes; 185/200 object means; object-bootstrap CI excludes zero). |
-| Future2000 direct-vertex Arm E | Complete | Job `17888` completed 200,000 steps on 2026-09-04 (`0:0`, elapsed `2-16:05:51`). The validation-selected epoch-160 checkpoint SHA-256 is `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`. Test metrics remain sealed until fusion lambda is locked. |
-| Future2000 frozen B+E comparison | Validation running; test dependency-gated | Validation array `18673` is sweeping the declared lambda grid on all 1,000 validation variants using eight deterministic shards capped at four concurrent one-GPU tasks. Job `18677` will lock mean-CD lambda, test array `18678` has the same four-GPU cap and will then evaluate Arm-E/B+E once, and report job `18679` will compare against Arm-B, old structure, NDS, nvdiffrec and ExMesh. No Future2000 Arm-E/B+E test metric is yet claimed. |
+| Future2000 direct-vertex Arm E | Complete | Job `17888` completed 200,000 steps on 2026-09-04 (`0:0`, elapsed `2-16:05:51`). The validation-selected epoch-160 checkpoint SHA-256 is `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`. Fusion lambda was subsequently locked on validation before the one-time test opening. |
+| Future2000 frozen B+E comparison | Validation/lock complete; test in progress | Validation array `18673` completed all 1,000 variants and job `18677` selected `lambda=0.1` by mean CD (`0.00295644415`) without test access. Test shards 0–3 completed successfully under job `18678`; a Slurm throttle-stall left 4–7 pending, so they were resubmitted exactly once as four-GPU-capped array `18780` and were queued for priority at the 12:07 snapshot. Report `18679` now depends on `18780_*`. No aggregate Future2000 Arm-E/B+E test metric is yet claimed. |
 | GT-query direct-raw zero-shot transfer | Complete | Removing `h^2` normalization improves strongly over the historical GT-query arm, but current-mesh recovery reaches only Chamfer `0.00400486` and `4/25`, versus `0.00377832` and `20/25` for supervised current-query HF. |
 | Future2000 GT-adaptive scale-up | Formal 200k Arm-B test complete | The dataset contains 2,000 distinct 3D-FUTURE source objects, each with five frozen deterministic perturbation variants (`8000/1000/1000` by object split). Formal Arm B reaches Chamfer `0.00476457`, P2S p95 `0.01462829`, F-score `0.88103565` and 975/1000 improvements; normal consistency decreases from `0.92425235` to `0.90859736`. |
 | Sofa50 same-initial external benchmark | Complete, corrected evaluator | Ours, NDS, nvdiffrec and ExMesh completed 25/25 from the same current mesh and observations. A native-metric aggregation bug was corrected by re-evaluating every archived mesh with one deterministic evaluator; `contract_audit=true`. |
@@ -204,9 +204,10 @@ geometry is loss-only and is never passed to either branch or the solve. The
 completed formal Future2000 Arm-B scale-up uses the 960 high-frequency
 construction, 28 views, C2F2, the established mixed objective and a fixed
 200,000-step checkpoint. Its full-1000 same-initial comparison is complete,
-with invalid external outputs retained explicitly. Direct-vertex Arm E has now
-completed, and the validation-only B+E lambda sweep is running; the test split
-remains dependency-gated until the lock is written.
+with invalid external outputs retained explicitly. Direct-vertex Arm E and the
+validation-only B+E lambda lock are complete; the one-time test evaluation is
+partly complete and its remaining four shards are queued under the repaired
+dependency chain.
 
 The earlier GT-query, `h^2`-normalised formulation remains useful historical
 context. Its transfer to expanded and OpenMVS query graphs did not improve
@@ -1194,10 +1195,11 @@ and reverse directions use equal 3,000-sample sets, so a duplicate P2S-mean
 column is not treated as independent evidence. P2S p95 remains distinct.
 
 The replacement direct-vertex Arm-E job `17888` completed all 200,000 steps on
-2026-09-04. Validation array `18673` is selecting the frozen B+E lambda without
-opening test; jobs `18677`, `18678` and `18679` lock lambda, evaluate test and
-generate the comprehensive report through `afterok` dependencies. No
-Future2000 Arm-E or B+E test metric is yet claimed. See the
+2026-09-04. Validation array `18673` and lock job `18677` completed before test
+access, selecting `lambda=0.1`. Test shards 0–3 completed under `18678`; shards
+4–7 were resubmitted as `18780` after the original array stalled at its dynamic
+throttle. Report `18679` now depends on `18780_*`. No aggregate Future2000
+Arm-E or B+E test metric is yet claimed. See the
 [formal Future2000 report](reports/future2000_mixed_vs_old_external_20260831_v2/FINAL_REPORT.md)
 for the frozen contract, paired samples, invalid-output audit and provenance.
 

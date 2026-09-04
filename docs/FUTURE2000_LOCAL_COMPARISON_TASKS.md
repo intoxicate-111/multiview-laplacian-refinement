@@ -3,7 +3,7 @@
 These scripts run the comparison and reporting pipeline directly on the local
 machine. They contain no Slurm submission commands.
 
-Status update: 2026-09-04 09:18 BST. This local launcher is retained for
+Status update: 2026-09-04 12:07 BST. This local launcher is retained for
 reproducibility but is not the source of the formal comparison. The frozen
 full-1000 report now evaluates the formal mixed-loss current Arm B, the
 archived old-structure predictor and the external methods. Formal Arm B reaches
@@ -25,11 +25,14 @@ replacement Future2000 direct-vertex Arm-E job `17888` has now completed all
 200,000 steps, and validation selected epoch 160 (checkpoint SHA-256
 `5a6aaa32bec6edcdd2c30face02c4ae8bc139fef18d4d05b3394c987057cb50f`).
 The new frozen B+E evaluation remains separate and uses an HPC-only sealed
-sequence: job `18673` sweeps lambda on validation, `18677` locks it, `18678`
-opens test once, and `18679` writes the comprehensive baseline report. The two
-GPU arrays retain eight deterministic shards but are capped at four concurrent
-one-GPU tasks. At the status timestamp the validation sweep is running and no
-Arm-E/B+E test metric is claimed. To reproduce the existing Arm-B comparison,
+sequence. Job `18673` completed the validation sweep, and `18677` locked
+`lambda=0.1` at validation mean CD `0.00295644415` without test access. Test
+shards 0–3 completed under `18678`; only unfinished shards 4–7 were resubmitted
+as four-GPU-capped array `18780` after the original pending tasks stalled at a
+dynamically reduced array throttle. The replacement was pending for `Priority`
+at the status snapshot. Job `18679` now depends on `18780_*` and
+will write the comprehensive baseline report after successful completion. No
+aggregate Arm-E/B+E test metric is claimed yet. To reproduce the existing Arm-B comparison,
 download only the test data and completed frozen artifacts:
 
 ```bash
